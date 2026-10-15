@@ -115,25 +115,25 @@ export default function ChatScreen() {
                   <TouchableOpacity
                     key={m.id}
                     style={styles.matchItem}
-                    onPress={() => openConversation(m.id, m.target_profile.display_name, m.target_profile.user_id)}
+                    onPress={() => openConversation(m.id, m.target_profile?.display_name || 'Member', m.target_profile?.user_id || m.target_user_id)}
                     activeOpacity={0.8}
                   >
                     <View style={styles.matchAvatarWrap}>
-                      {m.target_profile.avatar_url ? (
+                      {m.target_profile?.avatar_url ? (
                         <Image source={{ uri: m.target_profile.avatar_url }} style={styles.matchAvatar} />
                       ) : (
                         <View style={[styles.matchAvatar, styles.avatarPlaceholder]}>
-                          <Text style={styles.monogramText}>{m.target_profile.display_name.charAt(0)}</Text>
+                          <Text style={styles.monogramText}>{m.target_profile?.display_name ? m.target_profile.display_name.charAt(0) : 'M'}</Text>
                         </View>
                       )}
-                      {m.target_profile.is_verified && (
+                      {m.target_profile?.is_verified && (
                         <View style={styles.verifiedDot}>
                           <Text style={styles.verifiedDotText}>✓</Text>
                         </View>
                       )}
                     </View>
                     <Text style={styles.matchName} numberOfLines={1}>
-                      {m.target_profile.display_name}
+                      {m.target_profile?.display_name || 'Member'}
                     </Text>
                   </TouchableOpacity>
                 ))}

@@ -2,6 +2,7 @@ import { api } from '../api/client';
 import { config } from '../../config/env';
 import { secureStorage } from '../storage/secureStore';
 import { Match, Conversation, Message } from '../../types';
+import { buildMediaUrl } from '../media/mediaUploader';
 
 export type ConnectionStatus = 'CONNECTED' | 'CONNECTING' | 'RECONNECTING' | 'DISCONNECTED';
 
@@ -67,6 +68,61 @@ export function normalizeMessage(raw: any): Message {
     read_at: raw.read_at || null,
     status,
     created_at: raw.created_at || new Date().toISOString(),
+  };
+}
+
+export function normalizeMatch(raw: any): Match {
+  const targetProf = raw.matched_profile || raw.target_profile || {};
+  const targetId = raw.matched_user_id || raw.target_user_id || targetProf.user_id || '';
+  const photos = Array.isArray(targetProf.photos) ? targetProf.photos : [];
+  const rawAvatar = targetProf.avatar_url || photos[0]?.card_url || photos[0]?.thumb_url || photos[0]?.url || '';
+  const avatarUrl = rawAvatar ? buildMediaUrl(rawAvatar) : undefined;
+
+  return {
+    id: raw.id,
+    user_id: raw.user_id || '',
+    target_user_id: targetId,
+    target_profile: {
+      user_id: targetId,
+      display_name: targetProf.display_name || 'Member',
+      avatar_url: avatarUrl,
+      is_verified: Boolean(targetProf.is_photo_verified || targetProf.is_verified),
+      gender_identities: targetProf.gender_identities,
+    },
+    matched_at: raw.matched_at || new Date().toISOString(),
+  };
+}
+
+export function normalizeConversation(raw: any, currentUserId?: string): Conversation {
+  const partner = raw.partner || {};
+  const partnerId =
+    partner.user_id ||
+    (raw.participant_low_id === currentUserId ? raw.participant_high_id : raw.participant_low_id) ||
+    raw.participant_id ||
+    '';
+  const partnerName = partner.display_name || raw.participant_name || 'Member';
+  const rawAvatar = partner.avatar_url || raw.participant_avatar || '';
+  const partnerAvatar = rawAvatar ? buildMediaUrl(rawAvatar) : undefined;
+  const lastMsg = raw.last_message;
+
+  return {
+    id: raw.id || raw.match_id || '',
+    match_id: raw.match_id || raw.id || '',
+    participant_id: partnerId,
+    participant_name: partnerName,
+    participant_avatar: partnerAvatar,
+    participant_verified: Boolean(partner.is_photo_verified || raw.participant_verified),
+    last_message: lastMsg
+      ? {
+          id: lastMsg.id || '',
+          sender_id: lastMsg.sender_user_id || lastMsg.sender_id || '',
+          content: lastMsg.body !== undefined ? lastMsg.body : lastMsg.content || '',
+          created_at: lastMsg.created_at || new Date().toISOString(),
+          read: Boolean(lastMsg.is_read || lastMsg.read),
+        }
+      : undefined,
+    unread_count: raw.unread_count || 0,
+    updated_at: raw.last_message_at || raw.created_at || new Date().toISOString(),
   };
 }
 
@@ -296,8 +352,8 @@ export const chatService = {
    * Fetches active mutual matches
    */
   async getMatches(): Promise<Match[]> {
-    const res = await api.get<{ matches: Match[] }>('/api/v1/matches');
-    return res.matches || [];
+    const res = await api.get<{ matches: any[] }>('/api/v1/matches');
+    return (res.matches || []).map(normalizeMatch);
   },
 
   /**
@@ -312,8 +368,8 @@ export const chatService = {
    * Fetches active conversation threads with unread indicators
    */
   async getConversations(): Promise<Conversation[]> {
-    const res = await api.get<{ conversations: Conversation[] }>('/api/v1/conversations');
-    return res.conversations || [];
+    const res = await api.get<{ conversations: any[] }>('/api/v1/conversations');
+    return (res.conversations || []).map((c) => normalizeConversation(c));
   },
 
   /**

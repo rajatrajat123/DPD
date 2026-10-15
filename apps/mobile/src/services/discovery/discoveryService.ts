@@ -84,11 +84,20 @@ export const discoveryService = {
    * Submits a swipe action to backend
    */
   async swipe(targetUserId: string, direction: SwipeDirection, introNote?: string): Promise<SwipeResponse> {
-    return api.post<SwipeResponse>('/api/v1/swipes', {
+    const raw = await api.post<any>('/api/v1/swipes', {
       target_user_id: targetUserId,
       direction,
       intro_note: introNote,
     });
+    const isMatch = Boolean(raw.is_mutual_match || raw.matched);
+    const matchId = raw.match_id || raw.match?.id;
+    return {
+      swipe_id: raw.swipe_id || '',
+      is_mutual_match: isMatch,
+      match_id: matchId,
+      conversation_id: raw.conversation_id || matchId,
+      remaining_likes_today: raw.remaining_likes_today ?? (raw.daily_swipes_remaining ?? 9999),
+    };
   },
 
   /**

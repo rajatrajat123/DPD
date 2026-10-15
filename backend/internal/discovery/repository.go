@@ -1454,6 +1454,16 @@ func (p *PostgresRepository) CreateSwipe(ctx context.Context, actorID, targetID 
 		return false, nil, false, fmt.Errorf("failed to create mutual match: %w", err)
 	}
 
+	// Ensure conversation thread exists for the new mutual match
+	convQuery := `
+		INSERT INTO conversations (match_id, created_at)
+		VALUES ($1, $2)
+		ON CONFLICT (match_id) DO NOTHING
+	`
+	if _, err := tx.Exec(ctx, convQuery, m.ID, m.MatchedAt); err != nil {
+		return false, nil, false, fmt.Errorf("failed to create conversation for match: %w", err)
+	}
+
 	// Emit match.created.v1 into outbox_events inside same database transaction
 	payload, _ := json.Marshal(map[string]any{
 		"match_id":    m.ID,

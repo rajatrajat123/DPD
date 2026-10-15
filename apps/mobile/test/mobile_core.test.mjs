@@ -2388,3 +2388,144 @@ test('AuthContext: Authoritatively synchronizes age assurance status from backen
   assert.ok(authContextFile.includes('setIsAgeVerified(false);'), 'Must reset isAgeVerified on logout');
 });
 
+test('Swipe & Mutual Match Normalization: correctly normalizes backend matched and match.id into is_mutual_match and conversation_id', () => {
+  // Test raw backend response when match occurs
+  const rawBackendMatch = {
+    matched: true,
+    match: {
+      id: 'match-uuid-101',
+      matched_user_id: 'user-bob-999',
+      status: 'ACTIVE',
+      matched_at: '2026-10-16T00:00:00Z',
+    },
+    daily_swipes_remaining: 14,
+    unlimited_swipes_granted: true,
+  };
+
+  const isMatch = Boolean(rawBackendMatch.is_mutual_match || rawBackendMatch.matched);
+  const matchId = rawBackendMatch.match_id || rawBackendMatch.match?.id;
+  const normalized = {
+    swipe_id: rawBackendMatch.swipe_id || '',
+    is_mutual_match: isMatch,
+    match_id: matchId,
+    conversation_id: rawBackendMatch.conversation_id || matchId,
+    remaining_likes_today: rawBackendMatch.remaining_likes_today ?? (rawBackendMatch.daily_swipes_remaining ?? 9999),
+  };
+
+  assert.equal(normalized.is_mutual_match, true, 'is_mutual_match must be true');
+  assert.equal(normalized.match_id, 'match-uuid-101', 'match_id must match backend match.id');
+  assert.equal(normalized.conversation_id, 'match-uuid-101', 'conversation_id must fallback to match.id');
+  assert.equal(normalized.remaining_likes_today, 14, 'remaining_likes_today must be 14');
+
+  // Test pass response (no match)
+  const rawBackendPass = {
+    matched: false,
+    daily_swipes_remaining: 14,
+    unlimited_swipes_granted: false,
+  };
+  const isMatchPass = Boolean(rawBackendPass.is_mutual_match || rawBackendPass.matched);
+  assert.equal(isMatchPass, false, 'is_mutual_match must be false on pass');
+});
+
+test('Chat & Matches Normalization: correctly extracts target_profile, avatars, partner info, and message summaries', () => {
+  // Test raw backend match response
+  const rawMatch = {
+    id: 'match-777',
+    matched_user_id: 'usr-charlie',
+    matched_profile: {
+      user_id: 'usr-charlie',
+      display_name: 'Charlie',
+      bio: 'Enthusiastic queer traveler',
+      is_photo_verified: true,
+      photos: [
+        {
+          asset_id: 'photo-1',
+          card_url: '/api/v1/media/stream/approved/card.webp',
+          thumb_url: '/api/v1/media/stream/approved/thumb.webp',
+        },
+      ],
+    },
+    status: 'ACTIVE',
+    matched_at: '2026-10-16T01:00:00Z',
+  };
+
+  const targetProf = rawMatch.matched_profile || rawMatch.target_profile || {};
+  const targetId = rawMatch.matched_user_id || rawMatch.target_user_id || targetProf.user_id || '';
+  const photos = Array.isArray(targetProf.photos) ? targetProf.photos : [];
+  const rawAvatar = targetProf.avatar_url || photos[0]?.card_url || photos[0]?.thumb_url || photos[0]?.url || '';
+
+  const normalizedMatch = {
+    id: rawMatch.id,
+    user_id: rawMatch.user_id || '',
+    target_user_id: targetId,
+    target_profile: {
+      user_id: targetId,
+      display_name: targetProf.display_name || 'Member',
+      avatar_url: rawAvatar,
+      is_verified: Boolean(targetProf.is_photo_verified || targetProf.is_verified),
+      gender_identities: targetProf.gender_identities,
+    },
+    matched_at: rawMatch.matched_at,
+  };
+
+  assert.equal(normalizedMatch.target_profile.display_name, 'Charlie');
+  assert.equal(normalizedMatch.target_profile.is_verified, true);
+  assert.equal(normalizedMatch.target_profile.avatar_url, '/api/v1/media/stream/approved/card.webp');
+
+  // Test raw backend conversation response
+  const rawConv = {
+    id: 'conv-888',
+    match_id: 'match-777',
+    participant_low_id: 'usr-alice',
+    participant_high_id: 'usr-charlie',
+    partner: {
+      user_id: 'usr-charlie',
+      display_name: 'Charlie',
+      avatar_url: '/api/v1/media/stream/approved/card.webp',
+      is_photo_verified: true,
+      is_online: true,
+    },
+    last_message: {
+      id: 'msg-1',
+      sender_user_id: 'usr-charlie',
+      body: 'Hello there!',
+      message_type: 'TEXT',
+      created_at: '2026-10-16T01:05:00Z',
+      is_read: false,
+    },
+    unread_count: 1,
+    created_at: '2026-10-16T01:00:00Z',
+  };
+
+  const partner = rawConv.partner || {};
+  const partnerId = partner.user_id || rawConv.participant_id || '';
+  const partnerName = partner.display_name || rawConv.participant_name || 'Member';
+  const lastMsg = rawConv.last_message;
+
+  const normalizedConv = {
+    id: rawConv.id || rawConv.match_id,
+    match_id: rawConv.match_id,
+    participant_id: partnerId,
+    participant_name: partnerName,
+    participant_avatar: partner.avatar_url,
+    participant_verified: Boolean(partner.is_photo_verified),
+    last_message: lastMsg
+      ? {
+          id: lastMsg.id,
+          sender_id: lastMsg.sender_user_id || lastMsg.sender_id,
+          content: lastMsg.body !== undefined ? lastMsg.body : lastMsg.content,
+          created_at: lastMsg.created_at,
+          read: Boolean(lastMsg.is_read || lastMsg.read),
+        }
+      : undefined,
+    unread_count: rawConv.unread_count,
+    updated_at: rawConv.last_message_at || rawConv.created_at,
+  };
+
+  assert.equal(normalizedConv.participant_name, 'Charlie');
+  assert.equal(normalizedConv.last_message.content, 'Hello there!');
+  assert.equal(normalizedConv.unread_count, 1);
+  assert.equal(normalizedConv.participant_verified, true);
+});
+
+

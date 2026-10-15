@@ -85,7 +85,7 @@ func (r *PostgresRepository) GetConversation(ctx context.Context, conversationID
 		SELECT c.id, c.match_id, m.user_low_id, m.user_high_id, m.status, c.last_message_at, c.created_at
 		FROM conversations c
 		JOIN matches m ON m.id = c.match_id
-		WHERE c.id = $1
+		WHERE c.id = $1 OR c.match_id = $1
 	`
 	var (
 		conv        Conversation
@@ -102,6 +102,11 @@ func (r *PostgresRepository) GetConversation(ctx context.Context, conversationID
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
+			// Check if conversationID is a match_id and create/fetch conversation row
+			createdConv, createErr := r.GetOrCreateConversationForMatch(ctx, conversationID)
+			if createErr == nil && createdConv != nil {
+				return createdConv, nil
+			}
 			return nil, ErrConversationNotFound
 		}
 		return nil, fmt.Errorf("failed to get conversation: %w", err)
@@ -181,6 +186,13 @@ func (r *PostgresRepository) ListConversationsForUser(ctx context.Context, userI
 			if createdAt != nil {
 				c.CreatedAt = *createdAt
 			}
+		} else {
+			// Ensure conversation row exists in DB
+			createdConv, cErr := r.GetOrCreateConversationForMatch(ctx, c.MatchID)
+			if cErr == nil && createdConv != nil {
+				c.ID = createdConv.ID
+				c.CreatedAt = createdConv.CreatedAt
+			}
 		}
 
 		if len(lastMsgJSON) > 0 {
@@ -197,6 +209,11 @@ func (r *PostgresRepository) ListConversationsForUser(ctx context.Context, userI
 }
 
 func (r *PostgresRepository) SaveMessage(ctx context.Context, msg *Message) (*Message, bool, error) {
+	// Ensure conversation exists and resolve to real conversation_id if match_id was supplied
+	if conv, convErr := r.GetConversation(ctx, msg.ConversationID); convErr == nil && conv != nil {
+		msg.ConversationID = conv.ID
+	}
+
 	tx, err := r.pool.Begin(ctx)
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to begin transaction: %w", err)
@@ -323,6 +340,11 @@ func (r *PostgresRepository) SaveMessage(ctx context.Context, msg *Message) (*Me
 }
 
 func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID string, beforeID string, limit int) ([]*Message, string, bool, error) {
+	// Resolve conversationID if match_id was supplied
+	if conv, convErr := r.GetConversation(ctx, conversationID); convErr == nil && conv != nil {
+		conversationID = conv.ID
+	}
+
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
@@ -399,6 +421,11 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 }
 
 func (r *PostgresRepository) MarkMessagesRead(ctx context.Context, conversationID, readerUserID string) (int, error) {
+	// Resolve conversationID if match_id was supplied
+	if conv, convErr := r.GetConversation(ctx, conversationID); convErr == nil && conv != nil {
+		conversationID = conv.ID
+	}
+
 	query := `
 		UPDATE messages
 		SET read_at = NOW()
@@ -423,9 +450,9 @@ func (r *PostgresRepository) MarkMessageDelivered(ctx context.Context, messageID
 func (r *PostgresRepository) VerifyConversationMembership(ctx context.Context, conversationID, userID string) (bool, error) {
 	query := `
 		SELECT 1
-		FROM conversations c
-		JOIN matches m ON m.id = c.match_id
-		WHERE c.id = $1 AND (m.user_low_id = $2 OR m.user_high_id = $2)
+		FROM matches m
+		LEFT JOIN conversations c ON c.match_id = m.id
+		WHERE (c.id = $1 OR m.id = $1) AND (m.user_low_id = $2 OR m.user_high_id = $2)
 	`
 	var exists int
 	err := r.pool.QueryRow(ctx, query, conversationID, userID).Scan(&exists)
@@ -441,9 +468,9 @@ func (r *PostgresRepository) VerifyConversationMembership(ctx context.Context, c
 func (r *PostgresRepository) CheckActiveMatchEligibility(ctx context.Context, conversationID, userID string) (bool, error) {
 	query := `
 		SELECT m.user_low_id, m.user_high_id, m.status
-		FROM conversations c
-		JOIN matches m ON m.id = c.match_id
-		WHERE c.id = $1 AND (m.user_low_id = $2 OR m.user_high_id = $2)
+		FROM matches m
+		LEFT JOIN conversations c ON c.match_id = m.id
+		WHERE (c.id = $1 OR m.id = $1) AND (m.user_low_id = $2 OR m.user_high_id = $2)
 	`
 	var (
 		lowID, highID, status string
@@ -580,10 +607,22 @@ func (m *MemoryRepository) GetOrCreateConversationForMatch(ctx context.Context, 
 }
 
 func (m *MemoryRepository) GetConversation(ctx context.Context, conversationID string) (*Conversation, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
 	c, ok := m.convs[conversationID]
+	if !ok {
+		if convID, exists := m.convByMatch[conversationID]; exists {
+			c, ok = m.convs[convID], true
+		} else if _, matchExists := m.matches[conversationID]; matchExists {
+			m.mu.Unlock()
+			conv, err := m.GetOrCreateConversationForMatch(ctx, conversationID)
+			m.mu.Lock()
+			if err == nil && conv != nil {
+				return conv, nil
+			}
+		}
+	}
 	if !ok {
 		return nil, ErrConversationNotFound
 	}
@@ -683,6 +722,12 @@ func (m *MemoryRepository) SaveMessage(ctx context.Context, msg *Message) (*Mess
 
 	c, ok := m.convs[msg.ConversationID]
 	if !ok {
+		if convID, exists := m.convByMatch[msg.ConversationID]; exists {
+			c, ok = m.convs[convID], true
+			msg.ConversationID = convID
+		}
+	}
+	if !ok {
 		return nil, false, ErrConversationNotFound
 	}
 
@@ -747,6 +792,11 @@ func (m *MemoryRepository) ListMessages(ctx context.Context, conversationID stri
 
 	msgs, ok := m.messages[conversationID]
 	if !ok {
+		if convID, exists := m.convByMatch[conversationID]; exists {
+			msgs, ok = m.messages[convID]
+		}
+	}
+	if !ok {
 		return nil, "", false, ErrConversationNotFound
 	}
 
@@ -787,6 +837,11 @@ func (m *MemoryRepository) MarkMessagesRead(ctx context.Context, conversationID,
 
 	msgs, ok := m.messages[conversationID]
 	if !ok {
+		if convID, exists := m.convByMatch[conversationID]; exists {
+			msgs, ok = m.messages[convID]
+		}
+	}
+	if !ok {
 		return 0, ErrConversationNotFound
 	}
 
@@ -823,6 +878,11 @@ func (m *MemoryRepository) VerifyConversationMembership(ctx context.Context, con
 
 	c, ok := m.convs[conversationID]
 	if !ok {
+		if convID, exists := m.convByMatch[conversationID]; exists {
+			c, ok = m.convs[convID], true
+		}
+	}
+	if !ok {
 		return false, nil
 	}
 	return c.IsParticipant(userID), nil
@@ -833,6 +893,11 @@ func (m *MemoryRepository) CheckActiveMatchEligibility(ctx context.Context, conv
 	defer m.mu.RUnlock()
 
 	c, ok := m.convs[conversationID]
+	if !ok {
+		if convID, exists := m.convByMatch[conversationID]; exists {
+			c, ok = m.convs[convID], true
+		}
+	}
 	if !ok {
 		return false, nil
 	}
