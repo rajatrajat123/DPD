@@ -5,11 +5,15 @@ import {
   SwipeDirection,
   SwipeResponse,
   RewindResponse,
+  ProfilePhoto,
 } from '../../types';
+import { buildMediaUrl } from '../media/mediaUploader';
 
 export interface FeedResponse {
   candidates: DiscoveryCandidate[];
   next_cursor?: string;
+  count?: number;
+  empty_state_reason?: string;
   dealbreakers_applied?: boolean;
 }
 
@@ -24,10 +28,56 @@ export const discoveryService = {
    * Fetches discovery feed adhering strictly to server-side dealbreakers
    */
   async getFeed(limit = 20, cursor?: string): Promise<FeedResponse> {
-    return api.get<FeedResponse>('/api/v1/discovery/feed', {
+    const res = await api.get<{
+      candidates?: any[];
+      next_cursor?: string;
+      count?: number;
+      empty_state_reason?: string;
+    }>('/api/v1/discovery/feed', {
       limit,
       cursor,
     });
+
+    const candidates: DiscoveryCandidate[] = (res.candidates || []).map((raw: any) => {
+      const rawPhotos = Array.isArray(raw.photos) ? raw.photos : [];
+      const photos: ProfilePhoto[] = rawPhotos.map((p: any, idx: number) => {
+        const rawUrl = p.card_url || p.full_url || p.url || p.thumb_url || '';
+        const rawThumb = p.thumb_url || p.card_url || p.url || '';
+        return {
+          id: p.asset_id || p.id || `photo_${idx}`,
+          url: buildMediaUrl(rawUrl),
+          thumb_url: rawThumb ? buildMediaUrl(rawThumb) : undefined,
+          is_primary: idx === 0,
+          order: p.order ?? idx,
+        };
+      });
+
+      return {
+        id: raw.user_id || raw.id,
+        user_id: raw.user_id || raw.id,
+        display_name: raw.display_name || '',
+        age: raw.age || 0,
+        bio: raw.bio || '',
+        pronouns: raw.pronouns || [],
+        gender_identities: raw.gender_identities || [],
+        sexual_orientations: raw.sexual_orientations || [],
+        relationship_intents: raw.relationship_intents || [],
+        smoking_preference: raw.smoking_habit || raw.smoking_preference || 'NON_SMOKER',
+        distance_bucket_km: raw.approximate_distance_km ?? raw.distance_bucket_km ?? 1,
+        photos,
+        compatibility_score: raw.compatibility_score || 0,
+        is_verified: Boolean(raw.is_photo_verified || raw.is_verified),
+        relationship_structure: raw.relationship_structure,
+      };
+    });
+
+    return {
+      candidates,
+      next_cursor: res.next_cursor,
+      count: res.count ?? candidates.length,
+      empty_state_reason: res.empty_state_reason,
+      dealbreakers_applied: true,
+    };
   },
 
   /**

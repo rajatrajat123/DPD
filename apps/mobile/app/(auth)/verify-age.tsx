@@ -69,6 +69,29 @@ export default function VerifyAgeScreen() {
     }
   };
 
+  const handleCheckStatus = async () => {
+    try {
+      setLoading(true);
+      const statusRes = await authService.getAgeAssuranceStatus();
+      if (statusRes && statusRes.status === 'VERIFIED') {
+        await refreshProfile();
+        setStep('VERIFIED');
+      } else if (statusRes && statusRes.status === 'REJECTED') {
+        Alert.alert(
+          'Verification Unsuccessful',
+          'Age assurance could not verify adult status. Please submit a new selfie with clear lighting.'
+        );
+        setStep('INFO');
+      } else {
+        Alert.alert('Status: Pending', 'Your verification is still under review. Please check back shortly.');
+      }
+    } catch {
+      Alert.alert('Status Check Failed', 'Could not reach verification service. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.header}>
@@ -161,10 +184,23 @@ export default function VerifyAgeScreen() {
 
           <TouchableOpacity
             style={styles.primaryButton}
-            onPress={() => router.replace('/(tabs)')}
+            onPress={handleCheckStatus}
+            disabled={loading}
             activeOpacity={0.8}
           >
-            <Text style={styles.primaryButtonText}>Continue to Aura</Text>
+            {loading ? (
+              <ActivityIndicator color={colors.textInverse} />
+            ) : (
+              <Text style={styles.primaryButtonText}>Check Status</Text>
+            )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={() => router.replace('/(tabs)')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.cancelButtonText}>Return to App</Text>
           </TouchableOpacity>
         </View>
       )}

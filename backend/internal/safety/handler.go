@@ -103,6 +103,9 @@ func (h *Handler) AgeVerificationWebhook(w http.ResponseWriter, r *http.Request)
 	if signature == "" {
 		signature = r.Header.Get("X-Age-Signature")
 	}
+	if signature == "" {
+		signature = r.Header.Get("Aura-Age-Signature")
+	}
 
 	res, err := h.svc.ProcessAgeVerificationWebhook(r.Context(), payload, signature)
 	if err != nil {

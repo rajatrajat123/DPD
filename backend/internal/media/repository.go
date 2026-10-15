@@ -239,15 +239,17 @@ func (p *PostgresMediaRepository) CreateAsset(ctx context.Context, asset *MediaA
 			owner_user_id, media_type, purpose, status,
 			quarantine_bucket, quarantine_key, original_sha256, original_mime,
 			original_size_bytes, width_px, height_px, duration_ms,
-			exif_stripped, moderation_verdict, original_purge_after, idempotency_key
+			exif_stripped, moderation_verdict, original_purge_after, idempotency_key,
+			display_order
 		) VALUES (
 			$1, $2, $3, $4,
 			$5, $6, $7, $8,
 			$9, $10, $11, $12,
-			$13, $14, $15, $16
+			$13, $14, $15, $16,
+			$17
 		)
 		ON CONFLICT (idempotency_key) DO UPDATE
-			SET updated_at = NOW()
+			SET updated_at = NOW(), display_order = EXCLUDED.display_order
 		RETURNING id, created_at, updated_at
 	`
 	return p.pool.QueryRow(ctx, query,
@@ -255,6 +257,7 @@ func (p *PostgresMediaRepository) CreateAsset(ctx context.Context, asset *MediaA
 		asset.QuarantineBucket, asset.QuarantineKey, asset.OriginalSHA256, asset.OriginalMIME,
 		asset.OriginalSizeBytes, asset.WidthPx, asset.HeightPx, asset.DurationMs,
 		asset.ExifStripped, asset.ModerationVerdict, asset.OriginalPurgeAfter, asset.IdempotencyKey,
+		asset.DisplayOrder,
 	).Scan(&asset.ID, &asset.CreatedAt, &asset.UpdatedAt)
 }
 
@@ -265,7 +268,7 @@ func (p *PostgresMediaRepository) GetAssetByID(ctx context.Context, id string) (
 			quarantine_bucket, quarantine_key, original_sha256, original_mime,
 			original_size_bytes, width_px, height_px, duration_ms,
 			exif_stripped, moderation_verdict, original_purge_after, idempotency_key,
-			created_at, updated_at
+			created_at, updated_at, display_order
 		FROM media_assets
 		WHERE id = $1 AND status <> 'PURGED'
 	`
@@ -278,7 +281,7 @@ func (p *PostgresMediaRepository) GetAssetByID(ctx context.Context, id string) (
 		&a.QuarantineBucket, &a.QuarantineKey, &a.OriginalSHA256, &a.OriginalMIME,
 		&a.OriginalSizeBytes, &a.WidthPx, &a.HeightPx, &a.DurationMs,
 		&a.ExifStripped, &verdict, &a.OriginalPurgeAfter, &a.IdempotencyKey,
-		&a.CreatedAt, &a.UpdatedAt,
+		&a.CreatedAt, &a.UpdatedAt, &a.DisplayOrder,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -304,7 +307,7 @@ func (p *PostgresMediaRepository) GetAssetByIdempotencyKey(ctx context.Context, 
 			quarantine_bucket, quarantine_key, original_sha256, original_mime,
 			original_size_bytes, width_px, height_px, duration_ms,
 			exif_stripped, moderation_verdict, original_purge_after, idempotency_key,
-			created_at, updated_at
+			created_at, updated_at, display_order
 		FROM media_assets
 		WHERE idempotency_key = $1 AND status <> 'PURGED'
 	`
@@ -317,7 +320,7 @@ func (p *PostgresMediaRepository) GetAssetByIdempotencyKey(ctx context.Context, 
 		&a.QuarantineBucket, &a.QuarantineKey, &a.OriginalSHA256, &a.OriginalMIME,
 		&a.OriginalSizeBytes, &a.WidthPx, &a.HeightPx, &a.DurationMs,
 		&a.ExifStripped, &verdict, &a.OriginalPurgeAfter, &a.IdempotencyKey,
-		&a.CreatedAt, &a.UpdatedAt,
+		&a.CreatedAt, &a.UpdatedAt, &a.DisplayOrder,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

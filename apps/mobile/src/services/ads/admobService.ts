@@ -1,6 +1,7 @@
 import { NativeModules, Platform } from 'react-native';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { api } from '../api/client';
+import { secureStorage } from '../storage/secureStore';
 
 export const isExpoGo = Boolean(
   Constants?.appOwnership === 'expo' ||
@@ -356,26 +357,106 @@ class AdMobService {
 export const admobService = new AdMobService();
 
 /**
- * AdBreakManager enforces discovery ad cadence rules:
- * - Introductory 30-day period: 1st ad after 20 profile swipes, then an ad break every 30 swipes.
- * - Post-introductory: ad break every 30 swipes.
- * - Reset the counter after each ad break.
- * - Separate ad counters from like quotas (counts both PASS and LIKE towards ad cadence).
+ * AdBreakManager enforces discovery ad cadence rules (Phase 6):
+ * 1. During the first introductory month, show the first required ad after 15 viewed/swiped profiles.
+ * 2. Reset the profile counter to zero only after the user successfully completes the required ad.
+ * 3. Show the next required ad after 35 additional profiles.
+ * 4. Continue the 35-profile cadence for subsequent completed ads.
+ * 5. Do not count the same profile multiple times because of rerenders, retries, or pagination.
+ * 6. Preserve counter state across navigation and app restarts.
+ * 7. Do not treat a displayed, skipped, failed, or incomplete ad as a completed ad.
  */
 export class AdBreakManager {
   private swipeCount = 0;
-  private firstAdShown = false;
+  private firstAdCompleted = false;
+  private viewedProfileIds = new Set<string>();
+  private isHydrated = false;
 
-  recordSwipe(isIntroductory: boolean = false): boolean {
-    this.swipeCount += 1;
-    const threshold = isIntroductory && !this.firstAdShown ? 20 : 30;
+  constructor() {
+    this.hydrate();
+  }
 
-    if (this.swipeCount >= threshold) {
-      this.swipeCount = 0;
-      this.firstAdShown = true;
-      return true;
+  private async hydrate(): Promise<void> {
+    try {
+      const storedCount = await secureStorage.getItem('aura_ad_swipe_count');
+      const storedFirstAd = await secureStorage.getItem('aura_ad_first_completed');
+      const storedProfiles = await secureStorage.getItem('aura_ad_viewed_profiles');
+      if (storedCount !== null) {
+        const parsed = parseInt(storedCount, 10);
+        if (!isNaN(parsed)) this.swipeCount = parsed;
+      }
+      if (storedFirstAd !== null) {
+        this.firstAdCompleted = storedFirstAd === 'true';
+      }
+      if (storedProfiles) {
+        try {
+          const ids = JSON.parse(storedProfiles);
+          if (Array.isArray(ids)) {
+            this.viewedProfileIds = new Set(ids);
+          }
+        } catch {}
+      }
+    } catch {}
+    this.isHydrated = true;
+  }
+
+  private async persist(): Promise<void> {
+    try {
+      await secureStorage.setItem('aura_ad_swipe_count', String(this.swipeCount));
+      await secureStorage.setItem('aura_ad_first_completed', this.firstAdCompleted ? 'true' : 'false');
+      await secureStorage.setItem('aura_ad_viewed_profiles', JSON.stringify(Array.from(this.viewedProfileIds)));
+    } catch {}
+  }
+
+  /**
+   * Records a viewed/swiped profile by ID.
+   * Prevents counting the same profile multiple times (due to rerenders, retries, or pagination).
+   * Returns true if the required ad threshold has been reached.
+   */
+  recordProfileView(profileId?: string, isIntroductory: boolean = false): boolean {
+    if (profileId) {
+      if (this.viewedProfileIds.has(profileId)) {
+        return this.shouldShowRequiredAd(isIntroductory);
+      }
+      this.viewedProfileIds.add(profileId);
     }
-    return false;
+    this.swipeCount += 1;
+    this.persist();
+    return this.shouldShowRequiredAd(isIntroductory);
+  }
+
+  /**
+   * Backwards-compatible alias for recordProfileView
+   */
+  recordSwipe(isIntroductory: boolean = false, profileId?: string): boolean {
+    return this.recordProfileView(profileId, isIntroductory);
+  }
+
+  /**
+   * Checks whether the current swipe count meets the threshold for a required ad.
+   * - 1st ad in introductory month: 15 profiles
+   * - Subsequent ads: 35 profiles
+   */
+  shouldShowRequiredAd(isIntroductory: boolean = false): boolean {
+    const threshold = isIntroductory && !this.firstAdCompleted ? 15 : 35;
+    return this.swipeCount >= threshold;
+  }
+
+  /**
+   * Resets the profile counter to zero ONLY after the user successfully completes the required ad.
+   */
+  async onAdCompleted(): Promise<void> {
+    this.swipeCount = 0;
+    this.firstAdCompleted = true;
+    this.viewedProfileIds.clear();
+    await this.persist();
+  }
+
+  /**
+   * Called when an ad fails, is skipped, or is incomplete. Counter is NOT reset.
+   */
+  onAdFailed(): void {
+    // Preserves counter so next view will re-prompt for required ad completion
   }
 
   getSwipeCount(): number {
@@ -383,12 +464,18 @@ export class AdBreakManager {
   }
 
   isFirstAdTriggered(): boolean {
-    return this.firstAdShown;
+    return this.firstAdCompleted;
+  }
+
+  isFirstAdCompleted(): boolean {
+    return this.firstAdCompleted;
   }
 
   reset(): void {
     this.swipeCount = 0;
-    this.firstAdShown = false;
+    this.firstAdCompleted = false;
+    this.viewedProfileIds.clear();
+    this.persist();
   }
 }
 

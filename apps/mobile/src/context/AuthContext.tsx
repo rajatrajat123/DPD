@@ -27,12 +27,37 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [profile, setProfile] = useState<Profile | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [biometricLocked, setBiometricLocked] = useState<boolean>(false);
+  const [isAgeVerified, setIsAgeVerified] = useState<boolean>(false);
 
   const refreshProfile = useCallback(async () => {
     try {
       const res = await authService.getMyProfile();
+      let verified = Boolean(res.user?.is_age_verified || res.profile?.is_age_verified);
+
+      try {
+        const ageStatus = await authService.getAgeAssuranceStatus();
+        if (ageStatus?.status === 'VERIFIED') {
+          verified = true;
+        } else if (ageStatus?.status === 'REJECTED' || ageStatus?.status === 'PENDING') {
+          verified = false;
+        }
+        if (res.profile && ageStatus?.status) {
+          res.profile.verification_status = ageStatus.status as any;
+        }
+      } catch {
+        // Retain existing flag if status endpoint is temporarily unreachable
+      }
+
+      if (res.user) {
+        res.user.is_age_verified = verified;
+      }
+      if (res.profile) {
+        res.profile.is_age_verified = verified;
+      }
+
       setUser(res.user);
       setProfile(res.profile);
+      setIsAgeVerified(verified);
     } catch {
       // Session may be invalid
     }
@@ -108,6 +133,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await authService.logout();
       setUser(null);
       setProfile(null);
+      setIsAgeVerified(false);
       setBiometricLocked(false);
     } finally {
       setIsLoading(false);
@@ -125,8 +151,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const setBiometricLock = async (enabled: boolean) => {
     await secureStorage.setBiometricEnabled(enabled);
   };
-
-  const isAgeVerified = Boolean(user?.is_age_verified || profile?.is_age_verified);
 
   return (
     <AuthContext.Provider

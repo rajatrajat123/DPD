@@ -82,8 +82,8 @@ func TestPostgres_IntegrationGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to retrieve migration status: %v", err)
 	}
-	if len(statuses) != 12 {
-		t.Fatalf("expected 12 migration status records, got %d", len(statuses))
+	if len(statuses) != len(migrator.Migrations()) {
+		t.Fatalf("expected %d migration status records, got %d", len(migrator.Migrations()), len(statuses))
 	}
 	for _, st := range statuses {
 		if !st.Applied || st.AppliedAt == nil {

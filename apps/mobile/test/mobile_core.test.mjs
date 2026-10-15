@@ -783,59 +783,101 @@ test('Bonus Likes from Rewarded Ads: grants +5 likes exclusively usable on photo
 });
 
 // --- Test 17: Discovery Ad Cadence (AdBreakManager) & Counter Reset Rules ---
-test('Ad Cadence & Reset Rules: 1st ad after 20 swipes in intro, then every 30 swipes, reset after each break', () => {
+test('Ad Cadence & Reset Rules: 1st ad after 15 in intro, 35 subsequent, reset only on ad completion, and deduplication', () => {
   class AdBreakManager {
     constructor() {
       this.swipeCount = 0;
-      this.firstAdShown = false;
+      this.firstAdCompleted = false;
+      this.viewedProfileIds = new Set();
     }
 
-    recordSwipe(isIntroductory = false) {
-      this.swipeCount += 1;
-      const threshold = isIntroductory && !this.firstAdShown ? 20 : 30;
-      if (this.swipeCount >= threshold) {
-        this.swipeCount = 0;
-        this.firstAdShown = true;
-        return true;
+    recordProfileView(profileId, isIntroductory = false) {
+      if (profileId) {
+        if (this.viewedProfileIds.has(profileId)) {
+          return this.shouldShowRequiredAd(isIntroductory);
+        }
+        this.viewedProfileIds.add(profileId);
       }
-      return false;
+      this.swipeCount += 1;
+      return this.shouldShowRequiredAd(isIntroductory);
+    }
+
+    recordSwipe(isIntroductory = false, profileId) {
+      return this.recordProfileView(profileId, isIntroductory);
+    }
+
+    shouldShowRequiredAd(isIntroductory = false) {
+      const threshold = isIntroductory && !this.firstAdCompleted ? 15 : 35;
+      return this.swipeCount >= threshold;
+    }
+
+    onAdCompleted() {
+      this.swipeCount = 0;
+      this.firstAdCompleted = true;
+      this.viewedProfileIds.clear();
+    }
+
+    onAdFailed() {
+      // Counter is NOT reset on failed/skipped ad
     }
 
     reset() {
       this.swipeCount = 0;
-      this.firstAdShown = false;
+      this.firstAdCompleted = false;
+      this.viewedProfileIds.clear();
     }
   }
 
   const manager = new AdBreakManager();
 
-  // Phase 1: Introductory period - first ad must trigger at exactly 20 swipes
+  // Phase 1: Introductory period - first ad must trigger at exactly 15 profiles
   let triggeredAt = [];
-  for (let i = 1; i <= 20; i++) {
-    const triggered = manager.recordSwipe(true);
+  for (let i = 1; i <= 15; i++) {
+    const triggered = manager.recordProfileView(`candidate_intro_${i}`, true);
     if (triggered) triggeredAt.push(i);
   }
-  assert.deepEqual(triggeredAt, [20], 'First intro ad must trigger at swipe 20');
-  assert.equal(manager.swipeCount, 0, 'Counter must reset to 0 after first ad break');
+  assert.deepEqual(triggeredAt, [15], 'First intro ad must trigger at profile 15');
+  assert.equal(manager.swipeCount, 15, 'Counter must NOT reset before ad is completed');
 
-  // Phase 2: After first intro ad - next ad break must trigger after 30 additional swipes (at swipe 30)
+  // If ad fails or is skipped, counter remains at 15 and re-prompts
+  manager.onAdFailed();
+  assert.equal(manager.swipeCount, 15, 'Failed ad must not reset counter');
+  assert.equal(manager.shouldShowRequiredAd(true), true, 'Still requires ad completion');
+
+  // Ad successfully completed -> resets counter to 0
+  manager.onAdCompleted();
+  assert.equal(manager.swipeCount, 0, 'Counter must reset to 0 only after successful ad completion');
+  assert.equal(manager.firstAdCompleted, true, 'First ad marked completed');
+
+  // Phase 2: Deduplication - re-viewing the same candidate does not increment count
+  manager.recordProfileView('candidate_seen_again', true);
+  assert.equal(manager.swipeCount, 1, 'First view increments count');
+  manager.recordProfileView('candidate_seen_again', true);
+  assert.equal(manager.swipeCount, 1, 'Duplicate profile view must not increment counter');
+
+  // Phase 3: Second intro ad - must trigger after 35 additional profiles
   triggeredAt = [];
-  for (let i = 1; i <= 30; i++) {
-    const triggered = manager.recordSwipe(true);
+  for (let i = 2; i <= 35; i++) {
+    const triggered = manager.recordProfileView(`candidate_phase2_${i}`, true);
     if (triggered) triggeredAt.push(i);
   }
-  assert.deepEqual(triggeredAt, [30], 'Second intro ad must trigger after 30 additional swipes');
-  assert.equal(manager.swipeCount, 0, 'Counter must reset to 0 after second ad break');
+  assert.deepEqual(triggeredAt, [35], 'Second intro ad must trigger after 35 additional profiles');
+  manager.onAdCompleted();
+  assert.equal(manager.swipeCount, 0, 'Counter resets after second ad completion');
 
-  // Phase 3: Post-introductory period - ad break occurs after every 30 swipes
+  // Phase 4: Post-introductory period - ad break occurs after every 35 profiles
   const postIntroManager = new AdBreakManager();
+  postIntroManager.firstAdCompleted = true; // post-intro
   triggeredAt = [];
-  for (let i = 1; i <= 65; i++) {
-    const triggered = postIntroManager.recordSwipe(false);
-    if (triggered) triggeredAt.push(i);
+  for (let i = 1; i <= 80; i++) {
+    const triggered = postIntroManager.recordProfileView(`candidate_post_${i}`, false);
+    if (triggered) {
+      triggeredAt.push(i);
+      postIntroManager.onAdCompleted();
+    }
   }
-  assert.deepEqual(triggeredAt, [30, 60], 'Post-intro ads must trigger every 30 swipes');
-  assert.equal(postIntroManager.swipeCount, 5, 'Remaining swipe count should be 5 after 65 swipes');
+  assert.deepEqual(triggeredAt, [35, 70], 'Post-intro ads must trigger every 35 profiles');
+  assert.equal(postIntroManager.swipeCount, 10, 'Remaining swipe count should be 10 after 80 profiles (35 + 35 + 10)');
 });
 
 // --- Test 18: Native Sponsored Card & Anti-Disguise Invariant ---
@@ -2222,3 +2264,127 @@ test('Mobile UI Redesign: enforces 5-tab bottom navigation, theme palette, and s
   assert.ok(profileFile.includes('Profile Gallery'), 'Profile must keep working gallery');
   assert.ok(profileFile.includes('Non-Smoker Dealbreaker'), 'Profile must keep dealbreaker controls');
 });
+
+// --- Test 25: Discovery Feed Normalization & Dedicated Age-Assurance Locked State ---
+test('Discovery Feed: Candidate normalization correctly maps backend fields, URLs, and dealbreakers', () => {
+  const rawBackendCandidate = {
+    user_id: 'cand-uuid-1234',
+    display_name: 'Morgan',
+    age: 27,
+    bio: 'Art and coffee enthusiast',
+    pronouns: ['they', 'them'],
+    gender_identities: ['non-binary'],
+    sexual_orientations: ['queer'],
+    relationship_intents: ['long-term'],
+    relationship_structure: 'MONOGAMOUS',
+    smoking_habit: 'NON_SMOKER',
+    drinking_habit: 'SOCIALLY',
+    approximate_distance_km: 3,
+    is_photo_verified: true,
+    compatibility_score: 94,
+    photos: [
+      {
+        asset_id: 'photo-1',
+        card_url: '/api/v1/media/stream/gallery/card-1.webp?token=tok1',
+        thumb_url: '/api/v1/media/stream/gallery/thumb-1.webp?token=tok1',
+        full_url: '/api/v1/media/stream/gallery/full-1.webp?token=tok1',
+      },
+      {
+        asset_id: 'photo-2',
+        card_url: '/api/v1/media/stream/gallery/card-2.webp?token=tok2',
+        thumb_url: '/api/v1/media/stream/gallery/thumb-2.webp?token=tok2',
+      },
+    ],
+  };
+
+  function normalizeCandidate(raw, baseUrl = 'http://192.168.1.100:8080') {
+    const rawPhotos = Array.isArray(raw.photos) ? raw.photos : [];
+    const photos = rawPhotos.map((p, idx) => {
+      const rawUrl = p.card_url || p.full_url || p.url || p.thumb_url || '';
+      const rawThumb = p.thumb_url || p.card_url || p.url || '';
+      const fullUrl = rawUrl.startsWith('http') ? rawUrl : `${baseUrl}${rawUrl.startsWith('/') ? '' : '/'}${rawUrl}`;
+      const fullThumb = rawThumb.startsWith('http') ? rawThumb : `${baseUrl}${rawThumb.startsWith('/') ? '' : '/'}${rawThumb}`;
+      return {
+        id: p.asset_id || p.id || `photo_${idx}`,
+        url: fullUrl,
+        thumb_url: fullThumb,
+        is_primary: idx === 0,
+        order: p.order ?? idx,
+      };
+    });
+
+    return {
+      id: raw.user_id || raw.id,
+      user_id: raw.user_id || raw.id,
+      display_name: raw.display_name || '',
+      age: raw.age || 0,
+      bio: raw.bio || '',
+      pronouns: raw.pronouns || [],
+      gender_identities: raw.gender_identities || [],
+      sexual_orientations: raw.sexual_orientations || [],
+      relationship_intents: raw.relationship_intents || [],
+      smoking_preference: raw.smoking_habit || raw.smoking_preference || 'NON_SMOKER',
+      distance_bucket_km: raw.approximate_distance_km ?? raw.distance_bucket_km ?? 1,
+      photos,
+      compatibility_score: raw.compatibility_score || 0,
+      is_verified: Boolean(raw.is_photo_verified || raw.is_verified),
+      relationship_structure: raw.relationship_structure,
+    };
+  }
+
+  const normalized = normalizeCandidate(rawBackendCandidate);
+  assert.equal(normalized.id, 'cand-uuid-1234');
+  assert.equal(normalized.user_id, 'cand-uuid-1234');
+  assert.equal(normalized.display_name, 'Morgan');
+  assert.equal(normalized.age, 27);
+  assert.equal(normalized.smoking_preference, 'NON_SMOKER');
+  assert.equal(normalized.distance_bucket_km, 3);
+  assert.equal(normalized.is_verified, true);
+  assert.equal(normalized.photos.length, 2);
+  assert.equal(normalized.photos[0].id, 'photo-1');
+  assert.ok(normalized.photos[0].url.startsWith('http://192.168.1.100:8080/api/v1/media/stream/'));
+  assert.equal(normalized.photos[0].is_primary, true);
+});
+
+test('Discovery Feed: Empty state separation prevents misleading Dealbreaker banner when Age Assurance is locked', async () => {
+  const fs = await import('node:fs/promises');
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Must contain testID="age-locked-feed-state" for unverified age
+  assert.ok(indexFile.includes('testID="age-locked-feed-state"'), 'Must have dedicated testID="age-locked-feed-state"');
+  assert.ok(indexFile.includes('18+ Age Assurance Required'), 'Must state 18+ Age Assurance Required in locked view');
+  assert.ok(indexFile.includes('Complete Age Verification'), 'Must provide CTA button to Complete Age Verification');
+  assert.ok(indexFile.includes('Check Verification Status'), 'Must provide CTA button to Check Verification Status');
+
+  // 2. Must contain testID="photo-minimum-feed-state" when PHOTO_MINIMUM_REQUIRED
+  assert.ok(indexFile.includes('testID="photo-minimum-feed-state"'), 'Must have dedicated testID="photo-minimum-feed-state"');
+  assert.ok(indexFile.includes('3 Photos Minimum Required'), 'Must explain 3 photos minimum requirement');
+
+  // 3. DealbreakerEmptyState must only render after checking age verification and photo minimums
+  assert.ok(
+    indexFile.includes('!isAgeVerified ?') && indexFile.includes('emptyStateReason === \'PHOTO_MINIMUM_REQUIRED\' ?'),
+    'Must gate deck before falling through to DealbreakerEmptyState'
+  );
+});
+
+test('AuthContext: Authoritatively synchronizes age assurance status from backend', async () => {
+  const fs = await import('node:fs/promises');
+  const authContextFile = await fs.readFile(
+    new URL('../src/context/AuthContext.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Must use isAgeVerified state
+  assert.ok(authContextFile.includes('const [isAgeVerified, setIsAgeVerified] = useState<boolean>(false);'), 'Must declare isAgeVerified state');
+
+  // 2. Must call getAgeAssuranceStatus()
+  assert.ok(authContextFile.includes('authService.getAgeAssuranceStatus()'), 'Must query authService.getAgeAssuranceStatus()');
+  assert.ok(authContextFile.includes('ageStatus?.status === \'VERIFIED\''), 'Must verify VERIFIED status from backend');
+
+  // 3. Must reset on logout
+  assert.ok(authContextFile.includes('setIsAgeVerified(false);'), 'Must reset isAgeVerified on logout');
+});
+

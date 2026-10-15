@@ -5,10 +5,11 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  TouchableOpacity,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing } from '../../src/theme';
+import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { DiscoveryCandidate, SwipeResponse } from '../../src/types';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
@@ -23,11 +24,12 @@ import { admobService, adBreakManager, SwipeAllowance } from '../../src/services
 
 export default function DiscoveryScreen() {
   const router = useRouter();
-  const { isAgeVerified, profile } = useAuth();
+  const { isAgeVerified, profile, refreshProfile } = useAuth();
 
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [emptyStateReason, setEmptyStateReason] = useState<string>('');
   const [nearbySummary, setNearbySummary] = useState<string>('');
   const [canRewind, setCanRewind] = useState(false);
   const [lastSwipedCandidate, setLastSwipedCandidate] = useState<DiscoveryCandidate | null>(null);
@@ -52,6 +54,7 @@ export default function DiscoveryScreen() {
       const feedRes = await discoveryService.getFeed(20);
       setCandidates(feedRes.candidates || []);
       setCurrentIndex(0);
+      setEmptyStateReason(feedRes.empty_state_reason || '');
 
       const summaryRes = await discoveryService.getMatchingSummary();
       setNearbySummary(summaryRes.nearby_count_bracket);
@@ -65,12 +68,14 @@ export default function DiscoveryScreen() {
 
       const allowRes = await admobService.getSwipeAllowance();
       setAllowance(allowRes);
-    } catch {
-      // Backend may be offline or in fallback mode
+    } catch (err: any) {
+      if (err?.code === 'AGE_VERIFICATION_REQUIRED' || err?.status === 403) {
+        await refreshProfile();
+      }
     } finally {
       setIsLoading(false);
     }
-  }, [isAgeVerified]);
+  }, [isAgeVerified, refreshProfile]);
 
   useEffect(() => {
     loadFeed();
@@ -97,12 +102,20 @@ export default function DiscoveryScreen() {
       );
     }
 
-    // Trigger ad break after configured swipe thresholds (Rule 5: 1st after 20 in intro, then every 30)
+    // Trigger ad break after configured swipe thresholds (Phase 6: 1st after 15 in intro, then every 35 on completion)
     const isIntro = allowance?.isIntroductory ?? false;
-    const shouldTriggerBreak = adBreakManager.recordSwipe(isIntro);
+    const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, isIntro);
     if (shouldTriggerBreak) {
       setShowSponsoredBreak(true);
-      admobService.showInterstitialAd().catch(() => {});
+      admobService.showInterstitialAd().then((completed) => {
+        if (completed) {
+          adBreakManager.onAdCompleted();
+        } else {
+          adBreakManager.onAdFailed();
+        }
+      }).catch(() => {
+        adBreakManager.onAdFailed();
+      });
     }
 
     try {
@@ -200,8 +213,72 @@ export default function DiscoveryScreen() {
             <ActivityIndicator color={colors.gold} size="large" />
             <Text style={styles.loadingText}>Curating your exclusive deck...</Text>
           </View>
+        ) : !isAgeVerified ? (
+          <View style={styles.lockContainer} testID="age-locked-feed-state">
+            <View style={styles.lockIconCircle}>
+              <Text style={styles.lockIcon}>🛡️</Text>
+            </View>
+            <Text style={styles.lockTitle}>18+ Age Assurance Required</Text>
+            <Text style={styles.lockSubtitle}>MANDATORY COMMUNITY PROTECTION</Text>
+            <Text style={styles.lockDescription}>
+              Dating discovery, matching, and messaging are locked until your adult status is confirmed. Complete a
+              quick verification selfie to unlock the deck and connect with members waiting nearby.
+            </Text>
+            <View style={styles.lockButtonsContainer}>
+              <TouchableOpacity
+                style={styles.lockPrimaryButton}
+                onPress={() => router.push('/(auth)/verify-age')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.lockPrimaryButtonText}>Complete Age Verification</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.lockSecondaryButton}
+                onPress={async () => {
+                  await refreshProfile();
+                  await loadFeed();
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.lockSecondaryButtonText}>Check Verification Status</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
+          <View style={styles.lockContainer} testID="photo-minimum-feed-state">
+            <View style={styles.lockIconCircle}>
+              <Text style={styles.lockIcon}>📸</Text>
+            </View>
+            <Text style={styles.lockTitle}>3 Photos Minimum Required</Text>
+            <Text style={styles.lockSubtitle}>AUTHENTICITY STANDARD</Text>
+            <Text style={styles.lockDescription}>
+              To maintain high authenticity and prevent empty accounts, you must upload at least 3 approved profile
+              photos before you can browse and match with other members.
+            </Text>
+            <View style={styles.lockButtonsContainer}>
+              <TouchableOpacity
+                style={styles.lockPrimaryButton}
+                onPress={() => router.push('/(tabs)/profile')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.lockPrimaryButtonText}>Upload Profile Photos</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.lockSecondaryButton}
+                onPress={loadFeed}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.lockSecondaryButtonText}>Refresh Deck</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         ) : showSponsoredBreak ? (
-          <SponsoredCard onDismiss={() => setShowSponsoredBreak(false)} />
+          <SponsoredCard
+            onDismiss={() => {
+              setShowSponsoredBreak(false);
+              adBreakManager.onAdCompleted();
+            }}
+          />
         ) : activeCandidate ? (
           <DiscoveryCard
             candidate={activeCandidate}
@@ -343,5 +420,76 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     color: colors.textMuted,
     marginTop: spacing.md,
+  },
+  lockContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.xxl,
+    width: '100%',
+  },
+  lockIconCircle: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  lockIcon: {
+    fontSize: 32,
+  },
+  lockTitle: {
+    ...typography.h1,
+    color: colors.text,
+    marginBottom: spacing.xs,
+    textAlign: 'center',
+  },
+  lockSubtitle: {
+    ...typography.caption,
+    color: colors.gold,
+    letterSpacing: 1.5,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  lockDescription: {
+    ...typography.body,
+    color: colors.textMuted,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: spacing.xxl,
+    maxWidth: 320,
+  },
+  lockButtonsContainer: {
+    width: '100%',
+    maxWidth: 280,
+    gap: spacing.sm,
+  },
+  lockPrimaryButton: {
+    backgroundColor: colors.gold,
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.full,
+    alignItems: 'center',
+  },
+  lockPrimaryButtonText: {
+    ...typography.button,
+    color: colors.textInverse,
+    fontWeight: '700',
+  },
+  lockSecondaryButton: {
+    backgroundColor: 'transparent',
+    paddingVertical: spacing.md,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: colors.border,
+    alignItems: 'center',
+  },
+  lockSecondaryButtonText: {
+    ...typography.button,
+    color: colors.text,
+    fontWeight: '600',
   },
 });
