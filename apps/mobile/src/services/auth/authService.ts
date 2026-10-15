@@ -1,0 +1,271 @@
+import { api, ApiError } from '../api/client';
+import { secureStorage } from '../storage/secureStore';
+import { chatWebSocket } from '../chat/chatService';
+import { mediaUploader } from '../media/mediaUploader';
+import { User, Profile } from '../../types';
+
+export interface RegisterPayload {
+  display_name: string;
+  email: string;
+  password: string;
+  birthdate: string; // YYYY-MM-DD
+  gender_identities: string[];
+  sexual_orientations: string[];
+  referral_code?: string;
+}
+
+export interface LoginPayload {
+  email: string;
+  password: string;
+}
+
+export interface AuthResponse {
+  access_token: string;
+  refresh_token: string;
+  expires_in: number;
+  user: User;
+  profile?: Profile;
+}
+
+export interface AgeAssuranceSession {
+  session_id: string;
+  vendor_url?: string;
+  expires_at?: string;
+  status?: string;
+}
+
+export interface AgeAssuranceStatus {
+  id?: string;
+  user_id?: string;
+  provider?: string;
+  provider_session_id?: string;
+  status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MANUAL_REVIEW';
+  risk_score?: number;
+  verified_at?: string;
+  expires_at?: string;
+}
+
+export const authService = {
+  /**
+   * Registers new member with strict 18+ validation and display name verification
+   */
+  async register(payload: RegisterPayload): Promise<AuthResponse> {
+    if (!payload.display_name || !payload.display_name.trim()) {
+      throw new ApiError(400, 'VALIDATION_FAILED', 'display name cannot be blank', undefined, {
+        display_name: 'Display name cannot be blank',
+      });
+    }
+
+    // Client-side preflight check: ensure birthdate is at least 18 years ago
+    const birthDate = new Date(payload.birthdate);
+    const today = new Date();
+    const age = today.getFullYear() - birthDate.getFullYear();
+    const m = today.getMonth() - birthDate.getMonth();
+    const isAdult = m > 0 || (m === 0 && today.getDate() >= birthDate.getDate()) ? age >= 18 : age - 1 >= 18;
+
+    if (!isAdult) {
+      throw new ApiError(400, 'VALIDATION_FAILED', 'Members must be at least 18 years old to join Aura.', undefined, {
+        birthdate: 'Must be 18 years or older',
+      });
+    }
+
+    if (!payload.gender_identities || payload.gender_identities.length === 0) {
+      throw new ApiError(400, 'VALIDATION_FAILED', 'At least one gender identity must be selected.', undefined, {
+        gender_identities: 'At least one gender identity required',
+      });
+    }
+
+    if (!payload.sexual_orientations || payload.sexual_orientations.length === 0) {
+      throw new ApiError(400, 'VALIDATION_FAILED', 'At least one sexual orientation must be selected.', undefined, {
+        sexual_orientations: 'At least one sexual orientation required',
+      });
+    }
+
+    const res = await api.post<AuthResponse>('/api/v1/auth/register', {
+      ...payload,
+      display_name: payload.display_name.trim(),
+    });
+    await secureStorage.saveTokens(res.access_token, res.refresh_token);
+    await secureStorage.saveUserData(res.user as unknown as Record<string, unknown>);
+    return res;
+  },
+
+  /**
+   * Authenticates user credentials and securely stores JWT access & refresh tokens
+   */
+  async login(payload: LoginPayload): Promise<AuthResponse> {
+    const res = await api.post<AuthResponse>('/api/v1/auth/login', payload);
+    await secureStorage.saveTokens(res.access_token, res.refresh_token);
+    await secureStorage.saveUserData(res.user as unknown as Record<string, unknown>);
+    return res;
+  },
+
+  /**
+   * Securely revokes session tokens on server and clears device keychain
+   */
+  async logout(): Promise<void> {
+    const refreshToken = await secureStorage.getRefreshToken();
+    try {
+      if (refreshToken) {
+        await api.post('/api/v1/auth/logout', { refresh_token: refreshToken });
+      }
+    } catch {
+      // Proceed with local wipe even if server is unreachable
+    } finally {
+      chatWebSocket.disconnect();
+      await secureStorage.clearTokens();
+    }
+  },
+
+  /**
+   * Fetches full authenticated user profile, preferences, and verified gallery photos
+   */
+  async getMyProfile(): Promise<{ user: User; profile: Profile }> {
+    const res = await api.get<{
+      user: User;
+      profile: Profile;
+      location?: any;
+      preferences?: {
+        dealbreakers?: {
+          non_smoker_only?: boolean;
+          require_verified?: boolean;
+          require_monogamous?: boolean;
+        };
+      };
+    }>('/api/v1/profiles/me');
+
+    const rawProfile = (res.profile || {}) as any;
+
+    // Normalize smoking habit and preference
+    if (rawProfile.smoking_habit && !rawProfile.smoking_preference) {
+      rawProfile.smoking_preference = rawProfile.smoking_habit;
+    } else if (rawProfile.smoking_preference && !rawProfile.smoking_habit) {
+      rawProfile.smoking_habit = rawProfile.smoking_preference;
+    }
+
+    // Normalize non-smoker dealbreaker from preferences
+    if (res.preferences?.dealbreakers?.non_smoker_only !== undefined) {
+      rawProfile.non_smoker_dealbreaker = Boolean(res.preferences.dealbreakers.non_smoker_only);
+    } else if (rawProfile.non_smoker_dealbreaker === undefined) {
+      rawProfile.non_smoker_dealbreaker = true;
+    }
+
+    // Populate profile gallery photos from media service
+    try {
+      const photos = await mediaUploader.getMyGallery();
+      rawProfile.photos = photos;
+    } catch {
+      if (!Array.isArray(rawProfile.photos)) {
+        rawProfile.photos = [];
+      }
+    }
+
+    return {
+      user: res.user,
+      profile: rawProfile as Profile,
+    };
+  },
+
+  /**
+   * Updates display name, bio, pronouns, intents, and habits with strict backend DTO alignment
+   */
+  async updateMyProfile(updates: Partial<Profile>): Promise<Profile> {
+    const payload: Record<string, unknown> = {};
+
+    if (updates.display_name !== undefined) {
+      payload.display_name = updates.display_name.trim();
+    }
+    if (updates.bio !== undefined) {
+      payload.bio = updates.bio;
+    }
+    if (updates.pronouns !== undefined) {
+      payload.pronouns = updates.pronouns;
+    }
+    if (updates.gender_identities !== undefined) {
+      payload.gender_identities = updates.gender_identities;
+    }
+    if (updates.sexual_orientations !== undefined) {
+      payload.sexual_orientations = updates.sexual_orientations;
+    }
+    if (updates.relationship_intents !== undefined) {
+      payload.relationship_intents = updates.relationship_intents;
+    }
+
+    // Map smoking preference to backend smoking_habit
+    const habit = updates.smoking_habit || updates.smoking_preference;
+    if (habit !== undefined) {
+      payload.smoking_habit = habit;
+    }
+
+    const updated = await api.put<Profile>('/api/v1/profiles/me', payload);
+
+    // Normalize returned profile
+    const rawUpdated = updated as any;
+    if (rawUpdated.smoking_habit && !rawUpdated.smoking_preference) {
+      rawUpdated.smoking_preference = rawUpdated.smoking_habit;
+    }
+    return rawUpdated as Profile;
+  },
+
+  /**
+   * Updates user device location (fuzzed server-side for privacy)
+   */
+  async updateLocation(latitude: number, longitude: number): Promise<{ city: string; region: string }> {
+    return api.put<{ city: string; region: string }>('/api/v1/profiles/me/location', {
+      latitude,
+      longitude,
+    });
+  },
+
+  /**
+   * Request password reset code
+   */
+  async requestPasswordReset(email: string): Promise<boolean> {
+    await api.post('/api/v1/auth/password-reset/request', { email });
+    return true;
+  },
+
+  /**
+   * Confirm password reset with OTP code
+   */
+  async confirmPasswordReset(token: string, newPassword: string): Promise<boolean> {
+    await api.post('/api/v1/auth/password-reset/confirm', {
+      token,
+      new_password: newPassword,
+    });
+    return true;
+  },
+
+  /**
+   * Initiates age assurance session with backend
+   */
+  async startAgeAssuranceSession(): Promise<AgeAssuranceSession> {
+    return api.post<AgeAssuranceSession>('/api/v1/age-assurance/session');
+  },
+
+  /**
+   * Fetches authoritative age assurance status from backend
+   */
+  async getAgeAssuranceStatus(): Promise<AgeAssuranceStatus> {
+    return api.get<AgeAssuranceStatus>('/api/v1/age-assurance/status');
+  },
+
+  /**
+   * Send phone or email auth verification code (OTP)
+   */
+  async sendAuthVerificationCode(): Promise<{ status: string }> {
+    return api.post<{ status: string }>('/api/v1/auth/verify/send');
+  },
+
+  /**
+   * Request age verification check (backwards compatibility wrapper)
+   */
+  async requestAgeVerification(): Promise<{ verification_url?: string; status: string; session_id?: string }> {
+    const session = await this.startAgeAssuranceSession();
+    return {
+      session_id: session.session_id,
+      verification_url: session.vendor_url,
+      status: session.status || 'PENDING',
+    };
+  },
+};

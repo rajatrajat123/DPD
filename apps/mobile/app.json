@@ -1,0 +1,55 @@
+{
+  "expo": {
+    "name": "Aura",
+    "slug": "aura-mobile",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "aura",
+    "userInterfaceStyle": "dark",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.aura.dating",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Aura requires camera access for 18+ age verification selfies and profile photos.",
+        "NSPhotoLibraryUsageDescription": "Aura requires photo library access to upload profile pictures.",
+        "NSFaceIDUsageDescription": "Aura uses Face ID for biometric app lock and privacy security."
+      }
+    },
+    "android": {
+      "package": "com.aura.dating",
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Aura requires access to your photos to upload profile pictures."
+        }
+      ],
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Aura to use Face ID for biometric app unlock."
+        }
+      ],
+      [
+        "react-native-google-mobile-ads",
+        {
+          "androidAppId": "ca-app-pub-3940256099942544~3347511713",
+          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

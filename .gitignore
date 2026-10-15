@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+web/node_modules/
+
+# Next.js build output
+web/.next/
+web/out/
+web/test-results/
+web/playwright-report/
+web/blob-report/
+web/playwright/.cache/
+
+# Go build artifacts and test coverage
+backend/bin/
+backend/*.exe
+backend/*.out
+backend/coverage.txt
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+.env*.local
+.env.production
+.env.staging
+web/.env
+web/.env.local
+web/.env.*
+backend/.env
+backend/.env.*
+apps/mobile/.env
+apps/mobile/.env.*
+apps/mobile/.env.local
+
+# Sensitive keys, certificates & platform credentials
+*.pem
+*.key
+*.p8
+*.p12
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+credentials.json
+service-account*.json
+*.bak
+
+# OS & Editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+*.tsbuildinfo
+next-env.d.ts
+# Local user media and generated files
+backend/data/media/
+apps/mobile/.backup_*/
+backend/.backup_*/
+web/.backup_*/
+apps/mobile/node_modules/
+apps/mobile/.expo/
+web/node_modules/
+web/.next/
+backend/internal/discovery/.backup_monetization/
+backend/internal/identity/.backup_gallery_save_fixes/

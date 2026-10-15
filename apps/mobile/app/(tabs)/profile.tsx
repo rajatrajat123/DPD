@@ -1,0 +1,903 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TextInput,
+  TouchableOpacity,
+  Image,
+  Switch,
+  ActivityIndicator,
+  Alert,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
+import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { useAuth } from '../../src/context/AuthContext';
+import { mediaUploader } from '../../src/services/media/mediaUploader';
+import { authService } from '../../src/services/auth/authService';
+import { discoveryService } from '../../src/services/discovery/discoveryService';
+import { SmokingPreference } from '../../src/types';
+
+export default function ProfileScreen() {
+  const router = useRouter();
+  const { profile, refreshProfile } = useAuth();
+
+  const [displayName, setDisplayName] = useState(profile?.display_name || '');
+  const [bio, setBio] = useState(profile?.bio || '');
+  const [smokingPref, setSmokingPref] = useState<SmokingPreference>(profile?.smoking_preference || 'NON_SMOKER');
+  const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
+
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
+  const [uploadProgressText, setUploadProgressText] = useState('');
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    if (profile) {
+      setDisplayName(profile.display_name || '');
+      setBio(profile.bio || '');
+      setSmokingPref(profile.smoking_preference || 'NON_SMOKER');
+      setNonSmokerDealbreaker(profile.non_smoker_dealbreaker ?? true);
+    }
+  }, [profile]);
+
+  const handleDeletePhoto = async (photoId: string) => {
+    Alert.alert('Delete Photo', 'Are you sure you want to remove this photo from your gallery?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await mediaUploader.deletePhoto(photoId);
+            await refreshProfile();
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : 'Could not delete photo. Please try again.';
+            Alert.alert('Delete Failed', message);
+          }
+        },
+      },
+    ]);
+  };
+
+  const handleMovePhoto = async (fromIndex: number, toIndex: number) => {
+    if (!profile?.photos || toIndex < 0 || toIndex >= profile.photos.length) return;
+    const reordered = [...profile.photos];
+    const [moved] = reordered.splice(fromIndex, 1);
+    reordered.splice(toIndex, 0, moved);
+
+    const assetIds = reordered.map((p) => p.id).filter(Boolean);
+    try {
+      await mediaUploader.reorderGallery(assetIds);
+      await refreshProfile();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Could not reorder photos. Please try again.';
+      Alert.alert('Reorder Failed', message);
+    }
+  };
+
+  const handleAddPhoto = async () => {
+    try {
+      const picked = await mediaUploader.pickImageFromGallery();
+      if (!picked) return;
+
+      setIsUploadingPhoto(true);
+      const uploaded = await mediaUploader.uploadProfilePhoto(picked.uri, (step) => {
+        switch (step) {
+          case 'STRIPPING_EXIF':
+            setUploadProgressText('Stripping GPS & EXIF data...');
+            break;
+          case 'REQUESTING_INTENT':
+            setUploadProgressText('Requesting upload session...');
+            break;
+          case 'UPLOADING':
+            setUploadProgressText('Uploading photo bytes...');
+            break;
+          case 'PROCESSING':
+            setUploadProgressText('Automated safety & moderation scan...');
+            break;
+          case 'DONE':
+            setUploadProgressText('Completed!');
+            break;
+        }
+      });
+
+      if (!uploaded || !uploaded.media_id) {
+        throw new Error('Server failed to confirm media upload.');
+      }
+
+      await refreshProfile();
+      Alert.alert('Photo Uploaded', 'Your photo has been sanitized and added to your profile.');
+    } catch (err: unknown) {
+      if (__DEV__) {
+        console.error('[ProfilePhotoUpload] Failed:', {
+          errorName: err instanceof Error ? err.name : 'UnknownError',
+          errorMessage: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        });
+      }
+      const message = err instanceof Error ? err.message : 'Could not upload photo.';
+      Alert.alert('Upload Failed', message);
+    } finally {
+      setIsUploadingPhoto(false);
+      setUploadProgressText('');
+    }
+  };
+
+  const handleSaveChanges = async () => {
+    setIsSaving(true);
+    try {
+      // 1. Update profile details on backend using exact DTO fields
+      await authService.updateMyProfile({
+        display_name: displayName.trim(),
+        bio: bio.trim(),
+        smoking_habit: smokingPref,
+        smoking_preference: smokingPref,
+      });
+
+      // 2. Update discovery preferences dealbreaker on backend
+      await discoveryService.updatePreferences({
+        dealbreakers: {
+          non_smoker_only: nonSmokerDealbreaker,
+          require_verified: false,
+          require_monogamous: false,
+        },
+      });
+
+      await refreshProfile();
+      Alert.alert('Profile Saved', 'Your profile and discovery dealbreakers have been updated.');
+    } catch (err: unknown) {
+      if (__DEV__) {
+        console.error('[ProfileSave] Failed:', err);
+      }
+      const message = err instanceof Error ? err.message : 'Could not save profile changes.';
+      Alert.alert('Save Failed', message);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const primaryPhoto = profile?.photos?.[0]?.url;
+
+  return (
+    <SafeAreaView style={styles.safeArea}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.title}>Profile</Text>
+          <Text style={styles.subtitle}>Identity & Preferences</Text>
+        </View>
+        <TouchableOpacity
+          style={styles.saveHeaderBtn}
+          onPress={handleSaveChanges}
+          disabled={isSaving}
+          activeOpacity={0.8}
+        >
+          {isSaving ? (
+            <ActivityIndicator color={colors.gold} size="small" />
+          ) : (
+            <Text style={styles.saveHeaderBtnText}>Save</Text>
+          )}
+        </TouchableOpacity>
+      </View>
+
+      <ScrollView contentContainerStyle={styles.scrollContent}>
+        {/* Luxury Profile Header Card */}
+        <View style={styles.profileHeaderCard}>
+          <View style={styles.avatarWrap}>
+            {primaryPhoto ? (
+              <Image source={{ uri: primaryPhoto }} style={styles.avatarImage} />
+            ) : (
+              <View style={[styles.avatarImage, styles.avatarPlaceholder]}>
+                <Text style={styles.avatarMonogram}>
+                  {profile?.display_name ? profile.display_name.charAt(0) : 'A'}
+                </Text>
+              </View>
+            )}
+            {profile?.is_age_verified && (
+              <View style={styles.verifiedDot}>
+                <Text style={styles.verifiedDotText}>✓</Text>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.headerInfo}>
+            <View style={styles.headerNameRow}>
+              <Text style={styles.headerName}>{profile?.display_name || 'Member'}</Text>
+              {profile?.age ? <Text style={styles.headerAge}>, {profile.age}</Text> : null}
+            </View>
+            <View style={styles.badgesRow}>
+              {profile?.is_age_verified ? (
+                <View style={styles.verifiedBadge}>
+                  <Text style={styles.verifiedBadgeText}>✓ 18+ Verified</Text>
+                </View>
+              ) : (
+                <View style={styles.unverifiedBadge}>
+                  <Text style={styles.unverifiedBadgeText}>Age Pending</Text>
+                </View>
+              )}
+              <View style={styles.locationBadge}>
+                <Text style={styles.locationBadgeText}>
+                  📍 {profile?.city || 'Local Member'}
+                </Text>
+              </View>
+            </View>
+          </View>
+        </View>
+
+        {/* Photo Gallery Grid */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>Profile Gallery</Text>
+            <Text style={styles.photoCountText}>
+              {profile?.photos?.length || 0}/6 Photos
+            </Text>
+          </View>
+          <Text style={styles.sectionDesc}>
+            GPS and camera metadata are automatically stripped before upload.
+          </Text>
+
+          <View style={styles.photosGrid}>
+            {profile?.photos?.map((photo, index) => (
+              <View key={photo.id || index} style={styles.photoWrap}>
+                <Image source={{ uri: photo.url }} style={styles.gridPhoto} />
+                {photo.is_primary && (
+                  <View style={styles.primaryBadge}>
+                    <Text style={styles.primaryBadgeText}>Primary</Text>
+                  </View>
+                )}
+
+                {/* Delete Button */}
+                <TouchableOpacity
+                  style={styles.deletePhotoBtn}
+                  onPress={() => handleDeletePhoto(photo.id)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.deletePhotoBtnText}>✕</Text>
+                </TouchableOpacity>
+
+                {/* Reorder Arrows */}
+                <View style={styles.reorderControls}>
+                  {index > 0 && (
+                    <TouchableOpacity
+                      style={styles.moveBtn}
+                      onPress={() => handleMovePhoto(index, index - 1)}
+                      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.moveBtnText}>◀</Text>
+                    </TouchableOpacity>
+                  )}
+                  {profile.photos && index < profile.photos.length - 1 && (
+                    <TouchableOpacity
+                      style={styles.moveBtn}
+                      onPress={() => handleMovePhoto(index, index + 1)}
+                      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={styles.moveBtnText}>▶</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            ))}
+
+            {/* Add Photo Button Slot */}
+            {(!profile?.photos || profile.photos.length < 6) && (
+              <TouchableOpacity
+                style={styles.addPhotoBtn}
+                onPress={handleAddPhoto}
+                disabled={isUploadingPhoto}
+                activeOpacity={0.8}
+              >
+                {isUploadingPhoto ? (
+                  <View style={styles.uploadingBox}>
+                    <ActivityIndicator color={colors.gold} size="small" />
+                    <Text style={styles.uploadingText}>{uploadProgressText}</Text>
+                  </View>
+                ) : (
+                  <>
+                    <View style={styles.addIconCircle}>
+                      <Text style={styles.addPhotoIcon}>+</Text>
+                    </View>
+                    <Text style={styles.addPhotoLabel}>Add Photo</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            )}
+          </View>
+        </View>
+
+        {/* Basic Details Section */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>About You</Text>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Display Name</Text>
+            <TextInput
+              style={styles.input}
+              value={displayName}
+              onChangeText={setDisplayName}
+              placeholder="Your display name"
+              placeholderTextColor={colors.textSubtle}
+            />
+          </View>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Bio</Text>
+            <TextInput
+              style={[styles.input, styles.bioInput]}
+              value={bio}
+              onChangeText={setBio}
+              placeholder="Tell other members what you are passionate about..."
+              placeholderTextColor={colors.textSubtle}
+              multiline
+              numberOfLines={4}
+            />
+          </View>
+        </View>
+
+        {/* Lifestyle & Dealbreakers Section */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>Lifestyle & Dealbreakers</Text>
+
+          <View style={styles.inputGroup}>
+            <Text style={styles.inputLabel}>Smoking Habit</Text>
+            <View style={styles.chipsRow}>
+              {(['NON_SMOKER', 'SOCIAL_SMOKER', 'REGULAR_SMOKER'] as SmokingPreference[]).map((pref) => {
+                const isSelected = smokingPref === pref;
+                const label =
+                  pref === 'NON_SMOKER' ? 'Non-smoker' : pref === 'SOCIAL_SMOKER' ? 'Social smoker' : 'Regular smoker';
+                return (
+                  <TouchableOpacity
+                    key={pref}
+                    style={[styles.chip, isSelected ? styles.chipSelected : null]}
+                    onPress={() => setSmokingPref(pref)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, isSelected ? styles.chipTextSelected : null]}>
+                      {label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+
+          {/* Dealbreaker Switch */}
+          <View style={styles.switchRow}>
+            <View style={styles.switchTextContainer}>
+              <Text style={styles.switchTitle}>Non-Smoker Dealbreaker</Text>
+              <Text style={styles.switchDesc}>
+                Strictly exclude smokers from your discovery deck. Aura never compromises this rule.
+              </Text>
+            </View>
+            <Switch
+              value={nonSmokerDealbreaker}
+              onValueChange={setNonSmokerDealbreaker}
+              trackColor={{ false: colors.border, true: colors.gold }}
+              thumbColor={colors.text}
+            />
+          </View>
+        </View>
+
+        {/* Security & Privacy Shortcut */}
+        <TouchableOpacity
+          style={styles.securityCard}
+          onPress={() => router.push('/(tabs)/settings')}
+          activeOpacity={0.8}
+        >
+          <View style={styles.securityIconWrap}>
+            <Text style={styles.securityIcon}>🛡️</Text>
+          </View>
+          <View style={styles.securityInfo}>
+            <Text style={styles.securityTitle}>Privacy & Security Settings</Text>
+            <Text style={styles.securityDesc}>
+              Biometric lock, app switcher veil, notifications, and telemetry.
+            </Text>
+          </View>
+          <Text style={styles.securityChevron}>➔</Text>
+        </TouchableOpacity>
+
+        {/* Age Assurance Status */}
+        <View style={styles.verificationCard}>
+          <View style={styles.verificationHeader}>
+            <Text style={styles.verificationTitle}>Age Assurance Status</Text>
+            <View
+              style={[
+                styles.verBadge,
+                profile?.is_age_verified ? styles.verBadgeVerified : styles.verBadgeUnverified,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.verBadgeText,
+                  profile?.is_age_verified ? styles.verTextVerified : styles.verTextUnverified,
+                ]}
+              >
+                {profile?.is_age_verified ? '✓ 18+ Verified' : 'Pending Verification'}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.verificationBody}>
+            {profile?.is_age_verified
+              ? 'Your account has passed mandatory 18+ verification. Discovery swiping and messaging are active.'
+              : 'Mandatory 18+ verification is required before matching and messaging with other members.'}
+          </Text>
+        </View>
+      </ScrollView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: colors.background,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.borderSubtle,
+  },
+  title: {
+    ...typography.h2,
+    color: colors.text,
+    letterSpacing: 1,
+  },
+  subtitle: {
+    ...typography.caption,
+    color: colors.gold,
+    letterSpacing: 0.8,
+    marginTop: 2,
+  },
+  saveHeaderBtn: {
+    backgroundColor: colors.goldMuted,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    paddingHorizontal: spacing.md + 4,
+    paddingVertical: 6,
+    borderRadius: borderRadius.full,
+  },
+  saveHeaderBtnText: {
+    ...typography.button,
+    color: colors.gold,
+    fontWeight: '700',
+    fontSize: 12,
+  },
+  scrollContent: {
+    padding: spacing.lg,
+    paddingBottom: spacing.xxxl,
+  },
+  profileHeaderCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.lg,
+  },
+  avatarWrap: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 2,
+    borderColor: colors.gold,
+    position: 'relative',
+    marginRight: spacing.md,
+  },
+  avatarImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 32,
+  },
+  avatarPlaceholder: {
+    backgroundColor: colors.cardElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  avatarMonogram: {
+    ...typography.h1,
+    color: colors.gold,
+    fontSize: 28,
+  },
+  verifiedDot: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: colors.emerald,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: colors.background,
+  },
+  verifiedDotText: {
+    fontSize: 10,
+    color: colors.textInverse,
+    fontWeight: '700',
+  },
+  headerInfo: {
+    flex: 1,
+  },
+  headerNameRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  headerName: {
+    ...typography.h2,
+    color: colors.text,
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  headerAge: {
+    ...typography.h2,
+    color: colors.gold,
+    fontSize: 18,
+  },
+  badgesRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 4,
+  },
+  verifiedBadge: {
+    backgroundColor: colors.emeraldMuted,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.emerald,
+  },
+  verifiedBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.emerald,
+    fontWeight: '700',
+  },
+  unverifiedBadge: {
+    backgroundColor: colors.amberMuted,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.amber,
+  },
+  unverifiedBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.amber,
+    fontWeight: '700',
+  },
+  locationBadge: {
+    backgroundColor: colors.cardElevated,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+  },
+  locationBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.textMuted,
+  },
+  sectionCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.lg,
+  },
+  sectionTitleRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  sectionTitle: {
+    ...typography.h3,
+    color: colors.text,
+    fontSize: 16,
+  },
+  photoCountText: {
+    ...typography.caption,
+    color: colors.gold,
+    fontWeight: '600',
+  },
+  sectionDesc: {
+    ...typography.bodySmall,
+    color: colors.textSubtle,
+    fontSize: 11,
+    marginBottom: spacing.md,
+  },
+  photosGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+  },
+  photoWrap: {
+    width: 96,
+    height: 126,
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+    position: 'relative',
+    backgroundColor: colors.cardElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  gridPhoto: {
+    width: '100%',
+    height: '100%',
+  },
+  primaryBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    backgroundColor: colors.gold,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+    borderRadius: 2,
+  },
+  primaryBadgeText: {
+    ...typography.caption,
+    fontSize: 9,
+    color: colors.textInverse,
+    fontWeight: '700',
+  },
+  addPhotoBtn: {
+    width: 96,
+    height: 126,
+    borderRadius: borderRadius.md,
+    borderWidth: 1.5,
+    borderColor: colors.borderFocus,
+    borderStyle: 'dashed',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(212, 175, 55, 0.04)',
+  },
+  addIconCircle: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: colors.goldMuted,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 4,
+  },
+  addPhotoIcon: {
+    fontSize: 20,
+    color: colors.gold,
+    fontWeight: '700',
+  },
+  addPhotoLabel: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.gold,
+    fontWeight: '600',
+  },
+  uploadingBox: {
+    alignItems: 'center',
+    padding: 4,
+  },
+  uploadingText: {
+    ...typography.caption,
+    fontSize: 8,
+    color: colors.gold,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  deletePhotoBtn: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(9, 10, 14, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    zIndex: 10,
+  },
+  deletePhotoBtnText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  reorderControls: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    flexDirection: 'row',
+    gap: 3,
+    zIndex: 10,
+  },
+  moveBtn: {
+    width: 22,
+    height: 20,
+    borderRadius: 4,
+    backgroundColor: 'rgba(9, 10, 14, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  moveBtnText: {
+    color: colors.gold,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  inputGroup: {
+    marginBottom: spacing.md,
+  },
+  inputLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginBottom: 6,
+    fontSize: 11,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  input: {
+    height: 48,
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    paddingHorizontal: spacing.md,
+    color: colors.text,
+    ...typography.body,
+  },
+  bioInput: {
+    height: 90,
+    paddingVertical: spacing.sm,
+    textAlignVertical: 'top',
+  },
+  chipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  chip: {
+    backgroundColor: colors.backgroundElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+  },
+  chipSelected: {
+    borderColor: colors.gold,
+    backgroundColor: colors.goldMuted,
+  },
+  chipText: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+  },
+  chipTextSelected: {
+    color: colors.gold,
+    fontWeight: '600',
+  },
+  switchRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: spacing.sm,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderSubtle,
+  },
+  switchTextContainer: {
+    flex: 1,
+    marginRight: spacing.md,
+  },
+  switchTitle: {
+    ...typography.bodyLarge,
+    color: colors.text,
+    fontWeight: '600',
+  },
+  switchDesc: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+    marginTop: 2,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  securityCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    marginBottom: spacing.lg,
+  },
+  securityIconWrap: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: colors.cardElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.md,
+  },
+  securityIcon: {
+    fontSize: 20,
+  },
+  securityInfo: {
+    flex: 1,
+  },
+  securityTitle: {
+    ...typography.bodyLarge,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  securityDesc: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  securityChevron: {
+    color: colors.gold,
+    fontSize: 16,
+    marginLeft: spacing.sm,
+  },
+  verificationCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  verificationHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  verificationTitle: {
+    ...typography.h3,
+    color: colors.text,
+    fontSize: 15,
+  },
+  verBadge: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  verBadgeVerified: {
+    backgroundColor: colors.emeraldMuted,
+    borderColor: colors.emerald,
+  },
+  verBadgeUnverified: {
+    backgroundColor: colors.amberMuted,
+    borderColor: colors.amber,
+  },
+  verBadgeText: {
+    ...typography.caption,
+    fontWeight: '700',
+    fontSize: 10,
+  },
+  verTextVerified: {
+    color: colors.emerald,
+  },
+  verTextUnverified: {
+    color: colors.amber,
+  },
+  verificationBody: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+    lineHeight: 17,
+    fontSize: 12,
+  },
+});
