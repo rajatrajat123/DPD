@@ -230,25 +230,59 @@ func (f *FileStorageEngine) DeleteDerivative(ctx context.Context, bucket, key st
 }
 
 func (f *FileStorageEngine) DeleteAssetFiles(ctx context.Context, assetID string) error {
-	// Remove quarantine files starting with assetID
-	quarantineDir := filepath.Join(f.baseDir, "quarantine")
-	_ = filepath.Walk(quarantineDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.Contains(filepath.Base(path), assetID) {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
+	if strings.TrimSpace(assetID) == "" {
+		return errors.New("assetID cannot be blank")
+	}
 
-	// Remove derivative files starting with assetID
+	var firstErr error
+
+	// 1. Remove quarantine files matching assetID
+	quarantineDir := filepath.Join(f.baseDir, "quarantine")
+	if _, err := os.Stat(quarantineDir); err == nil {
+		_ = filepath.Walk(quarantineDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if !info.IsDir() && strings.Contains(filepath.Base(path), assetID) {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					if firstErr == nil {
+						firstErr = err
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	// 2. Remove derivative directories and files matching assetID
 	derivativesDir := filepath.Join(f.baseDir, "derivatives")
-	_ = filepath.Walk(derivativesDir, func(path string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() && strings.Contains(filepath.Base(path), assetID) {
-			_ = os.Remove(path)
-		}
-		return nil
-	})
-	return nil
+	if _, err := os.Stat(derivativesDir); err == nil {
+		_ = filepath.Walk(derivativesDir, func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				return nil
+			}
+			if info.IsDir() && filepath.Base(path) == assetID {
+				if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
+					if firstErr == nil {
+						firstErr = err
+					}
+				}
+				return filepath.SkipDir
+			}
+			if !info.IsDir() && strings.Contains(path, assetID) {
+				if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+					if firstErr == nil {
+						firstErr = err
+					}
+				}
+			}
+			return nil
+		})
+	}
+
+	return firstErr
 }
+
 
 func (f *FileStorageEngine) GenerateSignedToken(bucket, key string, ttl time.Duration) (string, time.Time) {
 	exp := time.Now().Add(ttl).UTC()

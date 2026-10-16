@@ -42,8 +42,10 @@ type Config struct {
 	JWTSigningSecret string
 
 	MediaMaxImageBytes int64
-	MediaMaxVideoBytes int64
-	MediaStorageDir    string
+	MediaMaxVideoBytes     int64
+	MediaStorageDir        string
+	MediaRetentionInterval  time.Duration
+	MediaRetentionBatchSize int
 
 	StripeSecretKey           string
 	StripeWebhookSecret       string
@@ -144,9 +146,11 @@ func Load(getenv func(string) string) (*Config, error) {
 
 		JWTSigningSecret: getString(getenv, "JWT_SIGNING_SECRET", "local-dev-only-jwt-signing-secret-must-be-changed-32b"),
 
-		MediaMaxImageBytes: getInt64(getenv, "MEDIA_MAX_IMAGE_BYTES", 15*1024*1024),  // 15 MiB
-		MediaMaxVideoBytes: getInt64(getenv, "MEDIA_MAX_VIDEO_BYTES", 100*1024*1024), // 100 MiB
-		MediaStorageDir:    getString(getenv, "MEDIA_STORAGE_DIR", "data/media"),
+		MediaMaxImageBytes:      getInt64(getenv, "MEDIA_MAX_IMAGE_BYTES", 15*1024*1024),  // 15 MiB
+		MediaMaxVideoBytes:      getInt64(getenv, "MEDIA_MAX_VIDEO_BYTES", 100*1024*1024), // 100 MiB
+		MediaStorageDir:         getString(getenv, "MEDIA_STORAGE_DIR", "data/media"),
+		MediaRetentionInterval:  getDuration(getenv, "MEDIA_RETENTION_INTERVAL", 1*time.Hour),
+		MediaRetentionBatchSize: getInt(getenv, "MEDIA_RETENTION_BATCH_SIZE", 100),
 
 		StripeSecretKey:           getString(getenv, "STRIPE_SECRET_KEY", "sk_test_placeholder"),
 		StripeWebhookSecret:       getString(getenv, "STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder"),

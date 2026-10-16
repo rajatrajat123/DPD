@@ -239,7 +239,14 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		media.WithVisionAPIKey(cfg.VisionAPIKey),
 		media.WithEnvironment(string(cfg.Environment)),
 	)
-	mediaSvc := media.NewService(mediaRepo, storageEngine, mediaProc, logger)
+	mediaSvc := media.NewService(
+		mediaRepo,
+		storageEngine,
+		mediaProc,
+		logger,
+		media.WithRetentionInterval(cfg.MediaRetentionInterval),
+		media.WithRetentionBatchSize(cfg.MediaRetentionBatchSize),
+	)
 	mediaSvc.SetProfileStatusChecker(func(ctx context.Context, userID string) (bool, error) {
 		u, err := identityRepo.GetUserByID(ctx, userID)
 		if err != nil || u == nil {

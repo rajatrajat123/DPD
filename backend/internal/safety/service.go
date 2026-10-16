@@ -63,7 +63,7 @@ func (s *Service) SetStepUpVerifier(v StepUpVerifier) {
 // Age Assurance Workflows
 // -----------------------------------------------------------------------------
 
-func (s *Service) CreateAgeVerificationSession(ctx context.Context, userID, email, clientIP string) (*AgeAssuranceSessionResult, error) {
+func (s *Service) CreateAgeVerificationSession(ctx context.Context, userID, email, clientIP string, mediaID ...string) (*AgeAssuranceSessionResult, error) {
 	if s.provider == nil {
 		return nil, errors.New("age assurance provider not configured")
 	}
@@ -73,6 +73,9 @@ func (s *Service) CreateAgeVerificationSession(ctx context.Context, userID, emai
 		return nil, fmt.Errorf("provider session creation failed: %w", err)
 	}
 
+	// Lookup existing record to preserve metadata or previous attributes
+	existing, _ := s.repo.GetAgeAssuranceByUserID(ctx, userID)
+
 	// Persist or update verification row
 	aa := &AgeAssurance{
 		UserID:            userID,
@@ -81,6 +84,17 @@ func (s *Service) CreateAgeVerificationSession(ctx context.Context, userID, emai
 		Status:            AgePending,
 		ExpiresAt:         &result.ExpiresAt,
 	}
+	if existing != nil {
+		aa.ID = existing.ID
+		aa.Metadata = existing.Metadata
+	}
+	if aa.Metadata == nil {
+		aa.Metadata = make(map[string]any)
+	}
+	if len(mediaID) > 0 && strings.TrimSpace(mediaID[0]) != "" {
+		aa.Metadata["media_id"] = strings.TrimSpace(mediaID[0])
+	}
+
 	if err := s.repo.UpsertAgeAssurance(ctx, aa); err != nil {
 		return nil, fmt.Errorf("failed to persist age assurance session: %w", err)
 	}

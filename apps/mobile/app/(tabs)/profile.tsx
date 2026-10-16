@@ -19,6 +19,41 @@ import { mediaUploader } from '../../src/services/media/mediaUploader';
 import { authService } from '../../src/services/auth/authService';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
 import { SmokingPreference } from '../../src/types';
+import {
+  GENDER_IDENTITY_OPTIONS,
+  LOOKING_FOR_OPTIONS,
+  SEXUAL_ORIENTATION_OPTIONS,
+} from '../(auth)/register';
+
+function parseInitialTaxonomy(items?: string[]): { selected: string[]; customText: string } {
+  if (!items || items.length === 0) return { selected: [], customText: '' };
+  const selected: string[] = [];
+  let customText = '';
+  for (const item of items) {
+    if (item.startsWith('custom:')) {
+      selected.push('custom');
+      customText = item.slice(7);
+    } else if (item === 'custom') {
+      selected.push('custom');
+    } else {
+      selected.push(item);
+    }
+  }
+  return { selected, customText };
+}
+
+function buildFinalList(selected: string[], customText: string): string[] {
+  const list = selected.filter((item) => item !== 'custom');
+  if (selected.includes('custom')) {
+    const trimmed = customText.trim().toLowerCase();
+    if (trimmed) {
+      list.push(trimmed.startsWith('custom:') ? trimmed : `custom:${trimmed}`);
+    } else {
+      list.push('custom');
+    }
+  }
+  return list;
+}
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -28,6 +63,18 @@ export default function ProfileScreen() {
   const [bio, setBio] = useState(profile?.bio || '');
   const [smokingPref, setSmokingPref] = useState<SmokingPreference>(profile?.smoking_preference || 'NON_SMOKER');
   const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
+
+  // 1. I am a — Gender identity
+  const [selectedGenders, setSelectedGenders] = useState<string[]>([]);
+  const [customGenderText, setCustomGenderText] = useState('');
+
+  // 2. Looking for — Gender preferences
+  const [selectedLookingFor, setSelectedLookingFor] = useState<string[]>([]);
+  const [customLookingForText, setCustomLookingForText] = useState('');
+
+  // 3. Sexual orientation
+  const [selectedOrientations, setSelectedOrientations] = useState<string[]>([]);
+  const [customOrientationText, setCustomOrientationText] = useState('');
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -39,8 +86,39 @@ export default function ProfileScreen() {
       setBio(profile.bio || '');
       setSmokingPref(profile.smoking_preference || 'NON_SMOKER');
       setNonSmokerDealbreaker(profile.non_smoker_dealbreaker ?? true);
+
+      const parsedGenders = parseInitialTaxonomy(profile.gender_identities);
+      setSelectedGenders(parsedGenders.selected);
+      setCustomGenderText(parsedGenders.customText);
+
+      const lookingList = profile.preferred_genders || profile.looking_for;
+      const parsedLooking = parseInitialTaxonomy(lookingList);
+      setSelectedLookingFor(parsedLooking.selected);
+      setCustomLookingForText(parsedLooking.customText);
+
+      const parsedOrientations = parseInitialTaxonomy(profile.sexual_orientations);
+      setSelectedOrientations(parsedOrientations.selected);
+      setCustomOrientationText(parsedOrientations.customText);
     }
   }, [profile]);
+
+  const toggleGender = (g: string) => {
+    setSelectedGenders((prev) =>
+      prev.includes(g) ? prev.filter((item) => item !== g) : [...prev, g]
+    );
+  };
+
+  const toggleLookingFor = (item: string) => {
+    setSelectedLookingFor((prev) =>
+      prev.includes(item) ? prev.filter((i) => i !== item) : [...prev, item]
+    );
+  };
+
+  const toggleOrientation = (o: string) => {
+    setSelectedOrientations((prev) =>
+      prev.includes(o) ? prev.filter((item) => item !== o) : [...prev, o]
+    );
+  };
 
   const handleDeletePhoto = async (photoId: string) => {
     Alert.alert('Delete Photo', 'Are you sure you want to remove this photo from your gallery?', [
@@ -126,18 +204,40 @@ export default function ProfileScreen() {
   };
 
   const handleSaveChanges = async () => {
+    const finalGenders = buildFinalList(selectedGenders, customGenderText);
+    const finalLookingFor = buildFinalList(selectedLookingFor, customLookingForText);
+    const finalOrientations = buildFinalList(selectedOrientations, customOrientationText);
+
+    if (finalGenders.length === 0) {
+      Alert.alert('Gender Identity Required', 'Please select at least one gender identity under "I am a".');
+      return;
+    }
+    if (finalLookingFor.length === 0) {
+      Alert.alert('Gender Preference Required', 'Please select who you are looking for under "Looking for".');
+      return;
+    }
+    if (finalOrientations.length === 0) {
+      Alert.alert('Sexual Orientation Required', 'Please select at least one sexual orientation.');
+      return;
+    }
+
     setIsSaving(true);
     try {
       // 1. Update profile details on backend using exact DTO fields
       await authService.updateMyProfile({
         display_name: displayName.trim(),
         bio: bio.trim(),
+        gender_identities: finalGenders,
+        preferred_genders: finalLookingFor,
+        looking_for: finalLookingFor,
+        sexual_orientations: finalOrientations,
         smoking_habit: smokingPref,
         smoking_preference: smokingPref,
       });
 
-      // 2. Update discovery preferences dealbreaker on backend
+      // 2. Update discovery preferences dealbreaker and preferred genders on backend
       await discoveryService.updatePreferences({
+        preferred_genders: finalLookingFor,
         dealbreakers: {
           non_smoker_only: nonSmokerDealbreaker,
           require_verified: false,
@@ -146,7 +246,7 @@ export default function ProfileScreen() {
       });
 
       await refreshProfile();
-      Alert.alert('Profile Saved', 'Your profile and discovery dealbreakers have been updated.');
+      Alert.alert('Profile Saved', 'Your profile and discovery preferences have been updated.');
     } catch (err: unknown) {
       if (__DEV__) {
         console.error('[ProfileSave] Failed:', err);
@@ -195,7 +295,7 @@ export default function ProfileScreen() {
                 </Text>
               </View>
             )}
-            {profile?.is_age_verified && (
+            {profile?.is_photo_verified && (
               <View style={styles.verifiedDot}>
                 <Text style={styles.verifiedDotText}>✓</Text>
               </View>
@@ -213,8 +313,21 @@ export default function ProfileScreen() {
                   <Text style={styles.verifiedBadgeText}>✓ 18+ Verified</Text>
                 </View>
               ) : (
-                <View style={styles.unverifiedBadge}>
+                <TouchableOpacity
+                  style={styles.unverifiedBadge}
+                  onPress={() => router.push('/(auth)/verify-age')}
+                  activeOpacity={0.7}
+                >
                   <Text style={styles.unverifiedBadgeText}>Age Pending</Text>
+                </TouchableOpacity>
+              )}
+              {profile?.is_photo_verified ? (
+                <View style={styles.photoVerifiedBadge}>
+                  <Text style={styles.photoVerifiedBadgeText}>✓ Photo Verified</Text>
+                </View>
+              ) : (
+                <View style={styles.photoPendingBadge}>
+                  <Text style={styles.photoPendingBadgeText}>Photo Unverified</Text>
                 </View>
               )}
               <View style={styles.locationBadge}>
@@ -339,6 +452,113 @@ export default function ProfileScreen() {
           </View>
         </View>
 
+        {/* Identity & Dating Preferences Section */}
+        <View style={styles.sectionCard}>
+          <Text style={styles.sectionTitle}>Identity & Dating Preferences</Text>
+          <Text style={styles.sectionDesc}>
+            Customizable identity and preference settings used for discovery and matching.
+          </Text>
+
+          {/* SECTION 1: I am a — Gender identity */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.sectionHeaderLabel}>1. I am a — Gender identity</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <View style={styles.chipsRow}>
+              {GENDER_IDENTITY_OPTIONS.map((g) => {
+                const selected = selectedGenders.includes(g.value);
+                return (
+                  <TouchableOpacity
+                    key={g.value}
+                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    onPress={() => toggleGender(g.value)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                      {g.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {selectedGenders.includes('custom') && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customGenderText}
+                onChangeText={setCustomGenderText}
+                placeholder="Enter your gender identity..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
+          </View>
+
+          {/* SECTION 2: Looking for — Gender preferences */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.sectionHeaderLabel}>2. Looking for — Gender preferences</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <View style={styles.chipsRow}>
+              {LOOKING_FOR_OPTIONS.map((item) => {
+                const selected = selectedLookingFor.includes(item.value);
+                return (
+                  <TouchableOpacity
+                    key={item.value}
+                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    onPress={() => toggleLookingFor(item.value)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {selectedLookingFor.includes('custom') && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customLookingForText}
+                onChangeText={setCustomLookingForText}
+                placeholder="Enter gender preference..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
+          </View>
+
+          {/* SECTION 3: Sexual orientation */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.sectionHeaderLabel}>3. Sexual orientation</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <View style={styles.chipsRow}>
+              {SEXUAL_ORIENTATION_OPTIONS.map((o) => {
+                const selected = selectedOrientations.includes(o.value);
+                return (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    onPress={() => toggleOrientation(o.value)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                      {o.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {selectedOrientations.includes('custom') && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customOrientationText}
+                onChangeText={setCustomOrientationText}
+                placeholder="Enter your sexual orientation..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
+          </View>
+        </View>
+
         {/* Lifestyle & Dealbreakers Section */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Lifestyle & Dealbreakers</Text>
@@ -401,10 +621,10 @@ export default function ProfileScreen() {
           <Text style={styles.securityChevron}>➔</Text>
         </TouchableOpacity>
 
-        {/* Age Assurance Status */}
+        {/* Mandatory Age Assurance Status */}
         <View style={styles.verificationCard}>
           <View style={styles.verificationHeader}>
-            <Text style={styles.verificationTitle}>Age Assurance Status</Text>
+            <Text style={styles.verificationTitle}>18+ Age Assurance (Mandatory)</Text>
             <View
               style={[
                 styles.verBadge,
@@ -426,6 +646,53 @@ export default function ProfileScreen() {
               ? 'Your account has passed mandatory 18+ verification. Discovery swiping and messaging are active.'
               : 'Mandatory 18+ verification is required before matching and messaging with other members.'}
           </Text>
+          {!profile?.is_age_verified && (
+            <TouchableOpacity
+              style={styles.verifyActionBtn}
+              onPress={() => router.push('/(auth)/verify-age')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.verifyActionBtnText}>Complete Age Verification</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Photo Verification (Selfie) */}
+        <View style={[styles.verificationCard, { marginTop: spacing.md }]}>
+          <View style={styles.verificationHeader}>
+            <Text style={styles.verificationTitle}>Photo Verification (Selfie)</Text>
+            <View
+              style={[
+                styles.verBadge,
+                profile?.is_photo_verified ? styles.verBadgeVerified : styles.verBadgeUnverified,
+              ]}
+            >
+              <Text
+                style={[
+                  styles.verBadgeText,
+                  profile?.is_photo_verified ? styles.verTextVerified : styles.verTextUnverified,
+                ]}
+              >
+                {profile?.is_photo_verified ? '✓ Photo Verified' : 'Photo Unverified'}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.verificationBody}>
+            {profile?.is_photo_verified
+              ? 'Your photo verification selfie is approved. The verified member checkmark is active on your profile.'
+              : 'Photo verification confirms authenticity with a private selfie. You can freely edit your profile while verification is pending.'}
+          </Text>
+          {!profile?.is_photo_verified && (
+            <TouchableOpacity
+              style={styles.verifyActionBtn}
+              onPress={() => router.push('/(auth)/verify-age')}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.verifyActionBtnText}>
+                {profile?.verification_status === 'PENDING' ? 'Check Verification Status' : 'Take Verification Selfie'}
+              </Text>
+            </TouchableOpacity>
+          )}
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -577,6 +844,48 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: colors.amber,
     fontWeight: '700',
+  },
+  photoVerifiedBadge: {
+    backgroundColor: colors.emeraldMuted,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: colors.emerald,
+  },
+  photoVerifiedBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.emerald,
+    fontWeight: '700',
+  },
+  photoPendingBadge: {
+    backgroundColor: 'rgba(212, 175, 55, 0.12)',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(212, 175, 55, 0.3)',
+  },
+  photoPendingBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.gold,
+    fontWeight: '600',
+  },
+  verifyActionBtn: {
+    backgroundColor: colors.goldMuted,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    borderRadius: borderRadius.md,
+    paddingVertical: 10,
+    alignItems: 'center',
+    marginTop: spacing.md,
+  },
+  verifyActionBtnText: {
+    ...typography.button,
+    color: colors.gold,
+    fontSize: 13,
   },
   locationBadge: {
     backgroundColor: colors.cardElevated,
@@ -746,6 +1055,18 @@ const styles = StyleSheet.create({
     textTransform: 'uppercase',
     letterSpacing: 0.5,
   },
+  sectionHeaderLabel: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.text,
+    marginBottom: 2,
+  },
+  sectionSubLabel: {
+    ...typography.caption,
+    color: colors.gold,
+    fontSize: 11,
+    marginBottom: spacing.xs,
+  },
   input: {
     height: 48,
     backgroundColor: colors.backgroundElevated,
@@ -755,6 +1076,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     color: colors.text,
     ...typography.body,
+  },
+  customInput: {
+    marginTop: spacing.xs,
+    borderColor: colors.borderFocus,
   },
   bioInput: {
     height: 90,

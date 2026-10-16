@@ -21,7 +21,10 @@ export interface TaxonomyOption {
   label: string;
 }
 
-export const GENDER_OPTIONS: TaxonomyOption[] = [
+// Section 1: I am a — Gender identity
+export const GENDER_IDENTITY_OPTIONS: TaxonomyOption[] = [
+  { value: 'woman', label: 'Woman' },
+  { value: 'man', label: 'Man' },
   { value: 'non-binary', label: 'Non-Binary' },
   { value: 'transgender woman', label: 'Transgender Woman' },
   { value: 'transgender man', label: 'Transgender Man' },
@@ -32,9 +35,30 @@ export const GENDER_OPTIONS: TaxonomyOption[] = [
   { value: 'two-spirit', label: 'Two-Spirit' },
   { value: 'genderqueer', label: 'Genderqueer' },
   { value: 'intersex', label: 'Intersex' },
+  { value: 'prefer not to say', label: 'Prefer not to say' },
+  { value: 'custom', label: 'Another identity' },
 ];
 
-export const ORIENTATION_OPTIONS: TaxonomyOption[] = [
+// Section 2: Looking for — Gender preferences
+export const LOOKING_FOR_OPTIONS: TaxonomyOption[] = [
+  { value: 'woman', label: 'Woman' },
+  { value: 'man', label: 'Man' },
+  { value: 'non-binary', label: 'Non-Binary' },
+  { value: 'transgender woman', label: 'Transgender Woman' },
+  { value: 'transgender man', label: 'Transgender Man' },
+  { value: 'cisgender woman', label: 'Cisgender Woman' },
+  { value: 'cisgender man', label: 'Cisgender Man' },
+  { value: 'genderfluid', label: 'Genderfluid' },
+  { value: 'agender', label: 'Agender' },
+  { value: 'two-spirit', label: 'Two-Spirit' },
+  { value: 'genderqueer', label: 'Genderqueer' },
+  { value: 'intersex', label: 'Intersex' },
+  { value: 'all', label: 'Everyone / Open to all' },
+  { value: 'custom', label: 'Another identity' },
+];
+
+// Section 3: Sexual orientation (Strictly separated from gender identity)
+export const SEXUAL_ORIENTATION_OPTIONS: TaxonomyOption[] = [
   { value: 'lesbian', label: 'Lesbian' },
   { value: 'gay', label: 'Gay' },
   { value: 'bisexual', label: 'Bisexual' },
@@ -43,7 +67,14 @@ export const ORIENTATION_OPTIONS: TaxonomyOption[] = [
   { value: 'asexual', label: 'Asexual' },
   { value: 'demisexual', label: 'Demisexual' },
   { value: 'questioning', label: 'Questioning' },
+  { value: 'straight', label: 'Straight / Heterosexual' },
+  { value: 'prefer not to say', label: 'Prefer not to say' },
+  { value: 'custom', label: 'Another orientation' },
 ];
+
+// Backwards-compatible aliases
+export const GENDER_OPTIONS = GENDER_IDENTITY_OPTIONS;
+export const ORIENTATION_OPTIONS = SEXUAL_ORIENTATION_OPTIONS;
 
 function validatePassword(pwd: string): string | null {
   if (pwd.length < 8) {
@@ -70,8 +101,19 @@ export default function RegisterScreen() {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [birthdate, setBirthdate] = useState('');
+
+  // 1. I am a — Gender identity
   const [selectedGenders, setSelectedGenders] = useState<string[]>([]);
+  const [customGenderText, setCustomGenderText] = useState('');
+
+  // 2. Looking for — Gender preferences
+  const [selectedLookingFor, setSelectedLookingFor] = useState<string[]>([]);
+  const [customLookingForText, setCustomLookingForText] = useState('');
+
+  // 3. Sexual orientation
   const [selectedOrientations, setSelectedOrientations] = useState<string[]>([]);
+  const [customOrientationText, setCustomOrientationText] = useState('');
+
   const [referralCode, setReferralCode] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -81,10 +123,29 @@ export default function RegisterScreen() {
     );
   };
 
+  const toggleLookingFor = (item: string) => {
+    setSelectedLookingFor((prev) =>
+      prev.includes(item) ? prev.filter((i) => i !== item) : [...prev, item]
+    );
+  };
+
   const toggleOrientation = (o: string) => {
     setSelectedOrientations((prev) =>
       prev.includes(o) ? prev.filter((item) => item !== o) : [...prev, o]
     );
+  };
+
+  const buildFinalList = (selected: string[], customText: string): string[] => {
+    const list = selected.filter((item) => item !== 'custom');
+    if (selected.includes('custom')) {
+      const trimmed = customText.trim().toLowerCase();
+      if (trimmed) {
+        list.push(trimmed.startsWith('custom:') ? trimmed : `custom:${trimmed}`);
+      } else {
+        list.push('custom');
+      }
+    }
+    return list;
   };
 
   const handleRegister = async () => {
@@ -104,13 +165,24 @@ export default function RegisterScreen() {
       return;
     }
 
-    if (selectedGenders.length === 0) {
-      Alert.alert('Gender Identity', 'Please select at least one gender identity.');
+    // 1. Validate Gender Identity ("I am a")
+    const finalGenders = buildFinalList(selectedGenders, customGenderText);
+    if (finalGenders.length === 0) {
+      Alert.alert('Gender Identity Required', 'Please select at least one gender identity under "I am a".');
       return;
     }
 
-    if (selectedOrientations.length === 0) {
-      Alert.alert('Sexual Orientation', 'Please select at least one sexual orientation.');
+    // 2. Validate Gender Preferences ("Looking for")
+    const finalLookingFor = buildFinalList(selectedLookingFor, customLookingForText);
+    if (finalLookingFor.length === 0) {
+      Alert.alert('Gender Preference Required', 'Please select who you are looking for under "Looking for".');
+      return;
+    }
+
+    // 3. Validate Sexual Orientation
+    const finalOrientations = buildFinalList(selectedOrientations, customOrientationText);
+    if (finalOrientations.length === 0) {
+      Alert.alert('Sexual Orientation Required', 'Please select at least one sexual orientation.');
       return;
     }
 
@@ -138,8 +210,10 @@ export default function RegisterScreen() {
         email: email.trim(),
         password,
         birthdate: birthdate.trim(),
-        gender_identities: selectedGenders,
-        sexual_orientations: selectedOrientations,
+        gender_identities: finalGenders,
+        preferred_genders: finalLookingFor,
+        looking_for: finalLookingFor,
+        sexual_orientations: finalOrientations,
         referral_code: referralCode.trim() || undefined,
       });
 
@@ -151,6 +225,10 @@ export default function RegisterScreen() {
       setLoading(false);
     }
   };
+
+  const hasCustomGender = selectedGenders.includes('custom');
+  const hasCustomLookingFor = selectedLookingFor.includes('custom');
+  const hasCustomOrientation = selectedOrientations.includes('custom');
 
   return (
     <KeyboardAvoidingView
@@ -230,11 +308,12 @@ export default function RegisterScreen() {
             />
           </View>
 
-          {/* LGBTQ+ Taxonomy */}
+          {/* SECTION 1: I am a — Gender identity */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Gender Identity (Select all that apply)</Text>
+            <Text style={styles.sectionHeaderLabel}>1. I am a — Gender identity</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
             <View style={styles.chipsRow}>
-              {GENDER_OPTIONS.map((g) => {
+              {GENDER_IDENTITY_OPTIONS.map((g) => {
                 const selected = selectedGenders.includes(g.value);
                 return (
                   <TouchableOpacity
@@ -250,12 +329,57 @@ export default function RegisterScreen() {
                 );
               })}
             </View>
+            {hasCustomGender && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customGenderText}
+                onChangeText={setCustomGenderText}
+                placeholder="Enter your gender identity..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
           </View>
 
+          {/* SECTION 2: Looking for — Gender preferences */}
           <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Sexual Orientation (Select all that apply)</Text>
+            <Text style={styles.sectionHeaderLabel}>2. Looking for — Gender preferences</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
             <View style={styles.chipsRow}>
-              {ORIENTATION_OPTIONS.map((o) => {
+              {LOOKING_FOR_OPTIONS.map((item) => {
+                const selected = selectedLookingFor.includes(item.value);
+                return (
+                  <TouchableOpacity
+                    key={item.value}
+                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    onPress={() => toggleLookingFor(item.value)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                      {item.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {hasCustomLookingFor && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customLookingForText}
+                onChangeText={setCustomLookingForText}
+                placeholder="Enter gender preference..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
+          </View>
+
+          {/* SECTION 3: Sexual orientation */}
+          <View style={styles.inputGroup}>
+            <Text style={styles.sectionHeaderLabel}>3. Sexual orientation</Text>
+            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <View style={styles.chipsRow}>
+              {SEXUAL_ORIENTATION_OPTIONS.map((o) => {
                 const selected = selectedOrientations.includes(o.value);
                 return (
                   <TouchableOpacity
@@ -271,6 +395,16 @@ export default function RegisterScreen() {
                 );
               })}
             </View>
+            {hasCustomOrientation && (
+              <TextInput
+                style={[styles.input, styles.customInput]}
+                value={customOrientationText}
+                onChangeText={setCustomOrientationText}
+                placeholder="Enter your sexual orientation..."
+                placeholderTextColor={colors.textSubtle}
+                maxLength={40}
+              />
+            )}
           </View>
 
           <View style={styles.inputGroup}>
@@ -355,6 +489,18 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginBottom: spacing.xs,
   },
+  sectionHeaderLabel: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.text,
+    marginBottom: 2,
+  },
+  sectionSubLabel: {
+    ...typography.caption,
+    color: colors.gold,
+    fontSize: 11,
+    marginBottom: spacing.xs,
+  },
   input: {
     height: 48,
     backgroundColor: colors.backgroundElevated,
@@ -364,6 +510,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.md,
     color: colors.text,
     ...typography.body,
+  },
+  customInput: {
+    marginTop: spacing.xs,
+    borderColor: colors.borderFocus,
   },
   chipsRow: {
     flexDirection: 'row',

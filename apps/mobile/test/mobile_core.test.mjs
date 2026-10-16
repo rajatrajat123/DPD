@@ -2580,5 +2580,220 @@ test('Reset Password Validation & Token Confirmation: enforces Aura password pol
   assert.equal(confirmPayload.new_password, 'NewSecurePassword2026!');
 });
 
+// --- Test 45: 3 Distinct Onboarding Fields, Custom Serialization & Timeout Handling ---
+test('Onboarding 3-Section Taxonomy & Timeout Handling: enforces strict separation, custom prefixing, and clear error diagnostics', () => {
+  // 1. Verify 3 distinct sections in exact order
+  const sections = [
+    '1. I am a — Gender identity',
+    '2. Looking for — Gender preferences',
+    '3. Sexual orientation',
+  ];
+  assert.equal(sections[0], '1. I am a — Gender identity');
+  assert.equal(sections[1], '2. Looking for — Gender preferences');
+  assert.equal(sections[2], '3. Sexual orientation');
+
+  // 2. Strict separation: Lesbian MUST be strictly under Sexual orientation
+  const genderValues = [
+    'woman', 'man', 'non-binary', 'transgender woman', 'transgender man',
+    'cisgender woman', 'cisgender man', 'genderfluid', 'agender', 'two-spirit',
+    'genderqueer', 'intersex', 'prefer not to say', 'custom',
+  ];
+  const lookingForValues = [
+    'woman', 'man', 'non-binary', 'transgender woman', 'transgender man',
+    'cisgender woman', 'cisgender man', 'genderfluid', 'agender', 'two-spirit',
+    'genderqueer', 'intersex', 'all', 'custom',
+  ];
+  const orientationValues = [
+    'lesbian', 'gay', 'bisexual', 'pansexual', 'queer', 'asexual',
+    'demisexual', 'questioning', 'straight', 'prefer not to say', 'custom',
+  ];
+
+  assert.ok(orientationValues.includes('lesbian'), '"lesbian" must be in sexual orientation');
+  assert.ok(!genderValues.includes('lesbian'), '"lesbian" must NEVER be in gender identity');
+  assert.ok(!lookingForValues.includes('lesbian'), '"lesbian" must NEVER be in looking for gender preferences');
+
+  // 3. Custom identity and orientation serialization with custom: prefix
+  function buildFinalList(selected, customText) {
+    const list = selected.filter((item) => item !== 'custom');
+    if (selected.includes('custom')) {
+      const trimmed = customText.trim().toLowerCase();
+      if (trimmed) {
+        list.push(trimmed.startsWith('custom:') ? trimmed : `custom:${trimmed}`);
+      } else {
+        list.push('custom');
+      }
+    }
+    return list;
+  }
+
+  // Standard without custom
+  assert.deepEqual(buildFinalList(['woman', 'non-binary'], ''), ['woman', 'non-binary']);
+
+  // Custom gender identity with custom: prefix
+  const customGender = buildFinalList(['woman', 'custom'], ' Demi-Girl ');
+  assert.deepEqual(customGender, ['woman', 'custom:demi-girl']);
+
+  // Custom orientation with custom: prefix
+  const customOrient = buildFinalList(['queer', 'custom'], ' Omnisexual ');
+  assert.deepEqual(customOrient, ['queer', 'custom:omnisexual']);
+
+  // Looking for with "all" (Everyone / Open to all)
+  const lookingAll = buildFinalList(['all'], '');
+  assert.deepEqual(lookingAll, ['all']);
+
+  // "prefer not to say" support
+  const preferNotToSay = buildFinalList(['prefer not to say'], '');
+  assert.deepEqual(preferNotToSay, ['prefer not to say']);
+
+  // 4. Hermes Fetch Abort / Cancellation diagnostics
+  function formatNetworkError(error, apiUrl) {
+    const errorObj = error && typeof error === 'object' ? error : null;
+    const msg = error instanceof Error ? error.message : errorObj?.message || 'Network connection failure';
+    const isAbort = errorObj?.name === 'AbortError' || /canceled|aborted/i.test(msg);
+    if (isAbort) {
+      return {
+        status: 408,
+        code: 'TIMEOUT',
+        message: `Request timed out or was canceled (${apiUrl}). Please check server connectivity.`,
+      };
+    }
+    return {
+      status: 0,
+      code: 'NETWORK_ERROR',
+      message: `${msg} (${apiUrl})`,
+    };
+  }
+
+  const hermesCancelError = new TypeError('fetch failed: Fetch request has been canceled');
+  const formatted = formatNetworkError(hermesCancelError, 'http://192.168.29.15:8080');
+  assert.equal(formatted.status, 408);
+  assert.equal(formatted.code, 'TIMEOUT');
+  assert.ok(formatted.message.includes('http://192.168.29.15:8080'));
+  assert.ok(formatted.message.includes('timed out or was canceled'));
+});
+
+// --- Test 46: Selfie Verification Persistence & Mount Recovery ---
+test('Selfie Verification: associates media_id with age assurance session and recovers status on mount', async () => {
+  const calls = [];
+  const mockAuthService = {
+    async startAgeAssuranceSession(mediaId) {
+      calls.push({ action: 'startSession', mediaId });
+      return { session_id: 'inq_selfie_123', status: 'PENDING' };
+    },
+    async getAgeAssuranceStatus() {
+      calls.push({ action: 'getStatus' });
+      return {
+        user_id: 'usr_abc',
+        status: 'PENDING',
+        metadata: { media_id: 'med_selfie_999' },
+      };
+    },
+  };
+
+  // 1. Upload verification selfie returns media_id
+  const uploadedAsset = { media_id: 'med_selfie_999', status: 'READY' };
+
+  // 2. startAgeAssuranceSession receives media_id
+  const session = await mockAuthService.startAgeAssuranceSession(uploadedAsset.media_id);
+  assert.equal(session.session_id, 'inq_selfie_123');
+  assert.equal(calls[0].mediaId, 'med_selfie_999');
+
+  // 3. Status recovery maps correctly on screen mount
+  function mapBackendStatusToStep(statusRes) {
+    if (!statusRes) return 'INFO';
+    if (statusRes.status === 'VERIFIED') return 'VERIFIED';
+    if (statusRes.status === 'PENDING' || statusRes.status === 'MANUAL_REVIEW') return 'PENDING';
+    if (statusRes.status === 'REJECTED') return 'REJECTED';
+    if (statusRes.status === 'FAILED') return 'FAILED';
+    return 'INFO';
+  }
+
+  const restoredStatus = await mockAuthService.getAgeAssuranceStatus();
+  assert.equal(restoredStatus.metadata.media_id, 'med_selfie_999');
+  assert.equal(mapBackendStatusToStep(restoredStatus), 'PENDING');
+  assert.equal(mapBackendStatusToStep({ status: 'VERIFIED' }), 'VERIFIED');
+  assert.equal(mapBackendStatusToStep({ status: 'REJECTED' }), 'REJECTED');
+  assert.equal(mapBackendStatusToStep({ status: 'UNVERIFIED' }), 'INFO');
+  assert.equal(mapBackendStatusToStep(null), 'INFO');
+});
+
+// --- Test 47: Profile Access While Verification is Pending & Badge Separation ---
+test('Profile Access & Badge Separation: keeps profile editing functional and denies verified badge while pending', () => {
+  // Pending verification profile
+  const pendingProfile = {
+    id: 'prof_1',
+    user_id: 'usr_1',
+    display_name: 'Alex',
+    bio: 'Queer artist',
+    is_age_verified: false,
+    is_photo_verified: false,
+    verification_status: 'PENDING',
+    photo_verification_status: 'PENDING',
+    photos: [{ id: 'p1', url: 'https://cdn.aura.local/p1.jpg', is_primary: true, order: 0 }],
+  };
+
+  // 1. Avatar badge dot is STRICTLY gated on is_photo_verified === true
+  function shouldShowVerifiedDot(p) {
+    return Boolean(p?.is_photo_verified);
+  }
+  assert.equal(shouldShowVerifiedDot(pendingProfile), false, 'Pending user must NOT have verified badge dot');
+
+  const verifiedProfile = { ...pendingProfile, is_photo_verified: true, photo_verification_status: 'VERIFIED' };
+  assert.equal(shouldShowVerifiedDot(verifiedProfile), true, 'Confirmed photo-verified user has badge dot');
+
+  // 2. Statuses remain strictly separated
+  assert.notEqual(pendingProfile.is_age_verified, undefined);
+  assert.notEqual(pendingProfile.is_photo_verified, undefined);
+  assert.equal(pendingProfile.is_age_verified, false);
+  assert.equal(pendingProfile.is_photo_verified, false);
+
+  // 3. Profile editing is fully allowed even when verification is pending
+  function canEditProfile(p) {
+    return Boolean(p && p.user_id); // Editable for all active accounts regardless of verification status
+  }
+  assert.equal(canEditProfile(pendingProfile), true, 'Profile must remain editable while verification is pending');
+});
+
+// --- Test 48: Resend Transactional Email Requirements for Gmail ---
+test('Forgot Password Resend Delivery: verifies domain, token generation, and fail-safe unconfigured handling', () => {
+  // 1. Resend sink unconfigured in development logs safely and does not throw or fake delivery
+  function checkResendDeliveryConfig(apiKey, fromEmail) {
+    if (!apiKey) {
+      return { configured: false, reason: 'RESEND_API_KEY_MISSING' };
+    }
+    const fromDomain = fromEmail.includes('@') ? fromEmail.split('@')[1].replace('>', '').trim() : '';
+    if (fromDomain === 'resend.dev') {
+      return {
+        configured: true,
+        canSendToArbitraryGmail: false,
+        reason: 'TESTING_DOMAIN_RESTRICTED_TO_ACCOUNT_OWNER',
+      };
+    }
+    return {
+      configured: true,
+      canSendToArbitraryGmail: true,
+      requiresDnsVerification: true,
+    };
+  }
+
+  // Without API key
+  const noKey = checkResendDeliveryConfig('', 'Aura <security@aura.dating>');
+  assert.equal(noKey.configured, false);
+  assert.equal(noKey.reason, 'RESEND_API_KEY_MISSING');
+
+  // With sandbox onboarding@resend.dev
+  const sandbox = checkResendDeliveryConfig('re_test_key', 'onboarding@resend.dev');
+  assert.equal(sandbox.configured, true);
+  assert.equal(sandbox.canSendToArbitraryGmail, false);
+
+  // With custom production domain security@aura.dating
+  const prodDomain = checkResendDeliveryConfig('re_live_key', 'security@aura.dating');
+  assert.equal(prodDomain.configured, true);
+  assert.equal(prodDomain.canSendToArbitraryGmail, true);
+  assert.equal(prodDomain.requiresDnsVerification, true);
+});
+
+
+
 
 

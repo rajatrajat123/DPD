@@ -40,6 +40,8 @@ export interface Profile {
   pronouns: string[];
   gender_identities: string[];
   sexual_orientations: string[];
+  preferred_genders?: string[];
+  looking_for?: string[];
   relationship_intents: string[];
   smoking_preference: SmokingPreference;
   smoking_habit?: SmokingPreference;
@@ -48,7 +50,9 @@ export interface Profile {
   region?: string;
   photos: ProfilePhoto[];
   is_age_verified: boolean;
+  is_photo_verified?: boolean;
   verification_status: 'UNVERIFIED' | 'PENDING' | 'VERIFIED' | 'REJECTED';
+  photo_verification_status?: 'UNVERIFIED' | 'PENDING' | 'VERIFIED' | 'REJECTED';
 }
 
 export interface DiscoveryPreferences {

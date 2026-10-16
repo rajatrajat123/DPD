@@ -1633,10 +1633,29 @@ func calculateAge(birthdate time.Time, now time.Time) int {
 func hasOverlap(sliceA, sliceB []string) bool {
 	set := make(map[string]struct{}, len(sliceA))
 	for _, item := range sliceA {
-		set[strings.ToLower(strings.TrimSpace(item))] = struct{}{}
+		norm := strings.ToLower(strings.TrimSpace(item))
+		if norm == "all" || norm == "everyone" {
+			return true
+		}
+		set[norm] = struct{}{}
+		if norm == "woman" {
+			set["cisgender woman"] = struct{}{}
+			set["cis woman"] = struct{}{}
+			set["transgender woman"] = struct{}{}
+			set["trans woman"] = struct{}{}
+		} else if norm == "man" {
+			set["cisgender man"] = struct{}{}
+			set["cis man"] = struct{}{}
+			set["transgender man"] = struct{}{}
+			set["trans man"] = struct{}{}
+		}
 	}
 	for _, item := range sliceB {
-		if _, ok := set[strings.ToLower(strings.TrimSpace(item))]; ok {
+		norm := strings.ToLower(strings.TrimSpace(item))
+		if norm == "all" || norm == "everyone" {
+			return true
+		}
+		if _, ok := set[norm]; ok {
 			return true
 		}
 	}

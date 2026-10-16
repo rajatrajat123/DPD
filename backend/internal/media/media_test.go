@@ -11,6 +11,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -763,6 +766,463 @@ func TestHandler_UploadIntent_RejectsZeroSizeBytes(t *testing.T) {
 		t.Errorf("expected both asset_id and media_id in response")
 	}
 }
+
+func setupTestMediaWithRepo(t *testing.T) (*media.Service, *media.MemoryMediaRepository, *media.FileStorageEngine, string) {
+	t.Helper()
+	tempDir := t.TempDir()
+	storage, err := media.NewFileStorageEngine(tempDir, "test-media-signing-secret-key-32b-long")
+	if err != nil {
+		t.Fatalf("failed to create test storage engine: %v", err)
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	processor := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	repo := media.NewMemoryRepository()
+	svc := media.NewService(repo, storage, processor, logger, media.WithRetentionInterval(0))
+	t.Cleanup(func() {
+		svc.Stop()
+	})
+
+	return svc, repo, storage, tempDir
+}
+
+func countFilesWithAssetID(baseDir, assetID string) int {
+	count := 0
+	_ = filepath.Walk(baseDir, func(path string, info os.FileInfo, err error) error {
+		if err == nil && strings.Contains(path, assetID) {
+			count++
+		}
+		return nil
+	})
+	return count
+}
+
+func TestService_RetentionCleanup_ExpiredAssetsPurged(t *testing.T) {
+	svc, repo, _, tempDir := setupTestMediaWithRepo(t)
+	ctx := context.Background()
+
+	testJPEG := media.GenerateTestJPEG(400, 400)
+	userID := "user-retention-expired-1"
+
+	// 1. Upload selfie verification image
+	resp, err := svc.UploadDirect(
+		ctx,
+		userID,
+		string(media.PurposeSelfieVerification),
+		string(media.MediaTypeImage),
+		"selfie.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-selfie-expired-1",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload selfie: %v", err)
+	}
+
+	// Confirm files exist on disk before purge
+	if count := countFilesWithAssetID(tempDir, resp.ID); count == 0 {
+		t.Fatalf("expected files on disk for asset %s before purge", resp.ID)
+	}
+
+	// 2. Set retention expiration in the past (1 hour ago)
+	asset, err := repo.GetAssetByID(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch asset from repo: %v", err)
+	}
+	expiredTime := time.Now().Add(-1 * time.Hour).UTC()
+	asset.OriginalPurgeAfter = &expiredTime
+	if err := repo.UpdateAsset(ctx, asset); err != nil {
+		t.Fatalf("failed to update asset expiration: %v", err)
+	}
+
+	// 3. Execute automatic retention cleanup
+	summary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("PurgeExpiredAssets failed: %v", err)
+	}
+
+	if summary.Scanned != 1 || summary.Purged != 1 || summary.Failed != 0 {
+		t.Errorf("unexpected purge summary: %+v, want Scanned=1 Purged=1 Failed=0", summary)
+	}
+
+	// 4. Verify database status is PURGED (cannot be retrieved)
+	_, err = repo.GetAssetByID(ctx, resp.ID)
+	if err == nil || !errors.Is(err, media.ErrAssetNotFound) {
+		t.Errorf("expected ErrAssetNotFound for purged asset, got %v", err)
+	}
+
+	// 5. Verify filesystem: files and derivative directories are removed
+	if remaining := countFilesWithAssetID(tempDir, resp.ID); remaining != 0 {
+		t.Errorf("expected 0 files remaining on disk for asset %s, found %d", resp.ID, remaining)
+	}
+}
+
+func TestService_RetentionCleanup_UnexpiredAssetsPreserved(t *testing.T) {
+	svc, repo, _, tempDir := setupTestMediaWithRepo(t)
+	ctx := context.Background()
+
+	testJPEG := media.GenerateTestJPEG(400, 400)
+	userID := "user-retention-unexpired-1"
+
+	// 1. Upload selfie verification image
+	resp, err := svc.UploadDirect(
+		ctx,
+		userID,
+		string(media.PurposeSelfieVerification),
+		string(media.MediaTypeImage),
+		"selfie.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-selfie-unexpired-1",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload selfie: %v", err)
+	}
+
+	// 2. Set retention deadline in the future (48 hours from now)
+	asset, err := repo.GetAssetByID(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch asset from repo: %v", err)
+	}
+	futureTime := time.Now().Add(48 * time.Hour).UTC()
+	asset.OriginalPurgeAfter = &futureTime
+	if err := repo.UpdateAsset(ctx, asset); err != nil {
+		t.Fatalf("failed to update asset expiration: %v", err)
+	}
+
+	// 3. Execute automatic retention cleanup
+	summary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("PurgeExpiredAssets failed: %v", err)
+	}
+
+	if summary.Scanned != 0 || summary.Purged != 0 || summary.Failed != 0 {
+		t.Errorf("unexpected purge summary for unexpired asset: %+v", summary)
+	}
+
+	// 4. Verify asset is still active and retrievable
+	activeAsset, err := repo.GetAssetByID(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("expected asset to remain accessible: %v", err)
+	}
+	if activeAsset.Status == media.StatusPurged {
+		t.Errorf("unexpired asset must not be marked PURGED")
+	}
+
+	// 5. Files must remain on disk
+	if count := countFilesWithAssetID(tempDir, resp.ID); count == 0 {
+		t.Errorf("unexpired asset files must remain on disk")
+	}
+}
+
+func TestService_RetentionCleanup_ProfileGalleryNeverPurged(t *testing.T) {
+	svc, repo, _, tempDir := setupTestMediaWithRepo(t)
+	ctx := context.Background()
+
+	testJPEG := media.GenerateTestJPEG(400, 400)
+	userID := "user-retention-gallery-1"
+
+	// 1. Upload profile gallery image
+	resp, err := svc.UploadDirect(
+		ctx,
+		userID,
+		string(media.PurposeProfileGallery),
+		string(media.MediaTypeImage),
+		"profile.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-gallery-preserve-1",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload profile photo: %v", err)
+	}
+
+	// 2. Even if OriginalPurgeAfter is in the past, profile gallery media must NEVER be deleted
+	asset, err := repo.GetAssetByID(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("failed to fetch asset: %v", err)
+	}
+	pastTime := time.Now().Add(-24 * time.Hour).UTC()
+	asset.OriginalPurgeAfter = &pastTime
+	if err := repo.UpdateAsset(ctx, asset); err != nil {
+		t.Fatalf("failed to update asset: %v", err)
+	}
+
+	// 3. Execute retention cleanup
+	summary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("PurgeExpiredAssets failed: %v", err)
+	}
+
+	if summary.Purged != 0 {
+		t.Errorf("profile gallery photo must never be purged under retention cleanup, got purged=%d", summary.Purged)
+	}
+
+	// 4. Verify gallery photo remains in gallery
+	gallery, err := svc.ListUserGallery(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to list gallery: %v", err)
+	}
+	if len(gallery) != 1 || gallery[0].ID != resp.ID {
+		t.Errorf("expected profile photo to remain in user gallery")
+	}
+
+	// 5. Files must remain on disk
+	if count := countFilesWithAssetID(tempDir, resp.ID); count == 0 {
+		t.Errorf("profile photo files must remain on disk")
+	}
+}
+
+func TestService_RetentionCleanup_RepeatedRunsIdempotent(t *testing.T) {
+	svc, repo, _, _ := setupTestMediaWithRepo(t)
+	ctx := context.Background()
+
+	testJPEG := media.GenerateTestJPEG(400, 400)
+	userID := "user-retention-idempotent-1"
+
+	resp, err := svc.UploadDirect(
+		ctx,
+		userID,
+		string(media.PurposeSelfieVerification),
+		string(media.MediaTypeImage),
+		"selfie.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-selfie-repeat-1",
+	)
+	if err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	pastTime := time.Now().Add(-10 * time.Minute).UTC()
+	asset, _ := repo.GetAssetByID(ctx, resp.ID)
+	asset.OriginalPurgeAfter = &pastTime
+	_ = repo.UpdateAsset(ctx, asset)
+
+	// First run: purges the expired asset
+	s1, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("first run failed: %v", err)
+	}
+	if s1.Purged != 1 {
+		t.Errorf("expected 1 purged on first run, got %d", s1.Purged)
+	}
+
+	// Second run: nothing expired remains, returns 0 cleanly without error
+	s2, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("second run failed: %v", err)
+	}
+	if s2.Scanned != 0 || s2.Purged != 0 || s2.Failed != 0 {
+		t.Errorf("expected 0 scanned/purged on second run, got %+v", s2)
+	}
+}
+
+type failingStorageEngine struct {
+	media.StorageEngine
+	failDeleteFiles error
+}
+
+func (f *failingStorageEngine) DeleteAssetFiles(ctx context.Context, assetID string) error {
+	if f.failDeleteFiles != nil {
+		return f.failDeleteFiles
+	}
+	return f.StorageEngine.DeleteAssetFiles(ctx, assetID)
+}
+
+type failingMediaRepository struct {
+	media.Repository
+	failDeleteAsset error
+}
+
+func (f *failingMediaRepository) DeleteAsset(ctx context.Context, id string, ownerUserID string) error {
+	if f.failDeleteAsset != nil {
+		return f.failDeleteAsset
+	}
+	return f.Repository.DeleteAsset(ctx, id, ownerUserID)
+}
+
+func TestService_RetentionCleanup_FilesystemFailureHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	baseStorage, err := media.NewFileStorageEngine(tempDir, "test-secret-32b-length-must-be-long")
+	if err != nil {
+		t.Fatalf("storage init error: %v", err)
+	}
+
+	failStorage := &failingStorageEngine{
+		StorageEngine:   baseStorage,
+		failDeleteFiles: errors.New("simulated disk I/O permission denied"),
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proc := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	repo := media.NewMemoryRepository()
+	svc := media.NewService(repo, failStorage, proc, logger, media.WithRetentionInterval(0))
+	defer svc.Stop()
+
+	ctx := context.Background()
+	testJPEG := media.GenerateTestJPEG(350, 350)
+	resp, err := svc.UploadDirect(
+		ctx,
+		"user-fail-fs-1",
+		string(media.PurposeSelfieVerification),
+		string(media.MediaTypeImage),
+		"selfie.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-fail-fs-1",
+	)
+	if err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	past := time.Now().Add(-5 * time.Minute).UTC()
+	asset, _ := repo.GetAssetByID(ctx, resp.ID)
+	asset.OriginalPurgeAfter = &past
+	_ = repo.UpdateAsset(ctx, asset)
+
+	// Execute retention purge with failing storage engine
+	summary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("unexpected method error: %v", err)
+	}
+
+	// Purge must count failure and NOT mark asset PURGED in DB
+	if summary.Failed != 1 || summary.Purged != 0 {
+		t.Errorf("expected Failed=1 Purged=0, got %+v", summary)
+	}
+
+	// Database record must remain un-purged to allow future retry
+	persisted, err := repo.GetAssetByID(ctx, resp.ID)
+	if err != nil {
+		t.Fatalf("asset must remain accessible in database on filesystem failure: %v", err)
+	}
+	if persisted.Status == media.StatusPurged {
+		t.Errorf("asset must NOT be marked PURGED when filesystem deletion fails")
+	}
+}
+
+func TestService_RetentionCleanup_DatabaseFailureHandling(t *testing.T) {
+	tempDir := t.TempDir()
+	storage, err := media.NewFileStorageEngine(tempDir, "test-secret-32b-length-must-be-long")
+	if err != nil {
+		t.Fatalf("storage init error: %v", err)
+	}
+
+	baseRepo := media.NewMemoryRepository()
+	failRepo := &failingMediaRepository{
+		Repository:      baseRepo,
+		failDeleteAsset: errors.New("simulated database deadlock/timeout"),
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proc := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	svc := media.NewService(failRepo, storage, proc, logger, media.WithRetentionInterval(0))
+	defer svc.Stop()
+
+	ctx := context.Background()
+	testJPEG := media.GenerateTestJPEG(350, 350)
+	resp, err := svc.UploadDirect(
+		ctx,
+		"user-fail-db-1",
+		string(media.PurposeSelfieVerification),
+		string(media.MediaTypeImage),
+		"selfie.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idem-fail-db-1",
+	)
+	if err != nil {
+		t.Fatalf("upload failed: %v", err)
+	}
+
+	past := time.Now().Add(-5 * time.Minute).UTC()
+	asset, _ := baseRepo.GetAssetByID(ctx, resp.ID)
+	asset.OriginalPurgeAfter = &past
+	_ = baseRepo.UpdateAsset(ctx, asset)
+
+	// Run 1: DB update fails
+	summary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("unexpected method error: %v", err)
+	}
+	if summary.Failed != 1 || summary.Purged != 0 {
+		t.Errorf("expected Failed=1 Purged=0, got %+v", summary)
+	}
+
+	// Run 2: DB recovers
+	failRepo.failDeleteAsset = nil
+	retrySummary, err := svc.PurgeExpiredAssets(ctx)
+	if err != nil {
+		t.Fatalf("retry failed: %v", err)
+	}
+	if retrySummary.Purged != 1 || retrySummary.Failed != 0 {
+		t.Errorf("expected Purged=1 Failed=0 on retry, got %+v", retrySummary)
+	}
+
+	// Status is now PURGED
+	_, err = baseRepo.GetAssetByID(ctx, resp.ID)
+	if err == nil || !errors.Is(err, media.ErrAssetNotFound) {
+		t.Errorf("expected asset to be purged after successful retry")
+	}
+}
+
+type blockingRepository struct {
+	media.Repository
+	enterCh chan struct{}
+	blockCh chan struct{}
+}
+
+func (b *blockingRepository) ListExpiredAssets(ctx context.Context, asOf time.Time, limit int) ([]media.MediaAsset, error) {
+	b.enterCh <- struct{}{}
+	<-b.blockCh
+	return b.Repository.ListExpiredAssets(ctx, asOf, limit)
+}
+
+func TestService_RetentionCleanup_OverlappingRunsPrevented(t *testing.T) {
+	tempDir := t.TempDir()
+	storage, err := media.NewFileStorageEngine(tempDir, "test-secret-32b-length-must-be-long")
+	if err != nil {
+		t.Fatalf("storage init error: %v", err)
+	}
+
+	blockRepo := &blockingRepository{
+		Repository: media.NewMemoryRepository(),
+		enterCh:    make(chan struct{}),
+		blockCh:    make(chan struct{}),
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	proc := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	svc := media.NewService(blockRepo, storage, proc, logger, media.WithRetentionInterval(0))
+	defer svc.Stop()
+
+	ctx := context.Background()
+
+	// Launch first run in a goroutine
+	doneFirst := make(chan error, 1)
+	go func() {
+		_, err := svc.PurgeExpiredAssets(ctx)
+		doneFirst <- err
+	}()
+
+	// Wait until first run is inside PurgeExpiredAssets
+	<-blockRepo.enterCh
+
+	// Second run attempted while first run is in progress: must return ErrRetentionRunInProgress
+	_, err2 := svc.PurgeExpiredAssets(ctx)
+	if err2 == nil || !errors.Is(err2, media.ErrRetentionRunInProgress) {
+		t.Fatalf("expected ErrRetentionRunInProgress for concurrent run, got %v", err2)
+	}
+
+	// Unblock first run
+	close(blockRepo.blockCh)
+	if err1 := <-doneFirst; err1 != nil {
+		t.Fatalf("first run failed: %v", err1)
+	}
+}
+
+
 
 
 

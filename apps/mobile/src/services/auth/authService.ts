@@ -11,6 +11,8 @@ export interface RegisterPayload {
   birthdate: string; // YYYY-MM-DD
   gender_identities: string[];
   sexual_orientations: string[];
+  preferred_genders?: string[];
+  looking_for?: string[];
   referral_code?: string;
 }
 
@@ -39,10 +41,14 @@ export interface AgeAssuranceStatus {
   user_id?: string;
   provider?: string;
   provider_session_id?: string;
-  status: 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MANUAL_REVIEW';
+  status: 'UNVERIFIED' | 'PENDING' | 'VERIFIED' | 'REJECTED' | 'MANUAL_REVIEW';
   risk_score?: number;
   verified_at?: string;
   expires_at?: string;
+  metadata?: {
+    media_id?: string;
+    [key: string]: any;
+  };
 }
 
 export const authService = {
@@ -81,9 +87,13 @@ export const authService = {
       });
     }
 
+    const preferredGenders = payload.preferred_genders || payload.looking_for || [];
+
     const res = await api.post<AuthResponse>('/api/v1/auth/register', {
       ...payload,
       display_name: payload.display_name.trim(),
+      preferred_genders: preferredGenders,
+      looking_for: preferredGenders,
     });
     await secureStorage.saveTokens(res.access_token, res.refresh_token);
     await secureStorage.saveUserData(res.user as unknown as Record<string, unknown>);
@@ -126,6 +136,7 @@ export const authService = {
       profile: Profile;
       location?: any;
       preferences?: {
+        preferred_genders?: string[];
         dealbreakers?: {
           non_smoker_only?: boolean;
           require_verified?: boolean;
@@ -135,6 +146,11 @@ export const authService = {
     }>('/api/v1/profiles/me');
 
     const rawProfile = (res.profile || {}) as any;
+
+    if (res.preferences?.preferred_genders) {
+      rawProfile.preferred_genders = res.preferences.preferred_genders;
+      rawProfile.looking_for = res.preferences.preferred_genders;
+    }
 
     // Normalize smoking habit and preference
     if (rawProfile.smoking_habit && !rawProfile.smoking_preference) {
@@ -187,6 +203,13 @@ export const authService = {
     if (updates.sexual_orientations !== undefined) {
       payload.sexual_orientations = updates.sexual_orientations;
     }
+    if (updates.preferred_genders !== undefined) {
+      payload.preferred_genders = updates.preferred_genders;
+      payload.looking_for = updates.preferred_genders;
+    } else if (updates.looking_for !== undefined) {
+      payload.preferred_genders = updates.looking_for;
+      payload.looking_for = updates.looking_for;
+    }
     if (updates.relationship_intents !== undefined) {
       payload.relationship_intents = updates.relationship_intents;
     }
@@ -237,10 +260,13 @@ export const authService = {
   },
 
   /**
-   * Initiates age assurance session with backend
+   * Initiates age assurance session with backend, associating optional selfie media ID
    */
-  async startAgeAssuranceSession(): Promise<AgeAssuranceSession> {
-    return api.post<AgeAssuranceSession>('/api/v1/age-assurance/session');
+  async startAgeAssuranceSession(mediaId?: string): Promise<AgeAssuranceSession> {
+    return api.post<AgeAssuranceSession>(
+      '/api/v1/age-assurance/session',
+      mediaId ? { media_id: mediaId } : undefined
+    );
   },
 
   /**

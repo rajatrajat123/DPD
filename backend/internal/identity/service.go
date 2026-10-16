@@ -74,6 +74,8 @@ type RegisterRequest struct {
 	Birthdate             string                `json:"birthdate"` // YYYY-MM-DD
 	GenderIdentities      []string              `json:"gender_identities"`
 	SexualOrientations    []string              `json:"sexual_orientations"`
+	LookingFor            []string              `json:"looking_for,omitempty"`
+	PreferredGenders      []string              `json:"preferred_genders,omitempty"`
 	Pronouns              []string              `json:"pronouns,omitempty"`
 	RelationshipIntents   []string              `json:"relationship_intents,omitempty"`
 	RelationshipStructure RelationshipStructure `json:"relationship_structure,omitempty"`
@@ -99,6 +101,8 @@ type UpdateProfileRequest struct {
 	Pronouns              []string               `json:"pronouns,omitempty"`
 	GenderIdentities      []string               `json:"gender_identities,omitempty"`
 	SexualOrientations    []string               `json:"sexual_orientations,omitempty"`
+	LookingFor            []string               `json:"looking_for,omitempty"`
+	PreferredGenders      []string               `json:"preferred_genders,omitempty"`
 	RelationshipIntents   []string               `json:"relationship_intents,omitempty"`
 	RelationshipStructure *RelationshipStructure `json:"relationship_structure,omitempty"`
 	VisibilitySettings    *VisibilitySettings    `json:"visibility_settings,omitempty"`
@@ -437,6 +441,16 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest, clientInfo 
 	}
 
 	pref := DefaultDatingPreferences(userID)
+	if len(req.PreferredGenders) > 0 {
+		pref.PreferredGenders = req.PreferredGenders
+	} else if len(req.LookingFor) > 0 {
+		pref.PreferredGenders = req.LookingFor
+	}
+	if len(pref.PreferredGenders) > 0 {
+		if err := ValidateTaxonomy(pref.PreferredGenders, nil, nil, nil); err != nil {
+			return nil, fmt.Errorf("invalid preferred gender: %w", err)
+		}
+	}
 	if err := s.repo.UpsertPreferences(ctx, &pref); err != nil {
 		return nil, fmt.Errorf("failed to save initial preferences: %w", err)
 	}
@@ -856,6 +870,21 @@ func (s *Service) UpdateMyProfile(ctx context.Context, userID string, req Update
 		pref, prefErr := s.repo.GetPreferences(ctx, userID)
 		if prefErr == nil && pref != nil {
 			pref.Dealbreakers.NonSmokerOnly = *req.NonSmokerDealbreaker
+			_ = s.repo.UpsertPreferences(ctx, pref)
+		}
+	}
+
+	gendersToSave := req.PreferredGenders
+	if gendersToSave == nil {
+		gendersToSave = req.LookingFor
+	}
+	if gendersToSave != nil {
+		if err := ValidateTaxonomy(gendersToSave, nil, nil, nil); err != nil {
+			return nil, fmt.Errorf("invalid preferred gender: %w", err)
+		}
+		pref, prefErr := s.repo.GetPreferences(ctx, userID)
+		if prefErr == nil && pref != nil {
+			pref.PreferredGenders = gendersToSave
 			_ = s.repo.UpsertPreferences(ctx, pref)
 		}
 	}

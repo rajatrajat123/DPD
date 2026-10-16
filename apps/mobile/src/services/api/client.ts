@@ -175,11 +175,12 @@ export async function apiClient<T>(
       throw error;
     }
     const errorObj = error && typeof error === 'object' ? (error as { name?: string; message?: string }) : null;
-    if (errorObj?.name === 'AbortError') {
-      throw new ApiError(408, 'TIMEOUT', 'Request timed out. Please check your connection.', requestId, undefined, error);
-    }
     const msg = error instanceof Error ? error.message : errorObj?.message || 'Network connection failure';
-    throw new ApiError(0, 'NETWORK_ERROR', msg, requestId, undefined, error);
+    const isAbort = errorObj?.name === 'AbortError' || /canceled|aborted/i.test(msg);
+    if (isAbort) {
+      throw new ApiError(408, 'TIMEOUT', `Request timed out or was canceled (${config.apiUrl}). Please check server connectivity.`, requestId, undefined, error);
+    }
+    throw new ApiError(0, 'NETWORK_ERROR', `${msg} (${config.apiUrl})`, requestId, undefined, error);
   }
 }
 

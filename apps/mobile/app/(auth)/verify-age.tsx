@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -18,12 +18,45 @@ export default function VerifyAgeScreen() {
   const router = useRouter();
   const { refreshProfile, isAgeVerified } = useAuth();
 
-  const [step, setStep] = useState<'INFO' | 'CAPTURING' | 'SUBMITTING' | 'PENDING' | 'VERIFIED'>('INFO');
+  const [step, setStep] = useState<'INFO' | 'CAPTURING' | 'SUBMITTING' | 'PENDING' | 'VERIFIED' | 'REJECTED' | 'FAILED'>('INFO');
   const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState('');
+
+  // Authoritatively recover verification status on screen mount or navigation return
+  useEffect(() => {
+    let isMounted = true;
+    async function loadStatus() {
+      try {
+        setLoading(true);
+        const statusRes = await authService.getAgeAssuranceStatus();
+        if (!isMounted) return;
+        if (statusRes && statusRes.status === 'VERIFIED') {
+          setStep('VERIFIED');
+        } else if (statusRes && (statusRes.status === 'PENDING' || statusRes.status === 'MANUAL_REVIEW')) {
+          setStep('PENDING');
+        } else if (statusRes && statusRes.status === 'REJECTED') {
+          setStep('REJECTED');
+        } else {
+          setStep('INFO');
+        }
+      } catch {
+        if (isMounted) {
+          setStep('INFO');
+        }
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    }
+    loadStatus();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   const handleStartCapture = async () => {
     try {
       setLoading(true);
+      setErrorMessage('');
       const photo = await mediaUploader.capturePhoto();
       if (!photo) {
         setLoading(false);
@@ -33,10 +66,10 @@ export default function VerifyAgeScreen() {
       setStep('SUBMITTING');
       // Strip EXIF and upload verification selfie with dedicated SELFIE_VERIFICATION purpose
       // This guarantees the selfie is isolated and never appears in public profile galleries
-      await mediaUploader.uploadVerificationSelfie(photo.uri);
+      const uploaded = await mediaUploader.uploadVerificationSelfie(photo.uri);
 
-      // Trigger authoritative age assurance session on backend
-      await authService.startAgeAssuranceSession();
+      // Trigger authoritative age assurance session on backend associated with media asset
+      await authService.startAgeAssuranceSession(uploaded?.media_id);
 
       // Check authoritative status from backend
       const statusRes = await authService.getAgeAssuranceStatus();
@@ -44,11 +77,7 @@ export default function VerifyAgeScreen() {
         await refreshProfile();
         setStep('VERIFIED');
       } else if (statusRes && statusRes.status === 'REJECTED') {
-        Alert.alert(
-          'Verification Unsuccessful',
-          'Age assurance could not verify adult status from the submitted photo. Please try again with clear lighting or contact support.'
-        );
-        setStep('INFO');
+        setStep('REJECTED');
       } else {
         // PENDING or MANUAL_REVIEW
         await refreshProfile();
@@ -62,8 +91,8 @@ export default function VerifyAgeScreen() {
           stack: err instanceof Error ? err.stack : undefined,
         });
       }
-      Alert.alert('Verification Failed', err instanceof Error ? err.message : 'Could not process verification photo.');
-      setStep('INFO');
+      setErrorMessage(err instanceof Error ? err.message : 'Could not process verification photo.');
+      setStep('FAILED');
     } finally {
       setLoading(false);
     }
@@ -77,11 +106,7 @@ export default function VerifyAgeScreen() {
         await refreshProfile();
         setStep('VERIFIED');
       } else if (statusRes && statusRes.status === 'REJECTED') {
-        Alert.alert(
-          'Verification Unsuccessful',
-          'Age assurance could not verify adult status. Please submit a new selfie with clear lighting.'
-        );
-        setStep('INFO');
+        setStep('REJECTED');
       } else {
         Alert.alert('Status: Pending', 'Your verification is still under review. Please check back shortly.');
       }
@@ -193,6 +218,58 @@ export default function VerifyAgeScreen() {
             ) : (
               <Text style={styles.primaryButtonText}>Check Status</Text>
             )}
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={() => router.replace('/(tabs)')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.cancelButtonText}>Return to App</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {step === 'REJECTED' && (
+        <View style={styles.card}>
+          <Text style={[styles.icon, { textAlign: 'center', marginBottom: spacing.md }]}>⚠️</Text>
+          <Text style={[styles.statusTitle, { color: colors.amber }]}>Verification Unsuccessful</Text>
+          <Text style={styles.statusBody}>
+            Age assurance could not verify adult status from the submitted photo. Please ensure your face is clearly visible with good lighting, no sunglasses, and no hats.
+          </Text>
+
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={() => setStep('INFO')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.primaryButtonText}>Capture New Verification Selfie</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.cancelButton}
+            onPress={() => router.replace('/(tabs)')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.cancelButtonText}>Return to App</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {step === 'FAILED' && (
+        <View style={styles.card}>
+          <Text style={[styles.icon, { textAlign: 'center', marginBottom: spacing.md }]}>❌</Text>
+          <Text style={[styles.statusTitle, { color: '#FF4D4D' }]}>Submission Failed</Text>
+          <Text style={styles.statusBody}>
+            {errorMessage || 'Could not complete verification upload. Please check your network connection and try again.'}
+          </Text>
+
+          <TouchableOpacity
+            style={styles.primaryButton}
+            onPress={() => setStep('INFO')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.primaryButtonText}>Try Again</Text>
           </TouchableOpacity>
 
           <TouchableOpacity

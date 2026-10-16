@@ -47,7 +47,14 @@ func (h *Handler) StartAgeVerificationSession(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	res, err := h.svc.CreateAgeVerificationSession(r.Context(), authUser.ID, authUser.Email, r.RemoteAddr)
+	var reqBody struct {
+		MediaID string `json:"media_id"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&reqBody)
+	}
+
+	res, err := h.svc.CreateAgeVerificationSession(r.Context(), authUser.ID, authUser.Email, r.RemoteAddr, reqBody.MediaID)
 	if err != nil {
 		h.handleError(w, reqID, err)
 		return
@@ -78,7 +85,7 @@ func (h *Handler) GetAgeVerificationStatus(w http.ResponseWriter, r *http.Reques
 	if status == nil {
 		apperror.WriteJSON(w, http.StatusOK, map[string]any{
 			"user_id": authUser.ID,
-			"status":  AgePending,
+			"status":  "UNVERIFIED",
 		})
 		return
 	}

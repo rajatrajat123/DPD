@@ -29,6 +29,7 @@ type Repository interface {
 	ListUserAssets(ctx context.Context, ownerUserID string, purpose *MediaPurpose, readyOnly bool) ([]MediaAsset, error)
 	DeleteAsset(ctx context.Context, id string, ownerUserID string) error
 	ReorderAssets(ctx context.Context, ownerUserID string, assetIDs []string) error
+	ListExpiredAssets(ctx context.Context, asOf time.Time, limit int) ([]MediaAsset, error)
 }
 
 // MemoryMediaRepository provides thread-safe in-memory persistence for offline mode and tests.
@@ -222,6 +223,32 @@ func (m *MemoryMediaRepository) DeleteAsset(ctx context.Context, id string, owne
 	asset.Status = StatusPurged
 	delete(m.derivatives, id)
 	return nil
+}
+
+func (m *MemoryMediaRepository) ListExpiredAssets(ctx context.Context, asOf time.Time, limit int) ([]MediaAsset, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []MediaAsset
+	for _, a := range m.assets {
+		if a.Status == StatusPurged {
+			continue
+		}
+		// Strict guard: Do not delete profile-gallery media under retention cleanup
+		if a.Purpose == PurposeProfileGallery {
+			continue
+		}
+		if a.OriginalPurgeAfter != nil && !a.OriginalPurgeAfter.After(asOf) {
+			result = append(result, *a)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].OriginalPurgeAfter.Before(*result[j].OriginalPurgeAfter)
+	})
+	if limit > 0 && len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
 }
 
 // PostgresMediaRepository implements Repository for production PostgreSQL.
@@ -506,7 +533,59 @@ func (p *PostgresMediaRepository) DeleteAsset(ctx context.Context, id string, ow
 	if res.RowsAffected() == 0 {
 		return ErrAssetNotFound
 	}
+	_, _ = p.pool.Exec(ctx, "DELETE FROM media_derivatives WHERE media_asset_id = $1", id)
 	return nil
+}
+
+func (p *PostgresMediaRepository) ListExpiredAssets(ctx context.Context, asOf time.Time, limit int) ([]MediaAsset, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	query := `
+		SELECT
+			id, owner_user_id, media_type, purpose, status,
+			quarantine_bucket, quarantine_key, original_sha256, original_mime,
+			original_size_bytes, width_px, height_px, duration_ms,
+			exif_stripped, moderation_verdict, original_purge_after, idempotency_key,
+			created_at, updated_at, display_order
+		FROM media_assets
+		WHERE original_purge_after IS NOT NULL
+		  AND original_purge_after <= $1
+		  AND status <> 'PURGED'
+		  AND purpose <> 'PROFILE_GALLERY'
+		ORDER BY original_purge_after ASC
+		LIMIT $2
+	`
+	rows, err := p.pool.Query(ctx, query, asOf, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []MediaAsset
+	for rows.Next() {
+		var a MediaAsset
+		var mediaType, purp, status string
+		var verdict *string
+		if err := rows.Scan(
+			&a.ID, &a.OwnerUserID, &mediaType, &purp, &status,
+			&a.QuarantineBucket, &a.QuarantineKey, &a.OriginalSHA256, &a.OriginalMIME,
+			&a.OriginalSizeBytes, &a.WidthPx, &a.HeightPx, &a.DurationMs,
+			&a.ExifStripped, &verdict, &a.OriginalPurgeAfter, &a.IdempotencyKey,
+			&a.CreatedAt, &a.UpdatedAt, &a.DisplayOrder,
+		); err != nil {
+			return nil, err
+		}
+		a.MediaType = MediaType(mediaType)
+		a.Purpose = MediaPurpose(purp)
+		a.Status = MediaStatus(status)
+		if verdict != nil {
+			v := ModerationVerdict(*verdict)
+			a.ModerationVerdict = &v
+		}
+		results = append(results, a)
+	}
+	return results, rows.Err()
 }
 
 func (p *PostgresMediaRepository) ReorderAssets(ctx context.Context, ownerUserID string, assetIDs []string) error {

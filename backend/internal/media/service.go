@@ -11,21 +11,46 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 var (
-	ErrAssetNotReady = errors.New("media asset is not ready or has not passed moderation")
+	ErrAssetNotReady          = errors.New("media asset is not ready or has not passed moderation")
+	ErrRetentionRunInProgress = errors.New("media retention cleanup run already in progress")
 )
+
+type PurgeSummary struct {
+	Scanned int `json:"scanned"`
+	Purged  int `json:"purged"`
+	Failed  int `json:"failed"`
+}
 
 type ProfileStatusChecker func(ctx context.Context, userID string) (isActive bool, err error)
 
+type ServiceOption func(*Service)
+
+func WithRetentionInterval(interval time.Duration) ServiceOption {
+	return func(s *Service) {
+		s.retentionInterval = interval
+	}
+}
+
+func WithRetentionBatchSize(size int) ServiceOption {
+	return func(s *Service) {
+		s.retentionBatchSize = size
+	}
+}
+
 type Service struct {
-	repo           Repository
-	storage        StorageEngine
-	processor      *Processor
-	logger         *slog.Logger
-	profileChecker ProfileStatusChecker
+	repo               Repository
+	storage            StorageEngine
+	processor          *Processor
+	logger             *slog.Logger
+	profileChecker     ProfileStatusChecker
+	retentionInterval  time.Duration
+	retentionBatchSize int
+	retentionRunning   atomic.Bool
 
 	jobQueue chan string
 	stopOnce sync.Once
@@ -38,22 +63,37 @@ func (s *Service) SetProfileStatusChecker(checker ProfileStatusChecker) {
 	s.profileChecker = checker
 }
 
-func NewService(repo Repository, storage StorageEngine, processor *Processor, logger *slog.Logger) *Service {
+func NewService(repo Repository, storage StorageEngine, processor *Processor, logger *slog.Logger, opts ...ServiceOption) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
-		repo:      repo,
-		storage:   storage,
-		processor: processor,
-		logger:    logger,
-		jobQueue:  make(chan string, 1000),
-		ctx:       ctx,
-		cancel:    cancel,
+		repo:               repo,
+		storage:            storage,
+		processor:          processor,
+		logger:             logger,
+		jobQueue:           make(chan string, 1000),
+		ctx:                ctx,
+		cancel:             cancel,
+		retentionInterval:  1 * time.Hour,
+		retentionBatchSize: 100,
+	}
+
+	for _, opt := range opts {
+		if opt != nil {
+			opt(s)
+		}
 	}
 
 	// Start 2 background worker goroutines
 	s.startWorkers(2)
+
+	// Start retention worker if interval > 0
+	if s.retentionInterval > 0 {
+		s.startRetentionWorker(s.retentionInterval)
+	}
+
 	return s
 }
+
 
 func (s *Service) startWorkers(numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
@@ -82,6 +122,24 @@ func (s *Service) startWorkers(numWorkers int) {
 			}
 		}(i + 1)
 	}
+}
+
+func (s *Service) startRetentionWorker(interval time.Duration) {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-s.ctx.Done():
+				return
+			case <-ticker.C:
+				_, _ = s.PurgeExpiredAssets(s.ctx)
+			}
+		}
+	}()
 }
 
 func (s *Service) Stop() {
@@ -499,13 +557,85 @@ func (s *Service) DeleteAsset(ctx context.Context, assetID, ownerUserID string) 
 		}
 	}
 
+	// Clean up storage files first to ensure consistent state and avoid orphaned files
+	if err := s.storage.DeleteAssetFiles(ctx, assetID); err != nil {
+		return fmt.Errorf("failed to delete media files from storage: %w", err)
+	}
+
 	if err := s.repo.DeleteAsset(ctx, assetID, ownerUserID); err != nil {
 		return err
 	}
-	// Asynchronously or synchronously clean up stored files
-	_ = s.storage.DeleteAssetFiles(ctx, assetID)
 	return nil
 }
+
+func (s *Service) PurgeExpiredAssets(ctx context.Context) (PurgeSummary, error) {
+	if !s.retentionRunning.CompareAndSwap(false, true) {
+		return PurgeSummary{}, ErrRetentionRunInProgress
+	}
+	defer s.retentionRunning.Store(false)
+
+	batchSize := s.retentionBatchSize
+	if batchSize <= 0 {
+		batchSize = 100
+	}
+
+	now := time.Now().UTC()
+	expiredAssets, err := s.repo.ListExpiredAssets(ctx, now, batchSize)
+	if err != nil {
+		s.logger.Error("media_retention_list_failed", slog.String("error", err.Error()))
+		return PurgeSummary{}, err
+	}
+
+	summary := PurgeSummary{
+		Scanned: len(expiredAssets),
+	}
+
+	for _, asset := range expiredAssets {
+		// Strict guard: Never delete assets before their retention deadline
+		if asset.OriginalPurgeAfter == nil || asset.OriginalPurgeAfter.After(now) {
+			continue
+		}
+
+		// Strict guard: Do not delete profile-gallery media under retention cleanup
+		if asset.Purpose == PurposeProfileGallery {
+			continue
+		}
+
+		// Storage cleanup FIRST: remove quarantine and all derivative files/directories safely
+		if err := s.storage.DeleteAssetFiles(ctx, asset.ID); err != nil {
+			summary.Failed++
+			s.logger.Error("media_retention_storage_cleanup_failed",
+				slog.String("asset_id", asset.ID),
+				slog.String("error", err.Error()),
+			)
+			// Do not mark purged in repository if storage cleanup failed
+			continue
+		}
+
+		// Database update SECOND: mark purged only after physical files are confirmed deleted
+		if err := s.repo.DeleteAsset(ctx, asset.ID, asset.OwnerUserID); err != nil {
+			summary.Failed++
+			s.logger.Error("media_retention_db_purge_failed",
+				slog.String("asset_id", asset.ID),
+				slog.String("error", err.Error()),
+			)
+			continue
+		}
+
+		summary.Purged++
+	}
+
+	if summary.Scanned > 0 || summary.Failed > 0 {
+		s.logger.Info("media_retention_cleanup_summary",
+			slog.Int("scanned", summary.Scanned),
+			slog.Int("purged", summary.Purged),
+			slog.Int("failed", summary.Failed),
+		)
+	}
+
+	return summary, nil
+}
+
 
 func generateUUIDv4() string {
 	var b [16]byte
