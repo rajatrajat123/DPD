@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -22,6 +23,7 @@ var (
 	ErrVerificationMaxAttempts        = errors.New("maximum verification attempts exceeded")
 	ErrInvalidVerificationCode        = errors.New("invalid verification code")
 	ErrPasswordResetExpired           = errors.New("password reset link has expired or was already used")
+	ErrResetRateLimited               = errors.New("rate limit exceeded: please wait before requesting another reset email")
 	ErrPasswordTooShort               = errors.New("password must be at least 8 characters long")
 	ErrPasswordTooLong                = errors.New("password cannot exceed 128 characters")
 	ErrPasswordMissingDigit           = errors.New("password must contain at least one numeric digit (0-9)")
@@ -136,14 +138,93 @@ type FullProfileResponse struct {
 }
 
 type Service struct {
-	repo        Repository
-	jwtSecret   string
-	accessTTL   time.Duration
-	refreshTTL  time.Duration
-	argonParams  ArgonParams
+	repo             Repository
+	jwtSecret        string
+	accessTTL        time.Duration
+	refreshTTL       time.Duration
+	argonParams      ArgonParams
 	outboxPub        events.Publisher
 	loginTracker     LoginAttemptTracker
 	notificationSink NotificationDeliverySink
+	resetLimiter     *ResetRateLimiter
+}
+
+// ResetRateLimiter enforces resend throttling per email and rate limits per IP
+// to defend against brute force, email flooding, and user enumeration.
+type ResetRateLimiter struct {
+	mu           sync.Mutex
+	emailHistory map[string][]time.Time
+	ipHistory    map[string][]time.Time
+	cooldown     time.Duration
+	maxPerHour   int
+	ipMaxPerMin  int
+}
+
+func NewResetRateLimiter(cooldown time.Duration, maxPerHour, ipMaxPerMin int) *ResetRateLimiter {
+	return &ResetRateLimiter{
+		emailHistory: make(map[string][]time.Time),
+		ipHistory:    make(map[string][]time.Time),
+		cooldown:     cooldown,
+		maxPerHour:   maxPerHour,
+		ipMaxPerMin:  ipMaxPerMin,
+	}
+}
+
+func (r *ResetRateLimiter) Allow(email, ip string) bool {
+	if r == nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now().UTC()
+
+	// 1. IP rate limit check (if IP is provided)
+	if ip != "" {
+		ipTimes := r.ipHistory[ip]
+		cutoff := now.Add(-1 * time.Minute)
+		validIP := make([]time.Time, 0, len(ipTimes))
+		for _, t := range ipTimes {
+			if t.After(cutoff) {
+				validIP = append(validIP, t)
+			}
+		}
+		if len(validIP) >= r.ipMaxPerMin {
+			r.ipHistory[ip] = validIP
+			return false
+		}
+		r.ipHistory[ip] = append(validIP, now)
+	}
+
+	// 2. Email resend throttling & hourly rate limit check
+	if email != "" {
+		times := r.emailHistory[email]
+		cutoffHour := now.Add(-1 * time.Hour)
+		validEmail := make([]time.Time, 0, len(times))
+		for _, t := range times {
+			if t.After(cutoffHour) {
+				validEmail = append(validEmail, t)
+			}
+		}
+
+		// Cooldown check (most recent request must be at least cooldown ago)
+		if len(validEmail) > 0 {
+			last := validEmail[len(validEmail)-1]
+			if now.Sub(last) < r.cooldown {
+				r.emailHistory[email] = validEmail
+				return false
+			}
+		}
+
+		if len(validEmail) >= r.maxPerHour {
+			r.emailHistory[email] = validEmail
+			return false
+		}
+
+		r.emailHistory[email] = append(validEmail, now)
+	}
+
+	return true
 }
 
 // NotificationDeliverySink delivers out-of-band secrets such as verification OTPs and reset tokens.
@@ -259,17 +340,24 @@ func WithNotificationSink(sink NotificationDeliverySink) ServiceOption {
 	}
 }
 
-func (s *Service) SetNotificationSink(sink NotificationDeliverySink) {
-	s.notificationSink = sink
+func WithResetRateLimiter(limiter *ResetRateLimiter) ServiceOption {
+	return func(s *Service) {
+		s.resetLimiter = limiter
+	}
+}
+
+func (s *Service) SetResetRateLimiter(limiter *ResetRateLimiter) {
+	s.resetLimiter = limiter
 }
 
 func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Service {
 	s := &Service{
-		repo:        repo,
-		jwtSecret:   jwtSecret,
-		accessTTL:   15 * time.Minute,
-		refreshTTL:  30 * 24 * time.Hour,
-		argonParams: DefaultArgonParams,
+		repo:         repo,
+		jwtSecret:    jwtSecret,
+		accessTTL:    15 * time.Minute,
+		refreshTTL:   30 * 24 * time.Hour,
+		argonParams:  DefaultArgonParams,
+		resetLimiter: NewResetRateLimiter(60*time.Second, 5, 10),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -594,8 +682,23 @@ func (s *Service) ConfirmVerification(ctx context.Context, userID, channel, code
 	return s.repo.UpdateUser(ctx, user)
 }
 
-func (s *Service) RequestPasswordReset(ctx context.Context, email string) (string, error) {
-	user, err := s.repo.GetUserByEmail(ctx, strings.TrimSpace(email))
+func (s *Service) RequestPasswordReset(ctx context.Context, email string, clientIP ...string) (string, error) {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	if normEmail == "" {
+		return "", errors.New("email is required")
+	}
+
+	ip := ""
+	if len(clientIP) > 0 {
+		ip = strings.TrimSpace(clientIP[0])
+	}
+
+	// Rate limiting & resend throttling (checked prior to user lookup to prevent enumeration)
+	if s.resetLimiter != nil && !s.resetLimiter.Allow(normEmail, ip) {
+		return "", ErrResetRateLimited
+	}
+
+	user, err := s.repo.GetUserByEmail(ctx, normEmail)
 	if err != nil {
 		return "", nil // Defend against user enumeration: do not disclose existence
 	}
@@ -655,7 +758,7 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, token, newPassword s
 	}
 
 	_ = s.repo.MarkPasswordResetUsed(ctx, reset.ID)
-	_ = s.repo.RevokeSessionFamily(ctx, reset.UserID) // Invalidate existing sessions
+	_ = s.repo.RevokeAllUserSessions(ctx, reset.UserID) // Invalidate all existing sessions
 	return nil
 }
 

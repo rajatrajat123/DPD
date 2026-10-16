@@ -38,6 +38,7 @@ type Repository interface {
 	GetSessionByTokenHash(ctx context.Context, tokenHash []byte) (*UserSession, error)
 	RevokeSession(ctx context.Context, sessionID string) error
 	RevokeSessionFamily(ctx context.Context, familyID string) error
+	RevokeAllUserSessions(ctx context.Context, userID string) error
 
 	CreateVerification(ctx context.Context, v *AccountVerification) error
 	GetLatestVerification(ctx context.Context, userID, channel string) (*AccountVerification, error)
@@ -293,7 +294,20 @@ func (m *MemoryRepository) RevokeSessionFamily(_ context.Context, familyID strin
 
 	now := time.Now().UTC()
 	for _, s := range m.sessions {
-		if s.FamilyID == familyID {
+		if s.FamilyID == familyID || s.UserID == familyID {
+			s.RevokedAt = &now
+		}
+	}
+	return nil
+}
+
+func (m *MemoryRepository) RevokeAllUserSessions(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	for _, s := range m.sessions {
+		if s.UserID == userID {
 			s.RevokedAt = &now
 		}
 	}
@@ -693,8 +707,14 @@ func (p *PostgresRepository) RevokeSession(ctx context.Context, sessionID string
 }
 
 func (p *PostgresRepository) RevokeSessionFamily(ctx context.Context, familyID string) error {
-	query := `UPDATE user_sessions SET revoked_at = NOW() WHERE family_id = $1 AND revoked_at IS NULL`
+	query := `UPDATE user_sessions SET revoked_at = NOW() WHERE (family_id = $1 OR user_id = $1) AND revoked_at IS NULL`
 	_, err := p.pool.Exec(ctx, query, familyID)
+	return err
+}
+
+func (p *PostgresRepository) RevokeAllUserSessions(ctx context.Context, userID string) error {
+	query := `UPDATE user_sessions SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`
+	_, err := p.pool.Exec(ctx, query, userID)
 	return err
 }
 

@@ -149,7 +149,13 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	stepUpVerifier := safety.NewTokenStepUpVerifier(cfg.JWTSigningSecret)
 	safetySvc.SetStepUpVerifier(stepUpVerifier)
 
-	notificationSink := identity.NewEnvironmentNotificationSink(string(cfg.Environment), logger)
+	notificationSink := identity.NewResendNotificationSink(
+		cfg.ResendAPIKey,
+		cfg.ResendFromEmail,
+		cfg.PasswordResetURLBase,
+		string(cfg.Environment),
+		logger,
+	)
 	identSvc := identity.NewService(
 		identityRepo,
 		cfg.JWTSigningSecret,

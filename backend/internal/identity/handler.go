@@ -252,7 +252,17 @@ func (h *Handler) RequestPasswordReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, _ = h.svc.RequestPasswordReset(r.Context(), req.Email)
+	clientInfo := extractClientInfo(r)
+	_, err := h.svc.RequestPasswordReset(r.Context(), req.Email, clientInfo.IPAddress)
+	if err != nil {
+		if errors.Is(err, ErrResetRateLimited) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, apperror.CodeRateLimitExceeded, "Please wait before requesting another password reset email"))
+			return
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
+		return
+	}
+
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{
 		"message": "If this email exists, password reset instructions have been generated",
 	})

@@ -2,6 +2,8 @@ package identity
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -399,3 +401,131 @@ func TestService_PasswordPolicy(t *testing.T) {
 		}
 	})
 }
+
+func TestService_PasswordReset_DetailedSecuritySuite(t *testing.T) {
+	svc, repo := newTestService()
+	ctx := context.Background()
+
+	// 1. User enumeration defense: unknown email returns generic success
+	unknownToken, err := svc.RequestPasswordReset(ctx, "nonexistent_stranger@example.com", "192.168.1.50")
+	if err != nil {
+		t.Fatalf("expected nil error for unknown email, got: %v", err)
+	}
+	if unknownToken != "" {
+		t.Errorf("expected empty token returned for unknown email, got: %s", unknownToken)
+	}
+
+	// 2. Setup real user
+	userReq := validRegisterReq()
+	userReq.Email = "security_target@aura.dating"
+	userReq.Password = "OriginalPass123!"
+	regResp, err := svc.Register(ctx, userReq, ClientInfo{})
+	if err != nil {
+		t.Fatalf("failed to register user: %v", err)
+	}
+	targetUserID := regResp.User.ID
+
+	// Log in to establish an active session before reset
+	loginResp, err := svc.Login(ctx, LoginRequest{Email: userReq.Email, Password: userReq.Password}, ClientInfo{})
+	if err != nil {
+		t.Fatalf("failed to log in: %v", err)
+	}
+	sessionHash := HashRefreshToken(loginResp.RefreshToken)
+	activeSession, err := repo.GetSessionByTokenHash(ctx, sessionHash)
+	if err != nil || activeSession.RevokedAt != nil {
+		t.Fatalf("expected active unrevoked session before reset")
+	}
+
+	// 3. Rate limiting and resend throttling
+	token1, err := svc.RequestPasswordReset(ctx, userReq.Email, "192.168.1.100")
+	if err != nil {
+		t.Fatalf("expected initial reset request to succeed: %v", err)
+	}
+	if token1 == "" {
+		t.Fatalf("expected real token for registered user")
+	}
+
+	// Immediate second request for same email must trigger ErrResetRateLimited
+	_, err = svc.RequestPasswordReset(ctx, userReq.Email, "192.168.1.100")
+	if !errors.Is(err, ErrResetRateLimited) {
+		t.Fatalf("expected ErrResetRateLimited on rapid consecutive request, got: %v", err)
+	}
+
+	// IP spamming test: exceeding IP limit triggers ErrResetRateLimited
+	spamIP := "10.0.0.99"
+	limiter := NewResetRateLimiter(0, 100, 3) // 3 per minute from same IP
+	svc.SetResetRateLimiter(limiter)
+	for i := 0; i < 3; i++ {
+		_, _ = svc.RequestPasswordReset(ctx, fmt.Sprintf("test_%d@example.com", i), spamIP)
+	}
+	_, err = svc.RequestPasswordReset(ctx, "test_overflow@example.com", spamIP)
+	if !errors.Is(err, ErrResetRateLimited) {
+		t.Fatalf("expected ErrResetRateLimited on IP overflow, got: %v", err)
+	}
+
+	// Reset limiter with zero cooldown for remainder of test
+	svc.SetResetRateLimiter(NewResetRateLimiter(0, 100, 100))
+
+	// 4. Invalid token rejection
+	err = svc.ConfirmPasswordReset(ctx, "completely_fake_invalid_token_hex_999", "NewPassword456!Secure")
+	if !errors.Is(err, ErrPasswordResetNotFound) {
+		t.Fatalf("expected ErrPasswordResetNotFound for fake token, got: %v", err)
+	}
+
+	// 5. Expired token rejection
+	expiredReset := &PasswordReset{
+		ID:        generateUUIDv4(),
+		UserID:    targetUserID,
+		TokenHash: HashTokenHex("expired_token_123"),
+		ExpiresAt: time.Now().UTC().Add(-10 * time.Minute), // in past
+		CreatedAt: time.Now().UTC().Add(-70 * time.Minute),
+	}
+	_ = repo.CreatePasswordReset(ctx, expiredReset)
+	err = svc.ConfirmPasswordReset(ctx, "expired_token_123", "NewPassword456!Secure")
+	if !errors.Is(err, ErrPasswordResetExpired) {
+		t.Fatalf("expected ErrPasswordResetExpired for expired token, got: %v", err)
+	}
+
+	// 6. Valid password reset succeeds and revokes existing sessions
+	validToken, err := svc.RequestPasswordReset(ctx, userReq.Email, "192.168.1.100")
+	if err != nil {
+		t.Fatalf("failed to request valid token: %v", err)
+	}
+
+	newPassword := "NewPassword456!Secure"
+	err = svc.ConfirmPasswordReset(ctx, validToken, newPassword)
+	if err != nil {
+		t.Fatalf("expected valid reset to succeed, got: %v", err)
+	}
+
+	// 7. Single-use: Reusing the same token must fail with ErrPasswordResetExpired
+	err = svc.ConfirmPasswordReset(ctx, validToken, "AnotherPassword789!Safe")
+	if !errors.Is(err, ErrPasswordResetExpired) {
+		t.Fatalf("expected ErrPasswordResetExpired on token reuse, got: %v", err)
+	}
+
+	// 8. Confirm old active session was revoked
+	activeSessionAfter, err := repo.GetSessionByTokenHash(ctx, sessionHash)
+	if err != nil {
+		t.Fatalf("failed to fetch session after reset: %v", err)
+	}
+	if activeSessionAfter.RevokedAt == nil {
+		t.Fatalf("expected session to be revoked after password reset!")
+	}
+
+	// Refreshing revoked session must fail
+	_, err = svc.RefreshToken(ctx, loginResp.RefreshToken, ClientInfo{})
+	if err == nil {
+		t.Fatalf("expected refresh token to fail on revoked session")
+	}
+
+	// 9. Login with new password works
+	newLogin, err := svc.Login(ctx, LoginRequest{Email: userReq.Email, Password: newPassword}, ClientInfo{})
+	if err != nil {
+		t.Fatalf("expected login with new password to succeed, got: %v", err)
+	}
+	if newLogin.User.ID != targetUserID {
+		t.Errorf("expected target user ID to match")
+	}
+}
+

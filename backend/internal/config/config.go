@@ -59,6 +59,10 @@ type Config struct {
 	SightengineAPIUser   string
 	SightengineAPISecret string
 
+	ResendAPIKey         string
+	ResendFromEmail      string
+	PasswordResetURLBase string
+
 	CORSAllowedOrigins []string
 }
 
@@ -157,6 +161,10 @@ func Load(getenv func(string) string) (*Config, error) {
 		VisionAPIKey:         getString(getenv, "VISION_API_KEY", ""),
 		SightengineAPIUser:   getString(getenv, "SIGHTENGINE_API_USER", ""),
 		SightengineAPISecret: getString(getenv, "SIGHTENGINE_API_SECRET", ""),
+
+		ResendAPIKey:         getString(getenv, "RESEND_API_KEY", ""),
+		ResendFromEmail:      getString(getenv, "RESEND_FROM_EMAIL", "Aura <security@aura.dating>"),
+		PasswordResetURLBase: getString(getenv, "PASSWORD_RESET_URL_BASE", "http://localhost:3000/auth/reset-password"),
 
 		CORSAllowedOrigins: corsOrigins,
 	}
