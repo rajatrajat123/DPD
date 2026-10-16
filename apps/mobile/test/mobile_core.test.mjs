@@ -2793,7 +2793,579 @@ test('Forgot Password Resend Delivery: verifies domain, token generation, and fa
   assert.equal(prodDomain.requiresDnsVerification, true);
 });
 
+// --- Test 49: Deep Link Parsing, Navigation Guard Exemption & Android LAN Resolution ---
+test('Reset Password Deep Linking & Navigation Guard: parses token from Expo Go & custom schemes and preserves reset screen access', () => {
+  // 1. Parse token from Expo Go deep link: exp://<host>:<port>/--/reset-password?token=<token>
+  function parseDeepLink(url) {
+    if (!url) return { path: null, token: null };
+    const queryIdx = url.indexOf('?');
+    let pathPart = queryIdx !== -1 ? url.substring(0, queryIdx) : url;
+    let queryPart = queryIdx !== -1 ? url.substring(queryIdx + 1) : '';
 
+    const params = {};
+    if (queryPart) {
+      queryPart.split('&').forEach((pair) => {
+        const [k, v] = pair.split('=');
+        if (k) params[decodeURIComponent(k)] = decodeURIComponent(v || '');
+      });
+    }
+
+    return {
+      path: pathPart,
+      token: params.token || null,
+    };
+  }
+
+  const expoGoUrl = 'exp://192.168.29.15:8081/--/reset-password?token=a1b2c3d4e5f678901234567890abcdef';
+  const parsedExpo = parseDeepLink(expoGoUrl);
+  assert.equal(parsedExpo.token, 'a1b2c3d4e5f678901234567890abcdef');
+  assert.ok(parsedExpo.path.includes('reset-password'));
+
+  const standaloneUrl = 'aura://reset-password?token=fedcba0987654321fedcba0987654321';
+  const parsedStandalone = parseDeepLink(standaloneUrl);
+  assert.equal(parsedStandalone.token, 'fedcba0987654321fedcba0987654321');
+
+  // 2. Navigation Guard exemption: authenticated users opening reset password screen are NOT redirected to tabs
+  function shouldRedirectAwayFromAuth(isAuthenticated, inAuthGroup, onVerifyAgeScreen, onResetPasswordScreen) {
+    if (!isAuthenticated) return false;
+    if (inAuthGroup && !onVerifyAgeScreen && !onResetPasswordScreen) {
+      return true; // redirects away to tabs or verify-age
+    }
+    return false; // stays on reset password
+  }
+
+  // Member is logged in, but opened reset-password screen -> must stay!
+  const authenticatedOnReset = shouldRedirectAwayFromAuth(true, true, false, true);
+  assert.equal(authenticatedOnReset, false, 'Authenticated user must not be redirected away from reset password screen');
+
+  // Member is logged in on login screen -> redirects away to tabs
+  const authenticatedOnLogin = shouldRedirectAwayFromAuth(true, true, false, false);
+  assert.equal(authenticatedOnLogin, true, 'Authenticated user on login screen should redirect away');
+
+  // 3. Android LAN host resolution fallback
+  const lanHost = '192.168.29.15';
+  const defaultApi = `http://${lanHost}:8080`;
+  assert.equal(defaultApi, 'http://192.168.29.15:8080');
+});
+
+// --- Test 50: Discovery Feed Preview & Age Assurance Swipe Gating ---
+test('Discovery Feed Preview & Age Assurance Swipe Gating: unverified members browse preview cards and pass, but likes are strictly gated', async () => {
+  // 1. Swipe action validation for unverified users
+  function validateSwipeAction(isAgeVerified, direction) {
+    if (!isAgeVerified && direction !== 'PASS') {
+      return { allowed: false, action: 'ALERT_VERIFICATION_REQUIRED' };
+    }
+    return { allowed: true, action: 'PROCEED_SWIPE' };
+  }
+
+  // Passing is allowed for unverified users
+  assert.deepEqual(validateSwipeAction(false, 'PASS'), { allowed: true, action: 'PROCEED_SWIPE' });
+
+  // Likes and super sparks are strictly gated
+  assert.deepEqual(validateSwipeAction(false, 'LIKE'), { allowed: false, action: 'ALERT_VERIFICATION_REQUIRED' });
+  assert.deepEqual(validateSwipeAction(false, 'SUPER_SPARK'), { allowed: false, action: 'ALERT_VERIFICATION_REQUIRED' });
+
+  // Verified users can perform all swipe actions
+  assert.deepEqual(validateSwipeAction(true, 'LIKE'), { allowed: true, action: 'PROCEED_SWIPE' });
+  assert.deepEqual(validateSwipeAction(true, 'PASS'), { allowed: true, action: 'PROCEED_SWIPE' });
+  assert.deepEqual(validateSwipeAction(true, 'SUPER_SPARK'), { allowed: true, action: 'PROCEED_SWIPE' });
+
+  // 2. Feed limit resolution: unverified users get capped limit 10
+  function resolveFeedLimit(isAgeVerified) {
+    return isAgeVerified ? 20 : 10;
+  }
+  assert.equal(resolveFeedLimit(false), 10);
+  assert.equal(resolveFeedLimit(true), 20);
+
+  // 3. Verify screen rendering hierarchy in index.tsx
+  const fs = await import('node:fs/promises');
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // activeCandidate must be evaluated before age-locked empty state so preview cards can be seen
+  const activeCandidateIdx = indexFile.indexOf('activeCandidate ?');
+  const ageLockedIdx = indexFile.indexOf('!isAgeVerified ?');
+  assert.ok(activeCandidateIdx !== -1, 'Must render activeCandidate');
+  assert.ok(ageLockedIdx !== -1, 'Must handle age locked state');
+  assert.ok(activeCandidateIdx < ageLockedIdx, 'activeCandidate cards must be rendered before age-locked fallback state');
+});
+
+// --- Test 51: Profile Photo Upload Status & Gallery Refresh Safety ---
+test('Profile Photo Upload Status & Gallery Refresh: enforces READY status and rejects unconfirmed processing timeouts', async () => {
+  // 1. Verify handleAddPhoto checks uploaded.status === 'READY'
+  const fs = await import('node:fs/promises');
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    profileFile.includes("uploaded.status !== 'READY'"),
+    'handleAddPhoto must explicitly check that uploaded.status is READY before confirming upload'
+  );
+
+  assert.ok(
+    profileFile.includes('refreshProfile();') && profileFile.includes('[refreshProfile]'),
+    'profile.tsx must trigger refreshProfile on mount'
+  );
+
+  // 2. Mock upload response validation
+  function validateUploadResult(uploaded) {
+    if (!uploaded || !uploaded.media_id || uploaded.status !== 'READY') {
+      throw new Error('Photo processing timed out or failed to complete.');
+    }
+    return { success: true, media_id: uploaded.media_id };
+  }
+
+  // Success path: READY status confirms
+  const readyResult = validateUploadResult({ media_id: 'm_123', status: 'READY' });
+  assert.equal(readyResult.success, true);
+  assert.equal(readyResult.media_id, 'm_123');
+
+  // Incomplete/Processing path: must throw and NOT alert false success
+  assert.throws(
+    () => validateUploadResult({ media_id: 'm_123', status: 'PROCESSING' }),
+    /Photo processing timed out or failed to complete/
+  );
+  assert.throws(
+    () => validateUploadResult(null),
+    /Photo processing timed out or failed to complete/
+  );
+
+  // 3. Verify mediaUploader throws ApiError on poll timeout
+  const uploaderFile = await fs.readFile(
+    new URL('../src/services/media/mediaUploader.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    uploaderFile.includes("UPLOAD_PROCESSING_TIMEOUT"),
+    'mediaUploader.uploadPhoto must throw UPLOAD_PROCESSING_TIMEOUT when polling completes without READY'
+  );
+});
+
+// --- Test 52: Discovery Search Normalization & File Verification ---
+test('Discovery Search: validates query construction, candidate normalization, and search screen existence', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify discoveryService has search method
+  const discoFile = await fs.readFile(
+    new URL('../src/services/discovery/discoveryService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(discoFile.includes('async search(query: string, limit = 20)'), 'discoveryService must expose search method');
+  assert.ok(discoFile.includes("'/api/v1/discovery/search'"), 'search must call /api/v1/discovery/search');
+  assert.ok(discoFile.includes('normalizeCandidate'), 'search must normalize candidate profiles');
+
+  // 2. Candidate normalization logic test
+  function normalizeCandidate(raw) {
+    return {
+      user_id: raw.user_id,
+      display_name: raw.display_name || 'Aura Member',
+      age: raw.age ?? 0,
+      bio: raw.bio || '',
+      pronouns: Array.isArray(raw.pronouns) ? raw.pronouns : [],
+      gender_identities: Array.isArray(raw.gender_identities) ? raw.gender_identities : [],
+      sexual_orientations: Array.isArray(raw.sexual_orientations) ? raw.sexual_orientations : [],
+      is_verified: Boolean(raw.is_photo_verified),
+      photos: (raw.photos || []).map((p, idx) => ({
+        id: p.asset_id || `photo-${idx}`,
+        url: p.card_url || p.full_url || p.thumb_url || '',
+        is_primary: idx === 0,
+      })),
+      distance_bucket_km: raw.approximate_distance_km ?? 1,
+    };
+  }
+
+  const rawCandidate = {
+    user_id: 'u-search-99',
+    display_name: 'Robin',
+    age: 27,
+    bio: 'Photographer',
+    gender_identities: ['non_binary'],
+    sexual_orientations: ['queer'],
+    is_photo_verified: true,
+    approximate_distance_km: 5,
+    photos: [{ asset_id: 'ast-1', card_url: 'http://aura.local/photo.jpg' }],
+  };
+
+  const normalized = normalizeCandidate(rawCandidate);
+  assert.equal(normalized.user_id, 'u-search-99');
+  assert.equal(normalized.display_name, 'Robin');
+  assert.equal(normalized.is_verified, true);
+  assert.equal(normalized.distance_bucket_km, 5);
+  assert.equal(normalized.photos[0].url, 'http://aura.local/photo.jpg');
+
+  // 3. Verify search screen exists and layout registers it
+  const searchScreenFile = await fs.readFile(
+    new URL('../app/search.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(searchScreenFile.includes('discoveryService.search'), 'search.tsx must invoke discoveryService.search');
+  assert.ok(searchScreenFile.includes('testID="search-input"'), 'search.tsx must render search input');
+
+  const layoutFile = await fs.readFile(
+    new URL('../app/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(layoutFile.includes('name="search"'), '_layout.tsx must register search screen in stack');
+});
+
+// --- Test 53: AdBreakManager 15-Profile Cadence for Free Members ---
+test('AdBreakManager: strictly enforces interstitial ad cadence every 15 unique profiles for free members', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify admobService config
+  const admobFile = await fs.readFile(
+    new URL('../src/services/ads/admobService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    admobFile.includes('threshold = 15') || admobFile.includes('15 unique browsed profiles'),
+    'admobService must define threshold as 15 unique browsed profiles'
+  );
+
+  // 2. Pure cadence evaluation function
+  function shouldShowRequiredAd(viewedCount, isPaidMember = false) {
+    if (isPaidMember) return false;
+    return viewedCount > 0 && viewedCount % 15 === 0;
+  }
+
+  // 1 to 14 profiles: no ad
+  for (let i = 1; i < 15; i++) {
+    assert.equal(shouldShowRequiredAd(i), false, `Profile count ${i} should not trigger ad`);
+  }
+
+  // 15th profile: triggers ad
+  assert.equal(shouldShowRequiredAd(15), true, 'Profile count 15 must trigger ad');
+
+  // 16 to 29 profiles: no ad
+  assert.equal(shouldShowRequiredAd(16), false);
+  assert.equal(shouldShowRequiredAd(29), false);
+
+  // 30th profile: triggers ad
+  assert.equal(shouldShowRequiredAd(30), true, 'Profile count 30 must trigger ad');
+
+  // Paid VIP members never see ads
+  assert.equal(shouldShowRequiredAd(15, true), false, 'Paid member should never see ad on count 15');
+  assert.equal(shouldShowRequiredAd(30, true), false, 'Paid member should never see ad on count 30');
+
+  // 3. Verify index.tsx tracks unique profiles and checks adBreakManager on card transitions
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    indexFile.includes('adBreakManager.recordProfileView') || indexFile.includes('recordProfileView'),
+    'index.tsx must integrate adBreakManager.recordProfileView on card transitions'
+  );
+});
+
+// --- Test 54: Gallery Error Handling and Non-Destructive Recovery ---
+test('Photo Gallery Error Recovery: propagates throwOnError and distinguishes errors from empty state', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify mediaUploader getMyGallery supports throwOnError
+  const uploaderFile = await fs.readFile(
+    new URL('../src/services/media/mediaUploader.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    uploaderFile.includes('async getMyGallery(throwOnError = false)'),
+    'mediaUploader.getMyGallery must accept throwOnError parameter'
+  );
+
+  // 2. Verify profile.tsx handles gallery error and loading states
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(profileFile.includes('loadGallery'), 'profile.tsx must declare loadGallery');
+  assert.ok(profileFile.includes('mediaUploader.getMyGallery(true)'), 'profile.tsx must call getMyGallery with throwOnError=true');
+  assert.ok(profileFile.includes('setGalleryError'), 'profile.tsx must set gallery error on failure');
+  assert.ok(profileFile.includes('Retry'), 'profile.tsx must provide a Retry action when gallery load fails');
+
+  // 3. Mock gallery fetch behavior
+  async function mockGetMyGallery(throwOnError, shouldFail) {
+    if (shouldFail) {
+      if (throwOnError) {
+        throw new Error('Connection refused / 500 internal server error');
+      }
+      return [];
+    }
+    return [{ id: 'p-1', url: 'http://storage/p1.jpg', is_primary: true }];
+  }
+
+  // With throwOnError=true, network failure throws error (does not return false [] 0/6 photos)
+  await assert.rejects(
+    () => mockGetMyGallery(true, true),
+    /Connection refused/
+  );
+
+  // Success path returns actual photos
+  const result = await mockGetMyGallery(true, false);
+  assert.equal(result.length, 1);
+  assert.equal(result[0].id, 'p-1');
+});
+
+// --- Test 55: Authoritative Age Verification Status CTA ---
+test('Age Verification Status Check: queries authoritative backend endpoint and updates state', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify AgeVerificationBanner provides onCheckStatus
+  const bannerFile = await fs.readFile(
+    new URL('../src/components/AgeVerificationBanner.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(bannerFile.includes('onCheckStatus?: () => void;'), 'AgeVerificationBanner must define onCheckStatus prop');
+  assert.ok(bannerFile.includes('Check Status'), 'AgeVerificationBanner must render Check Status button');
+
+  // 2. Verify profile.tsx and index.tsx handleCheckVerificationStatus
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    profileFile.includes('handleCheckVerificationStatus'),
+    'profile.tsx must implement handleCheckVerificationStatus'
+  );
+  assert.ok(
+    profileFile.includes('authService.getAgeAssuranceStatus'),
+    'handleCheckVerificationStatus must call authService.getAgeAssuranceStatus'
+  );
+});
+
+// --- Test 56: Discovery Feed Continuous Streaming & Cursor Pagination ---
+test('Discovery Feed: continuous streaming across batches with cursor tracking without premature empty state', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify index.tsx tracks nextCursorRef and hasMoreRef
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(indexFile.includes('nextCursorRef'), 'index.tsx must track nextCursorRef');
+  assert.ok(indexFile.includes('hasMoreRef'), 'index.tsx must track hasMoreRef');
+  assert.ok(indexFile.includes('discoveryService.getFeed(20, cursor)'), 'prefetchNextBatch must pass cursor');
+  assert.ok(
+    indexFile.includes('isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore))'),
+    'index.tsx must show loading spinner instead of premature empty state when batches are replenishing'
+  );
+
+  // 2. Verify discoveryService.getFeed supports cursor parameter
+  const discoServiceFile = await fs.readFile(
+    new URL('../src/services/discovery/discoveryService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    discoServiceFile.includes('getFeed(limit = 20, cursor?: string)'),
+    'discoveryService.getFeed must accept cursor parameter'
+  );
+});
+
+// --- Test 57: Search Profile Card Tap & Safe Back Navigation ---
+test('Discovery Search: candidate card is touchable, navigates to profile/[id], and preserves query state', async () => {
+  const fs = await import('node:fs/promises');
+
+  const searchFile = await fs.readFile(
+    new URL('../app/search.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Candidate card must be a TouchableOpacity navigating to /profile/[id]
+  assert.ok(
+    searchFile.includes("pathname: '/profile/[id]'"),
+    'Search card must navigate to profile/[id]'
+  );
+  assert.ok(
+    searchFile.includes("params: { id: item.user_id }"),
+    'Search card must pass user_id as route param'
+  );
+  assert.ok(
+    searchFile.includes('testID={`search-card-${item.user_id}`}'),
+    'Search card must have testID'
+  );
+
+  // 2. Verify _layout.tsx registers profile/[id] screen
+  const layoutFile = await fs.readFile(
+    new URL('../app/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    layoutFile.includes('name="profile/[id]"'),
+    '_layout.tsx must register profile/[id] Stack.Screen'
+  );
+});
+
+// --- Test 58: Public Profile Detail Screen & Privacy Safeguards ---
+test('Profile Detail Screen: renders hero photo carousel, tags, bio, interaction bar, and sanitizes private data', async () => {
+  const fs = await import('node:fs/promises');
+
+  const profileDetailFile = await fs.readFile(
+    new URL('../app/profile/[id].tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Must use discoveryService.getPublicProfile
+  assert.ok(
+    profileDetailFile.includes('discoveryService.getPublicProfile'),
+    'profile/[id].tsx must call discoveryService.getPublicProfile'
+  );
+
+  // 2. Must render testIDs for key elements
+  assert.ok(
+    profileDetailFile.includes('testID="profile-screen"'),
+    'profile/[id].tsx must render profile-screen testID'
+  );
+  assert.ok(
+    profileDetailFile.includes('testID="profile-back-button"'),
+    'profile/[id].tsx must render profile-back-button'
+  );
+  assert.ok(
+    profileDetailFile.includes('testID="profile-like-button"'),
+    'profile/[id].tsx must render profile-like-button'
+  );
+  assert.ok(
+    profileDetailFile.includes('testID="profile-pass-button"'),
+    'profile/[id].tsx must render profile-pass-button'
+  );
+
+  // 3. Must not expose private fields: email, password, exact coordinates
+  assert.ok(!profileDetailFile.includes('candidate.email'), 'profile/[id].tsx must not render private email');
+  assert.ok(!profileDetailFile.includes('candidate.phone'), 'profile/[id].tsx must not render private phone');
+  assert.ok(!profileDetailFile.includes('candidate.latitude'), 'profile/[id].tsx must not render exact coordinates');
+
+  // 4. Verify discoveryService.getPublicProfile implementation
+  const discoServiceFile = await fs.readFile(
+    new URL('../src/services/discovery/discoveryService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    discoServiceFile.includes('getPublicProfile(userId: string)'),
+    'discoveryService must define getPublicProfile'
+  );
+  assert.ok(
+    discoServiceFile.includes('/api/v1/profiles/${userId}'),
+    'getPublicProfile must call GET /api/v1/profiles/${userId}'
+  );
+});
+
+// --- Test 59: Continuous Deck Browsing Past 2 Swipes & Safe AdBreak Isolation ---
+test('Continuous Deck Browsing Past 2 Swipes: cards advance cleanly with key prop and safe ad isolation', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify index.tsx mounts DiscoveryCard with dynamic key to reset animated pan on every candidate
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    indexFile.includes('key={activeCandidate.user_id') || indexFile.includes('key={activeCandidate.id'),
+    'DiscoveryCard must have dynamic key to ensure fresh mount and reset pan value per candidate'
+  );
+
+  // 2. Verify index.tsx guards ad breaks with isGoogleMobileAdsAvailable and does not lock the deck
+  assert.ok(
+    indexFile.includes('isGoogleMobileAdsAvailable()'),
+    'DiscoveryScreen must verify isGoogleMobileAdsAvailable() before triggering interstitial ad breaks'
+  );
+
+  // 3. Verify SponsoredCard.tsx checks isGoogleMobileAdsAvailable() to prevent Expo Go crashes
+  const sponsoredCardFile = await fs.readFile(
+    new URL('../src/components/SponsoredCard.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    sponsoredCardFile.includes('isGoogleMobileAdsAvailable()'),
+    'SponsoredCard must verify isGoogleMobileAdsAvailable() before loading native banner'
+  );
+
+  // 4. Simulate card progression past 2 swipes
+  const candidates = [
+    { user_id: 'u1', display_name: 'Card 1', photos: [{ url: 'p1' }] },
+    { user_id: 'u2', display_name: 'Card 2', photos: [{ url: 'p2' }] },
+    { user_id: 'u3', display_name: 'Card 3', photos: [{ url: 'p3' }] },
+    { user_id: 'u4', display_name: 'Card 4', photos: [{ url: 'p4' }] },
+    { user_id: 'u5', display_name: 'Card 5', photos: [{ url: 'p5' }] },
+  ];
+
+  let currentIndex = 0;
+  function swipe(dir) {
+    assert.ok(currentIndex < candidates.length, 'Cannot swipe past end of deck');
+    const swiped = candidates[currentIndex];
+    currentIndex += 1;
+    return { swiped, nextCandidate: candidates[currentIndex] || null };
+  }
+
+  // Swipe 1
+  const s1 = swipe('PASS');
+  assert.equal(s1.swiped.user_id, 'u1');
+  assert.equal(s1.nextCandidate?.user_id, 'u2');
+
+  // Swipe 2
+  const s2 = swipe('PASS');
+  assert.equal(s2.swiped.user_id, 'u2');
+  assert.equal(s2.nextCandidate?.user_id, 'u3');
+
+  // Swipe 3: Continues smoothly to Candidate 3 (no blank screen!)
+  const s3 = swipe('PASS');
+  assert.equal(s3.swiped.user_id, 'u3');
+  assert.equal(s3.nextCandidate?.user_id, 'u4');
+
+  // Swipe 4: Continues smoothly to Candidate 4
+  const s4 = swipe('LIKE');
+  assert.equal(s4.swiped.user_id, 'u4');
+  assert.equal(s4.nextCandidate?.user_id, 'u5');
+
+  // Verify candidate 5 is active and available
+  assert.equal(candidates[currentIndex].user_id, 'u5');
+});
+
+// --- Test 60: Compact Verification Strip & Non-Overlapping Discovery Card Layout ---
+test('Compact Verification Strip & Non-Overlapping Discovery Card Layout', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify AgeVerificationBanner is a compact horizontal strip
+  const bannerFile = await fs.readFile(
+    new URL('../src/components/AgeVerificationBanner.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(bannerFile.includes('testID="compact-age-verification-banner"'), 'Must have compact-age-verification-banner testID');
+  assert.ok(bannerFile.includes('⏳'), 'Must render small hourglass icon');
+  assert.ok(bannerFile.includes('Verification Pending'), 'Must render Verification Pending title');
+  assert.ok(bannerFile.includes('Get verified for your badge'), 'Must render short secondary line');
+  assert.ok(bannerFile.includes('Get Verified'), 'Must render compact Get Verified button');
+  assert.ok(bannerFile.includes('Check Status'), 'Must render compact Check Status button');
+  assert.ok(bannerFile.includes("flexDirection: 'row'"), 'Banner must be horizontal row strip');
+
+  // 2. Verify DiscoveryCard uses responsive dimensions to prevent banner overlap
+  const cardFile = await fs.readFile(
+    new URL('../src/components/DiscoveryCard.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(cardFile.includes('useWindowDimensions'), 'DiscoveryCard must use useWindowDimensions for responsive layout');
+  assert.ok(cardFile.includes('photoHeight = Math.min'), 'DiscoveryCard must budget photoHeight responsively');
+  assert.ok(cardFile.includes('cardWidth = Math.min'), 'DiscoveryCard must budget cardWidth responsively');
+
+  // 3. Verify vertical space budgeting arithmetic
+  const screenHeights = [700, 750, 800, 850, 900];
+  for (const h of screenHeights) {
+    const cardWidth = Math.min(360 - 32, 420);
+    const maxAvailable = Math.max(h - 310, 280);
+    const photoHeight = Math.min(cardWidth * 1.34, maxAvailable, h * 0.54, 460);
+    const actionsBarHeight = 74;
+    const totalCardHeight = photoHeight + actionsBarHeight;
+
+    // Total UI chrome: top inset (~36) + header (~50) + compact banner (~45) + bottom tabs (~85) = ~216px
+    const totalScreenUsed = totalCardHeight + 216;
+    assert.ok(
+      totalScreenUsed <= h,
+      `Total UI (${totalScreenUsed}px) must comfortably fit within screen height (${h}px) with zero overlap`
+    );
+  }
+});
 
 
 

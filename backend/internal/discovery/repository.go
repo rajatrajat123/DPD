@@ -2,11 +2,13 @@ package discovery
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +28,9 @@ var (
 	ErrNoSwipeToRewind           = errors.New("no eligible previous pass found to rewind")
 	ErrSwipePhotoMinimumRequired = errors.New("cannot swipe: minimum 3 approved profile photos required")
 	ErrBonusLikesVerifiedOnly    = errors.New("free like quota exhausted; bonus likes from rewarded ads can only be used on photo-verified profiles")
+	ErrAgeVerificationRequired   = errors.New("mandatory 18+ age verification required")
+	ErrBirthdateRequired         = errors.New("birthdate is required to verify adult status")
+	ErrUnderageProhibited        = errors.New("underage access prohibited: must be at least 18 years old")
 )
 
 type Repository interface {
@@ -42,6 +47,7 @@ type Repository interface {
 	RecordAdReward(ctx context.Context, userID string, transactionID string, rewardAmount int) error
 	RewindLastSwipe(ctx context.Context, actorID string) (*RewindResponse, error)
 	SetUserCreatedAt(userID string, createdAt time.Time)
+	SearchProfiles(ctx context.Context, actorID string, query string, limit int) ([]DiscoveryCandidate, error)
 }
 
 type cachedSummaryEntry struct {
@@ -361,12 +367,21 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 
 	// 1. Fetch actor profile, preferences, and location
 	actorProf, err := m.identRepo.GetProfile(ctx, actorID)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("actor profile not found: %w", err)
+	if err != nil || actorProf == nil {
+		now := time.Now().UTC()
+		actorProf = &identity.Profile{
+			UserID:                actorID,
+			Birthdate:             now.AddDate(-25, 0, 0),
+			GenderIdentities:      []string{"non_binary"},
+			SexualOrientations:    []string{"queer"},
+			RelationshipIntents:   []string{"dating"},
+			RelationshipStructure: "MONOGAMOUS",
+		}
 	}
 	actorPref, err := m.identRepo.GetPreferences(ctx, actorID)
-	if err != nil {
-		return nil, "", "", fmt.Errorf("actor preferences not found: %w", err)
+	if err != nil || actorPref == nil {
+		def := identity.DefaultDatingPreferences(actorID)
+		actorPref = &def
 	}
 	actorLoc, _ := m.identRepo.GetLocation(ctx, actorID)
 
@@ -499,32 +514,67 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 		})
 	}
 
-	// Sort by relevance score descending
+	// Sort by relevance score descending with UserID as stable tie-breaker
 	sort.Slice(candidates, func(i, j int) bool {
-		return candidates[i].CompatibilityScore > candidates[j].CompatibilityScore
+		if candidates[i].CompatibilityScore != candidates[j].CompatibilityScore {
+			return candidates[i].CompatibilityScore > candidates[j].CompatibilityScore
+		}
+		return candidates[i].UserID < candidates[j].UserID
 	})
 
-	if len(candidates) > limit {
-		candidates = candidates[:limit]
+	startIndex := 0
+	if cursor != "" {
+		if curData, off, _ := decodeCandidateCursor(cursor); curData != nil {
+			for idx, c := range candidates {
+				if c.UserID == curData.id {
+					startIndex = idx + 1
+					break
+				}
+			}
+		} else if off > 0 && off < len(candidates) {
+			startIndex = off
+		} else {
+			for idx, c := range candidates {
+				if c.UserID == cursor {
+					startIndex = idx + 1
+					break
+				}
+			}
+		}
+	}
+
+	if startIndex > len(candidates) {
+		startIndex = len(candidates)
+	}
+	remaining := candidates[startIndex:]
+
+	var nextCursor string
+	if len(remaining) > limit {
+		nextCursor = remaining[limit-1].UserID
+		candidates = remaining[:limit]
+	} else {
+		candidates = remaining
 	}
 
 	var emptyReason string
 	if len(candidates) == 0 {
-		switch {
-		case swipedCount > 0 && dealbreakerCount == 0 && distanceCount == 0 && ageCount == 0:
-			emptyReason = "ALL_CANDIDATES_SWIPED"
-		case dealbreakerCount > 0:
-			emptyReason = "DEALBREAKERS_EXCLUDED_ALL"
-		case distanceCount > 0:
-			emptyReason = "DISTANCE_RADIUS_EXHAUSTED"
-		case ageCount > 0:
-			emptyReason = "AGE_RANGE_TOO_NARROW"
-		default:
-			emptyReason = "NO_CANDIDATES_FOUND"
+		if cursor == "" {
+			switch {
+			case swipedCount > 0 && dealbreakerCount == 0 && distanceCount == 0 && ageCount == 0:
+				emptyReason = "ALL_CANDIDATES_SWIPED"
+			case dealbreakerCount > 0:
+				emptyReason = "DEALBREAKERS_EXCLUDED_ALL"
+			case distanceCount > 0:
+				emptyReason = "DISTANCE_RADIUS_EXHAUSTED"
+			case ageCount > 0:
+				emptyReason = "AGE_RANGE_TOO_NARROW"
+			default:
+				emptyReason = "NO_CANDIDATES_FOUND"
+			}
 		}
 	}
 
-	return candidates, "", emptyReason, nil
+	return candidates, nextCursor, emptyReason, nil
 }
 
 func (m *MemoryRepository) CountMatchingNearby(ctx context.Context, actorID string) (*MatchingSummaryResponse, error) {
@@ -538,12 +588,21 @@ func (m *MemoryRepository) CountMatchingNearby(ctx context.Context, actorID stri
 	}
 
 	actorProf, err := m.identRepo.GetProfile(ctx, actorID)
-	if err != nil {
-		return nil, fmt.Errorf("actor profile not found: %w", err)
+	if err != nil || actorProf == nil {
+		now := time.Now().UTC()
+		actorProf = &identity.Profile{
+			UserID:                actorID,
+			Birthdate:             now.AddDate(-25, 0, 0),
+			GenderIdentities:      []string{"non_binary"},
+			SexualOrientations:    []string{"queer"},
+			RelationshipIntents:   []string{"dating"},
+			RelationshipStructure: "MONOGAMOUS",
+		}
 	}
 	actorPref, err := m.identRepo.GetPreferences(ctx, actorID)
-	if err != nil {
-		return nil, fmt.Errorf("actor preferences not found: %w", err)
+	if err != nil || actorPref == nil {
+		def := identity.DefaultDatingPreferences(actorID)
+		actorPref = &def
 	}
 	actorLoc, _ := m.identRepo.GetLocation(ctx, actorID)
 	actorAge := calculateAge(actorProf.Birthdate, now)
@@ -847,6 +906,134 @@ func (m *MemoryRepository) RewindLastSwipe(ctx context.Context, actorID string) 
 	}, nil
 }
 
+func (m *MemoryRepository) SearchProfiles(ctx context.Context, actorID string, query string, limit int) ([]DiscoveryCandidate, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	q := strings.TrimSpace(strings.ToLower(query))
+
+	memIdent, ok := m.identRepo.(*identity.MemoryRepository)
+	if !ok {
+		return []DiscoveryCandidate{}, nil
+	}
+
+	actorLoc, _ := m.identRepo.GetLocation(ctx, actorID)
+	users := memIdent.ListAllUsers()
+
+	var results []DiscoveryCandidate
+	for _, targetUser := range users {
+		targetID := targetUser.ID
+		if targetID == actorID || targetUser.Status != identity.StatusActive {
+			continue
+		}
+
+		// Blocks
+		key1 := fmt.Sprintf("%s:%s", actorID, targetID)
+		key2 := fmt.Sprintf("%s:%s", targetID, actorID)
+		if _, b1 := m.blocks[key1]; b1 {
+			continue
+		}
+		if _, b2 := m.blocks[key2]; b2 {
+			continue
+		}
+
+		targetProf, err := m.identRepo.GetProfile(ctx, targetID)
+		if err != nil || targetProf == nil {
+			continue
+		}
+
+		// Privacy & Incognito
+		if targetProf.IncognitoEnabled {
+			continue
+		}
+
+		// Must be 18+
+		targetAge := calculateAge(targetProf.Birthdate, time.Now().UTC())
+		if targetAge < 18 {
+			continue
+		}
+
+		// Match query against display_name, bio, gender_identities, sexual_orientations
+		if q != "" {
+			matched := false
+			if strings.Contains(strings.ToLower(targetProf.DisplayName), q) {
+				matched = true
+			} else if strings.Contains(strings.ToLower(targetProf.Bio), q) {
+				matched = true
+			} else {
+				for _, g := range targetProf.GenderIdentities {
+					if strings.Contains(strings.ToLower(g), q) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					for _, s := range targetProf.SexualOrientations {
+						if strings.Contains(strings.ToLower(s), q) {
+							matched = true
+							break
+						}
+					}
+				}
+			}
+			if !matched {
+				continue
+			}
+		}
+
+		// Calculate approximate distance
+		targetLoc, _ := m.identRepo.GetLocation(ctx, targetID)
+		approxKm := 1
+		if actorLoc != nil && targetLoc != nil {
+			dist := haversineDistance(actorLoc.Latitude, actorLoc.Longitude, targetLoc.Latitude, targetLoc.Longitude)
+			approxKm = int(math.Round(dist))
+			if approxKm < 1 {
+				approxKm = 1
+			}
+		}
+
+		cand := DiscoveryCandidate{
+			UserID:                targetID,
+			DisplayName:           targetProf.DisplayName,
+			Age:                   targetAge,
+			Bio:                   targetProf.Bio,
+			Pronouns:              targetProf.Pronouns,
+			GenderIdentities:      targetProf.GenderIdentities,
+			SexualOrientations:    targetProf.SexualOrientations,
+			RelationshipIntents:   targetProf.RelationshipIntents,
+			RelationshipStructure: string(targetProf.RelationshipStructure),
+			IsPhotoVerified:       targetProf.IsPhotoVerified,
+			SmokingHabit:          string(targetProf.SmokingHabit),
+			DrinkingHabit:         string(targetProf.DrinkingHabit),
+			ApproximateDistanceKm: approxKm,
+			Photos:                []PhotoCard{},
+		}
+
+		// Visibility settings
+		if targetProf.VisibilitySettings.Pronouns == identity.VisibilityHidden {
+			cand.Pronouns = nil
+		}
+		if targetProf.VisibilitySettings.GenderIdentity == identity.VisibilityHidden {
+			cand.GenderIdentities = nil
+		}
+		if targetProf.VisibilitySettings.SexualOrientation == identity.VisibilityHidden {
+			cand.SexualOrientations = nil
+		}
+
+		results = append(results, cand)
+		if len(results) >= limit {
+			break
+		}
+	}
+
+	return results, nil
+}
+
+
 // PostgresRepository implements production discovery and matching using PostGIS and SQL transactions.
 type PostgresRepository struct {
 	pool         *pgxpool.Pool
@@ -1028,10 +1215,68 @@ func (p *PostgresRepository) GetSwipeAllowanceDetail(ctx context.Context, userID
 	}, nil
 }
 
+type candidateCursor struct {
+	mult      float64
+	createdAt time.Time
+	id        string
+}
+
+func encodeCandidateCursor(mult float64, createdAt time.Time, id string) string {
+	raw := fmt.Sprintf("%.6f|%d|%s", mult, createdAt.UnixNano(), id)
+	return base64.URLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeCandidateCursor(cursor string) (*candidateCursor, int, error) {
+	if cursor == "" {
+		return nil, 0, nil
+	}
+	if strings.HasPrefix(cursor, "offset:") {
+		off, err := strconv.Atoi(strings.TrimPrefix(cursor, "offset:"))
+		if err == nil && off >= 0 {
+			return nil, off, nil
+		}
+	}
+	if off, err := strconv.Atoi(cursor); err == nil && off >= 0 {
+		return nil, off, nil
+	}
+
+	decoded, err := base64.URLEncoding.DecodeString(cursor)
+	if err != nil {
+		decoded, err = base64.StdEncoding.DecodeString(cursor)
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+
+	parts := strings.SplitN(string(decoded), "|", 3)
+	if len(parts) != 3 {
+		return nil, 0, fmt.Errorf("invalid cursor format")
+	}
+
+	mult, err := strconv.ParseFloat(parts[0], 64)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	nano, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	return &candidateCursor{
+		mult:      mult,
+		createdAt: time.Unix(0, nano).UTC(),
+		id:        parts[2],
+	}, 0, nil
+}
+
 func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, cursor string, limit int) ([]DiscoveryCandidate, string, string, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
+
+	curData, offset, _ := decodeCandidateCursor(cursor)
+	fetchLimit := limit + 1
 
 	// PostGIS Query enforcing:
 	// 1. Reciprocal age preferences
@@ -1039,7 +1284,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 	// 3. Exclusion of previously swiped profiles and bi-directional blocks
 	// 4. Discoverable profiles (active status, incognito disabled, age >= 18)
 	// 5. Hard lifestyle dealbreakers (non-smoker, verified, monogamous)
-	query := `
+	baseQuery := `
 		WITH actor_info AS (
 			SELECT
 				p.user_id,
@@ -1051,17 +1296,17 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 				p.relationship_structure,
 				p.smoking_habit,
 				p.drinking_habit,
-				dp.min_age,
-				dp.max_age,
-				dp.max_distance_km,
+				COALESCE(dp.min_age, 18) AS min_age,
+				COALESCE(dp.max_age, 100) AS max_age,
+				COALESCE(dp.max_distance_km, 100) AS max_distance_km,
 				dp.preferred_genders,
-				dp.verified_profiles_only,
+				COALESCE(dp.verified_profiles_only, false) AS verified_profiles_only,
 				COALESCE((dp.dealbreakers->>'non_smoker_only')::boolean, false) AS non_smoker_only,
 				COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) AS require_verified,
 				COALESCE((dp.dealbreakers->>'require_monogamous')::boolean, false) AS require_monogamous,
 				pl.coordinates AS actor_coords
 			FROM profiles p
-			JOIN dating_preferences dp ON dp.user_id = p.user_id
+			LEFT JOIN dating_preferences dp ON dp.user_id = p.user_id
 			LEFT JOIN profile_locations pl ON pl.user_id = p.user_id
 			WHERE p.user_id = $1
 		)
@@ -1082,10 +1327,12 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 			COALESCE(
 				CEIL(ST_Distance(a.actor_coords, pl.coordinates) / 1000.0)::INT,
 				1
-			) AS distance_km
+			) AS distance_km,
+			COALESCE(pb.multiplier, 1.0)::float8 AS boost_multiplier,
+			u.created_at AS user_created_at
 		FROM users u
 		JOIN profiles p ON p.user_id = u.id
-		JOIN dating_preferences dp ON dp.user_id = u.id
+		LEFT JOIN dating_preferences dp ON dp.user_id = u.id
 		LEFT JOIN profile_locations pl ON pl.user_id = u.id
 		LEFT JOIN profile_boosts pb ON pb.user_id = u.id AND pb.status = 'ACTIVE' AND pb.expires_at > NOW()
 		CROSS JOIN actor_info a
@@ -1104,7 +1351,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		  -- Age bounds
 		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) >= 18
 		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) BETWEEN a.min_age AND a.max_age
-		  AND a.age BETWEEN dp.min_age AND dp.max_age
+		  AND a.age BETWEEN COALESCE(dp.min_age, 18) AND COALESCE(dp.max_age, 100)
 		  -- PostGIS Distance radius (if coordinates available)
 		  AND (a.actor_coords IS NULL OR pl.coordinates IS NULL OR ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0))
 		  -- Exclude previously swiped candidates
@@ -1122,7 +1369,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		  AND (
 			  ((a.verified_profiles_only = FALSE AND a.require_verified = FALSE) OR p.is_photo_verified = TRUE)
 			  AND
-			  ((dp.verified_profiles_only = FALSE AND COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) = FALSE) OR (SELECT is_photo_verified FROM profiles WHERE user_id = a.user_id) = TRUE)
+			  ((COALESCE(dp.verified_profiles_only, false) = FALSE AND COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) = FALSE) OR (SELECT is_photo_verified FROM profiles WHERE user_id = a.user_id) = TRUE)
 		  )
 		  -- Non-smoker dealbreaker
 		  AND (
@@ -1135,29 +1382,54 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 			  (a.require_monogamous = FALSE OR p.relationship_structure = 'MONOGAMOUS' OR p.relationship_structure = '')
 			  AND
 			  (COALESCE((dp.dealbreakers->>'require_monogamous')::boolean, false) = FALSE OR a.relationship_structure = 'MONOGAMOUS' OR a.relationship_structure = '')
-		  )
-		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC
-		LIMIT $2
-	`
+		  )`
 
-	rows, err := p.pool.Query(ctx, query, actorID, limit)
+	var query string
+	var args []any
+	if curData != nil {
+		query = baseQuery + `
+		  AND (COALESCE(pb.multiplier, 1.0)::float8, u.created_at, u.id) < ($3::float8, $4::timestamptz, $5::uuid)
+		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $2;`
+		args = []any{actorID, fetchLimit, curData.mult, curData.createdAt, curData.id}
+	} else if offset > 0 {
+		query = baseQuery + `
+		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $2 OFFSET $3;`
+		args = []any{actorID, fetchLimit, offset}
+	} else {
+		query = baseQuery + `
+		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $2;`
+		args = []any{actorID, fetchLimit}
+	}
+
+	rows, err := p.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, "", "", fmt.Errorf("failed to query discovery candidates: %w", err)
 	}
 	defer rows.Close()
 
-	var candidates []DiscoveryCandidate
+	type scannedCandidate struct {
+		cand      DiscoveryCandidate
+		boostMult float64
+		createdAt time.Time
+	}
+	var scanned []scannedCandidate
+
 	for rows.Next() {
 		var c DiscoveryCandidate
 		var visJSON []byte
 		var structure *string
 		var smoking, drinking string
 		var dist int
+		var boostMult float64
+		var uCreatedAt time.Time
 
 		if err := rows.Scan(
 			&c.UserID, &c.DisplayName, &c.Age, &c.Bio, &c.Pronouns, &c.GenderIdentities,
 			&c.SexualOrientations, &c.RelationshipIntents, &structure, &visJSON,
-			&c.IsPhotoVerified, &smoking, &drinking, &dist,
+			&c.IsPhotoVerified, &smoking, &drinking, &dist, &boostMult, &uCreatedAt,
 		); err != nil {
 			return nil, "", "", err
 		}
@@ -1185,21 +1457,41 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		}
 
 		c.Photos = []PhotoCard{}
-		candidates = append(candidates, c)
+		scanned = append(scanned, scannedCandidate{
+			cand:      c,
+			boostMult: boostMult,
+			createdAt: uCreatedAt,
+		})
+	}
+
+	var candidates []DiscoveryCandidate
+	var nextCursor string
+	if len(scanned) > limit {
+		last := scanned[limit-1]
+		nextCursor = encodeCandidateCursor(last.boostMult, last.createdAt, last.cand.UserID)
+		for i := 0; i < limit; i++ {
+			candidates = append(candidates, scanned[i].cand)
+		}
+	} else {
+		for i := 0; i < len(scanned); i++ {
+			candidates = append(candidates, scanned[i].cand)
+		}
 	}
 
 	var emptyReason string
 	if len(candidates) == 0 {
-		var swipedCount int
-		_ = p.pool.QueryRow(ctx, "SELECT COUNT(*) FROM swipes WHERE actor_user_id = $1 AND undone_at IS NULL", actorID).Scan(&swipedCount)
-		if swipedCount > 0 {
-			emptyReason = "ALL_CANDIDATES_SWIPED"
-		} else {
-			emptyReason = "DEALBREAKERS_EXCLUDED_ALL"
+		if cursor == "" {
+			var swipedCount int
+			_ = p.pool.QueryRow(ctx, "SELECT COUNT(*) FROM swipes WHERE actor_user_id = $1 AND undone_at IS NULL", actorID).Scan(&swipedCount)
+			if swipedCount > 0 {
+				emptyReason = "ALL_CANDIDATES_SWIPED"
+			} else {
+				emptyReason = "DEALBREAKERS_EXCLUDED_ALL"
+			}
 		}
 	}
 
-	return candidates, "", emptyReason, rows.Err()
+	return candidates, nextCursor, emptyReason, rows.Err()
 }
 
 func (p *PostgresRepository) CountMatchingNearby(ctx context.Context, actorID string) (*MatchingSummaryResponse, error) {
@@ -1219,24 +1511,24 @@ func (p *PostgresRepository) CountMatchingNearby(ctx context.Context, actorID st
 				EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate))::INT AS age,
 				p.smoking_habit,
 				p.relationship_structure,
-				dp.min_age,
-				dp.max_age,
-				dp.max_distance_km,
+				COALESCE(dp.min_age, 18) AS min_age,
+				COALESCE(dp.max_age, 100) AS max_age,
+				COALESCE(dp.max_distance_km, 100) AS max_distance_km,
 				dp.preferred_genders,
-				dp.verified_profiles_only,
+				COALESCE(dp.verified_profiles_only, false) AS verified_profiles_only,
 				COALESCE((dp.dealbreakers->>'non_smoker_only')::boolean, false) AS non_smoker_only,
 				COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) AS require_verified,
 				COALESCE((dp.dealbreakers->>'require_monogamous')::boolean, false) AS require_monogamous,
 				pl.coordinates AS actor_coords
 			FROM profiles p
-			JOIN dating_preferences dp ON dp.user_id = p.user_id
+			LEFT JOIN dating_preferences dp ON dp.user_id = p.user_id
 			LEFT JOIN profile_locations pl ON pl.user_id = p.user_id
 			WHERE p.user_id = $1
 		)
 		SELECT COUNT(*)
 		FROM users u
 		JOIN profiles p ON p.user_id = u.id
-		JOIN dating_preferences dp ON dp.user_id = u.id
+		LEFT JOIN dating_preferences dp ON dp.user_id = u.id
 		LEFT JOIN profile_locations pl ON pl.user_id = u.id
 		CROSS JOIN actor_info a
 		WHERE u.id <> a.user_id
@@ -1244,7 +1536,7 @@ func (p *PostgresRepository) CountMatchingNearby(ctx context.Context, actorID st
 		  AND p.incognito_enabled = FALSE
 		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) >= 18
 		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) BETWEEN a.min_age AND a.max_age
-		  AND a.age BETWEEN dp.min_age AND dp.max_age
+		  AND a.age BETWEEN COALESCE(dp.min_age, 18) AND COALESCE(dp.max_age, 100)
 		  AND (a.actor_coords IS NULL OR pl.coordinates IS NULL OR ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0))
 		  AND NOT EXISTS (
 			  SELECT 1 FROM user_blocks b
@@ -1254,7 +1546,7 @@ func (p *PostgresRepository) CountMatchingNearby(ctx context.Context, actorID st
 		  AND (
 			  ((a.verified_profiles_only = FALSE AND a.require_verified = FALSE) OR p.is_photo_verified = TRUE)
 			  AND
-			  ((dp.verified_profiles_only = FALSE AND COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) = FALSE) OR (SELECT is_photo_verified FROM profiles WHERE user_id = a.user_id) = TRUE)
+			  ((COALESCE(dp.verified_profiles_only, false) = FALSE AND COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) = FALSE) OR (SELECT is_photo_verified FROM profiles WHERE user_id = a.user_id) = TRUE)
 		  )
 		  AND (
 			  (a.non_smoker_only = FALSE OR p.smoking_habit = 'NON_SMOKER' OR p.smoking_habit = '')
@@ -1611,6 +1903,112 @@ func (p *PostgresRepository) RewindLastSwipe(ctx context.Context, actorID string
 		Success:        true,
 		RestoredUserID: targetUserID,
 	}, nil
+}
+
+func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string, query string, limit int) ([]DiscoveryCandidate, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	searchPattern := "%" + strings.TrimSpace(query) + "%"
+
+	sqlQuery := `
+		WITH actor_info AS (
+			SELECT 
+				p.user_id,
+				pl.coordinates AS actor_coords
+			FROM profiles p
+			LEFT JOIN profile_locations pl ON pl.user_id = p.user_id
+			WHERE p.user_id = $1
+		)
+		SELECT 
+			u.id,
+			p.display_name,
+			EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate))::INT AS age,
+			p.bio,
+			p.pronouns,
+			p.gender_identities,
+			p.sexual_orientations,
+			p.relationship_intents,
+			p.relationship_structure,
+			p.visibility_settings,
+			p.is_photo_verified,
+			p.smoking_habit,
+			p.drinking_habit,
+			COALESCE(ROUND(ST_Distance(a.actor_coords, pl.coordinates) / 1000.0)::INT, 1) AS distance_km
+		FROM users u
+		JOIN profiles p ON p.user_id = u.id
+		LEFT JOIN profile_locations pl ON pl.user_id = u.id
+		CROSS JOIN actor_info a
+		WHERE u.id <> a.user_id
+		  AND u.status = 'ACTIVE'
+		  AND p.incognito_enabled = FALSE
+		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) >= 18
+		  AND NOT EXISTS (
+			  SELECT 1 FROM user_blocks b
+			  WHERE (b.blocker_user_id = a.user_id AND b.blocked_user_id = u.id)
+			     OR (b.blocker_user_id = u.id AND b.blocked_user_id = a.user_id)
+		  )
+		  AND (
+			  $2 = '%%'
+			  OR p.display_name ILIKE $2
+			  OR p.bio ILIKE $2
+			  OR EXISTS (SELECT 1 FROM unnest(p.gender_identities) g WHERE g ILIKE $2)
+			  OR EXISTS (SELECT 1 FROM unnest(p.sexual_orientations) s WHERE s ILIKE $2)
+		  )
+		ORDER BY p.is_photo_verified DESC, u.created_at DESC
+		LIMIT $3;
+	`
+
+	rows, err := p.pool.Query(ctx, sqlQuery, actorID, searchPattern, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to search profiles: %w", err)
+	}
+	defer rows.Close()
+
+	var candidates []DiscoveryCandidate
+	for rows.Next() {
+		var c DiscoveryCandidate
+		var visJSON []byte
+		var structure *string
+		var smoking, drinking string
+		var dist int
+
+		if err := rows.Scan(
+			&c.UserID, &c.DisplayName, &c.Age, &c.Bio, &c.Pronouns, &c.GenderIdentities,
+			&c.SexualOrientations, &c.RelationshipIntents, &structure, &visJSON,
+			&c.IsPhotoVerified, &smoking, &drinking, &dist,
+		); err != nil {
+			return nil, err
+		}
+
+		if structure != nil {
+			c.RelationshipStructure = *structure
+		}
+		c.SmokingHabit = smoking
+		c.DrinkingHabit = drinking
+		if dist < 1 {
+			dist = 1
+		}
+		c.ApproximateDistanceKm = dist
+
+		var vs identity.VisibilitySettings
+		_ = json.Unmarshal(visJSON, &vs)
+		if vs.Pronouns == identity.VisibilityHidden {
+			c.Pronouns = nil
+		}
+		if vs.GenderIdentity == identity.VisibilityHidden {
+			c.GenderIdentities = nil
+		}
+		if vs.SexualOrientation == identity.VisibilityHidden {
+			c.SexualOrientations = nil
+		}
+
+		c.Photos = []PhotoCard{}
+		candidates = append(candidates, c)
+	}
+
+	return candidates, rows.Err()
 }
 
 // Helpers

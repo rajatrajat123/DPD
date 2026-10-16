@@ -151,6 +151,7 @@ type Service struct {
 	loginTracker     LoginAttemptTracker
 	notificationSink NotificationDeliverySink
 	resetLimiter     *ResetRateLimiter
+	logger           *slog.Logger
 }
 
 // ResetRateLimiter enforces resend throttling per email and rate limits per IP
@@ -350,8 +351,18 @@ func WithResetRateLimiter(limiter *ResetRateLimiter) ServiceOption {
 	}
 }
 
+func WithLogger(logger *slog.Logger) ServiceOption {
+	return func(s *Service) {
+		s.logger = logger
+	}
+}
+
 func (s *Service) SetResetRateLimiter(limiter *ResetRateLimiter) {
 	s.resetLimiter = limiter
+}
+
+func (s *Service) SetNotificationSink(sink NotificationDeliverySink) {
+	s.notificationSink = sink
 }
 
 func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Service {
@@ -735,7 +746,14 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string, client
 	}
 
 	if s.notificationSink != nil {
-		_ = s.notificationSink.DeliverPasswordReset(ctx, user.Email, token)
+		if err := s.notificationSink.DeliverPasswordReset(ctx, user.Email, token); err != nil {
+			if s.logger != nil {
+				s.logger.Error("password_reset_delivery_failed",
+					slog.String("target_masked", maskRecipient(user.Email)),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
 	}
 
 	return token, nil
@@ -783,10 +801,30 @@ func (s *Service) GetMyProfile(ctx context.Context, userID string) (*FullProfile
 	}
 	profile, err := s.repo.GetProfile(ctx, userID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, ErrProfileNotFound) {
+			now := time.Now().UTC()
+			defaultBirthdate := now.AddDate(-25, 0, 0)
+			profile = &Profile{
+				UserID:                userID,
+				DisplayName:           "Member",
+				Birthdate:             defaultBirthdate,
+				Bio:                   "",
+				Pronouns:              []string{"they/them"},
+				GenderIdentities:      []string{"non_binary"},
+				SexualOrientations:    []string{"queer"},
+				RelationshipIntents:   []string{"dating"},
+				RelationshipStructure: "monogamous",
+				VisibilitySettings:    DefaultVisibilitySettings(),
+				CreatedAt:             now,
+				UpdatedAt:             now,
+			}
+			_ = s.repo.UpsertProfile(ctx, profile)
+		} else {
+			return nil, err
+		}
 	}
 	location, _ := s.repo.GetLocation(ctx, userID)
-	prefs, _ := s.repo.GetPreferences(ctx, userID)
+	prefs, _ := s.GetMyPreferences(ctx, userID)
 
 	return &FullProfileResponse{
 		User:        *user,
@@ -799,7 +837,27 @@ func (s *Service) GetMyProfile(ctx context.Context, userID string) (*FullProfile
 func (s *Service) UpdateMyProfile(ctx context.Context, userID string, req UpdateProfileRequest) (*Profile, error) {
 	profile, err := s.repo.GetProfile(ctx, userID)
 	if err != nil {
-		return nil, err
+		if errors.Is(err, ErrProfileNotFound) {
+			now := time.Now().UTC()
+			defaultBirthdate := now.AddDate(-25, 0, 0)
+			profile = &Profile{
+				UserID:                userID,
+				DisplayName:           "Member",
+				Birthdate:             defaultBirthdate,
+				Bio:                   "",
+				Pronouns:              []string{"they/them"},
+				GenderIdentities:      []string{"non_binary"},
+				SexualOrientations:    []string{"queer"},
+				RelationshipIntents:   []string{"dating"},
+				RelationshipStructure: "monogamous",
+				VisibilitySettings:    DefaultVisibilitySettings(),
+				CreatedAt:             now,
+				UpdatedAt:             now,
+			}
+			_ = s.repo.UpsertProfile(ctx, profile)
+		} else {
+			return nil, err
+		}
 	}
 
 	if req.DisplayName != nil {
@@ -1080,7 +1138,14 @@ func (s *Service) AdminResetPassword(ctx context.Context, actorID string, target
 		return nil, err
 	}
 	if s.notificationSink != nil {
-		_ = s.notificationSink.DeliverPasswordReset(ctx, u.Email, token)
+		if err := s.notificationSink.DeliverPasswordReset(ctx, u.Email, token); err != nil {
+			if s.logger != nil {
+				s.logger.Error("admin_password_reset_delivery_failed",
+					slog.String("target_masked", maskRecipient(u.Email)),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
 	}
 	return reset, nil
 }

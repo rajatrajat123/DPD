@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -65,7 +66,7 @@ func NewResendNotificationSink(apiKey, fromEmail, resetURLBase, env string, logg
 
 	urlBase := strings.TrimSpace(resetURLBase)
 	if urlBase == "" {
-		urlBase = "http://localhost:3000/auth/reset-password"
+		urlBase = "http://192.168.29.15:8080/auth/reset-password"
 	}
 
 	var client HTTPTransport = &http.Client{Timeout: 10 * time.Second}
@@ -115,6 +116,10 @@ func (s *ResendNotificationSink) DeliverPasswordReset(ctx context.Context, email
 			return ErrTransactionalEmailUnconfigured
 		}
 
+		s.logger.Warn("resend_unconfigured_development_mode",
+			slog.String("hint", "RESEND_API_KEY is not configured in backend/.env; email was not dispatched to Gmail"),
+			slog.String("target_masked", maskRecipient(normalizedEmail)),
+		)
 		s.logger.Info("dev_notification_sink_delivered_password_reset",
 			slog.String("env", s.env),
 			slog.String("target_masked", maskRecipient(normalizedEmail)),
@@ -333,8 +338,9 @@ func (s *ResendNotificationSink) sendResendEmail(ctx context.Context, toEmail, s
 
 func (s *ResendNotificationSink) buildResetURL(token string) string {
 	base := s.resetURLBase
+	escapedToken := url.QueryEscape(token)
 	if strings.Contains(base, "?") {
-		return fmt.Sprintf("%s&token=%s", base, token)
+		return fmt.Sprintf("%s&token=%s", base, escapedToken)
 	}
-	return fmt.Sprintf("%s?token=%s", base, token)
+	return fmt.Sprintf("%s?token=%s", base, escapedToken)
 }

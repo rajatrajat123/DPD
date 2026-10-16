@@ -5,11 +5,15 @@ import { colors, typography, spacing, borderRadius } from '../theme';
 interface DealbreakerEmptyStateProps {
   onAdjustFilters: () => void;
   onRefresh: () => void;
+  reason?: string;
+  errorMessage?: string | null;
 }
 
 export const DealbreakerEmptyState: React.FC<DealbreakerEmptyStateProps> = ({
   onAdjustFilters,
   onRefresh,
+  reason,
+  errorMessage,
 }) => {
   return (
     <View style={styles.container}>
@@ -24,6 +28,15 @@ export const DealbreakerEmptyState: React.FC<DealbreakerEmptyStateProps> = ({
         There are no new profiles matching your exact criteria right now. Because Aura enforces strict dealbreaker
         integrity, we will never compromise your preferences (such as Non-smokers only) merely to fill the deck.
       </Text>
+
+      {(reason || errorMessage) ? (
+        <View style={styles.diagnosticPill} testID="discovery-diagnostic-pill">
+          <Text style={styles.diagnosticLabel}>Status Diagnostic:</Text>
+          <Text style={styles.diagnosticValue}>
+            {errorMessage || reason}
+          </Text>
+        </View>
+      ) : null}
 
       <View style={styles.buttonsContainer}>
         <TouchableOpacity style={styles.primaryButton} onPress={onAdjustFilters} activeOpacity={0.8}>
@@ -108,5 +121,31 @@ const styles = StyleSheet.create({
   secondaryButtonText: {
     ...typography.button,
     color: colors.textMuted,
+  },
+  diagnosticPill: {
+    marginTop: spacing.sm,
+    marginBottom: spacing.lg,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    backgroundColor: colors.cardElevated,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+    alignItems: 'center',
+    maxWidth: 320,
+  },
+  diagnosticLabel: {
+    ...typography.caption,
+    color: colors.textSubtle,
+    fontSize: 10,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  diagnosticValue: {
+    ...typography.caption,
+    color: colors.gold,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginTop: 2,
   },
 });

@@ -20,7 +20,8 @@ import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanne
 import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModal';
 import { SwipeQuotaModal } from '../../src/components/SwipeQuotaModal';
 import { storeBilling } from '../../src/services/billing/storeBilling';
-import { admobService, adBreakManager, SwipeAllowance } from '../../src/services/ads/admobService';
+import { authService } from '../../src/services/auth/authService';
+import { admobService, adBreakManager, SwipeAllowance, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
 
 export default function DiscoveryScreen() {
   const router = useRouter();
@@ -30,6 +31,7 @@ export default function DiscoveryScreen() {
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [emptyStateReason, setEmptyStateReason] = useState<string>('');
+  const [feedError, setFeedError] = useState<string | null>(null);
   const [nearbySummary, setNearbySummary] = useState<string>('');
   const [canRewind, setCanRewind] = useState(false);
   const [lastSwipedCandidate, setLastSwipedCandidate] = useState<DiscoveryCandidate | null>(null);
@@ -44,16 +46,49 @@ export default function DiscoveryScreen() {
   const [allowance, setAllowance] = useState<SwipeAllowance | null>(null);
   const [showQuotaModal, setShowQuotaModal] = useState(false);
 
+  const isLoadingMoreRef = useRef(false);
+  const nextCursorRef = useRef<string | null>(null);
+  const hasMoreRef = useRef<boolean>(true);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+
+  const prefetchNextBatch = useCallback(async () => {
+    if (isLoadingMoreRef.current || !hasMoreRef.current) return;
+    isLoadingMoreRef.current = true;
+    setIsLoadingMore(true);
+    try {
+      const cursor = nextCursorRef.current || undefined;
+      const feedRes = await discoveryService.getFeed(20, cursor);
+      if (feedRes?.candidates && feedRes.candidates.length > 0) {
+        setCandidates((prev) => {
+          const existing = new Set(prev.map((c) => c.user_id));
+          const unique = feedRes.candidates.filter((c) => !existing.has(c.user_id));
+          return [...prev, ...unique];
+        });
+      }
+      nextCursorRef.current = feedRes?.next_cursor || null;
+      hasMoreRef.current = Boolean(feedRes?.next_cursor);
+      if (feedRes?.empty_state_reason && (!feedRes.candidates || feedRes.candidates.length === 0)) {
+        setEmptyStateReason(feedRes.empty_state_reason);
+      }
+    } catch {
+      // Background prefetch error should not interrupt browsing
+    } finally {
+      isLoadingMoreRef.current = false;
+      setIsLoadingMore(false);
+    }
+  }, []);
+
   const loadFeed = useCallback(async () => {
     setIsLoading(true);
+    setFeedError(null);
+    nextCursorRef.current = null;
+    hasMoreRef.current = true;
     try {
-      if (!isAgeVerified) {
-        setIsLoading(false);
-        return;
-      }
       const feedRes = await discoveryService.getFeed(20);
       setCandidates(feedRes.candidates || []);
       setCurrentIndex(0);
+      nextCursorRef.current = feedRes.next_cursor || null;
+      hasMoreRef.current = Boolean(feedRes.next_cursor);
       setEmptyStateReason(feedRes.empty_state_reason || '');
 
       const summaryRes = await discoveryService.getMatchingSummary();
@@ -69,17 +104,56 @@ export default function DiscoveryScreen() {
       const allowRes = await admobService.getSwipeAllowance();
       setAllowance(allowRes);
     } catch (err: any) {
+      const msg = err instanceof Error ? err.message : (err?.message || 'Could not load discovery feed.');
+      setFeedError(msg);
       if (err?.code === 'AGE_VERIFICATION_REQUIRED' || err?.status === 403) {
+        setEmptyStateReason('AGE_VERIFICATION_REQUIRED');
         await refreshProfile();
       }
     } finally {
       setIsLoading(false);
     }
-  }, [isAgeVerified, refreshProfile]);
+  }, [refreshProfile]);
 
   useEffect(() => {
     loadFeed();
   }, [loadFeed]);
+
+  // Auto-replenish: when the user reaches near the end of the current deck, automatically load the next batch
+  useEffect(() => {
+    if (currentIndex > 0 && currentIndex >= candidates.length - 2 && !isLoading && hasMoreRef.current) {
+      prefetchNextBatch();
+    }
+  }, [currentIndex, candidates.length, isLoading, prefetchNextBatch]);
+
+  const handleCheckVerificationStatus = async () => {
+    try {
+      const statusRes = await authService.getAgeAssuranceStatus();
+      if (statusRes?.status === 'VERIFIED') {
+        await refreshProfile();
+        Alert.alert(
+          'Age Verified',
+          'Your 18+ age verification is approved! Likes, mutual matching, and messaging are now fully unlocked.'
+        );
+      } else if (statusRes?.status === 'REJECTED') {
+        Alert.alert(
+          'Verification Rejected',
+          'We were unable to verify your age with the submitted selfie. Please submit a new verification selfie.',
+          [
+            { text: 'Retake Selfie', onPress: () => router.push('/(auth)/verify-age') },
+            { text: 'Dismiss', style: 'cancel' },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Verification Pending',
+          'Your age verification is currently being reviewed by our team. You can continue browsing profiles in the meantime.'
+        );
+      }
+    } catch {
+      Alert.alert('Status Check Failed', 'Could not reach verification service. Please try again.');
+    }
+  };
 
   const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK') => {
     if (isSwipingRef.current) return;
@@ -94,7 +168,13 @@ export default function DiscoveryScreen() {
 
     isSwipingRef.current = true;
     setLastSwipedCandidate(candidate);
-    setCurrentIndex((prev) => prev + 1);
+    const nextIdx = currentIndex + 1;
+    setCurrentIndex(nextIdx);
+
+    // Continuous browsing: prefetch next batch when approaching end of deck
+    if (nextIdx >= candidates.length - 3) {
+      prefetchNextBatch();
+    }
 
     if (direction !== 'PASS' && allowance && !allowance.isUnlimited) {
       setAllowance((prev) =>
@@ -102,20 +182,21 @@ export default function DiscoveryScreen() {
       );
     }
 
-    // Trigger ad break after configured swipe thresholds (Phase 6: 1st after 15 in intro, then every 35 on completion)
-    const isIntro = allowance?.isIntroductory ?? false;
-    const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, isIntro);
-    if (shouldTriggerBreak) {
-      setShowSponsoredBreak(true);
-      admobService.showInterstitialAd().then((completed) => {
-        if (completed) {
-          adBreakManager.onAdCompleted();
-        } else {
+    // Trigger full-screen interstitial ad break after every 15 unique browsed profiles for free users
+    const isFreeUser = !allowance || !allowance.isUnlimited;
+    if (isFreeUser && isGoogleMobileAdsAvailable()) {
+      const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
+      if (shouldTriggerBreak) {
+        admobService.showInterstitialAd().then((completed) => {
+          if (completed) {
+            adBreakManager.onAdCompleted();
+          } else {
+            adBreakManager.onAdFailed();
+          }
+        }).catch(() => {
           adBreakManager.onAdFailed();
-        }
-      }).catch(() => {
-        adBreakManager.onAdFailed();
-      });
+        });
+      }
     }
 
     try {
@@ -181,69 +262,69 @@ export default function DiscoveryScreen() {
         </View>
 
         <View style={styles.headerRight}>
-          {allowance ? (
-            <View style={styles.allowancePill} testID="allowance-badge">
-              <Text style={styles.allowanceText}>
-                {allowance.isIntroductory
-                  ? '✨ 30-Day Free Intro (Unlimited Likes)'
-                  : allowance.isUnlimited
-                  ? '✨ Unlimited'
-                  : `💛 ${allowance.remainingLikes}/${allowance.dailyQuota} Likes`}
-              </Text>
-            </View>
-          ) : null}
+          <TouchableOpacity
+            style={styles.searchButton}
+            onPress={() => router.push('/search')}
+            activeOpacity={0.7}
+            testID="discovery-search-button"
+          >
+            <Text style={styles.searchIcon}>🔍</Text>
+          </TouchableOpacity>
 
-          {nearbySummary ? (
-            <View style={styles.summaryPill}>
-              <Text style={styles.summaryText}>📍 {nearbySummary} nearby</Text>
-            </View>
-          ) : null}
+          <View style={styles.headerBadges}>
+            {allowance ? (
+              <View style={styles.allowancePill} testID="allowance-badge">
+                <Text style={styles.allowanceText}>
+                  {allowance.isIntroductory
+                    ? '✨ 30-Day Free Intro'
+                    : allowance.isUnlimited
+                    ? '✨ Unlimited'
+                    : `💛 ${allowance.remainingLikes}/${allowance.dailyQuota} Likes`}
+                </Text>
+              </View>
+            ) : null}
+
+            {nearbySummary ? (
+              <View style={styles.summaryPill}>
+                <Text style={styles.summaryText}>📍 {nearbySummary} nearby</Text>
+              </View>
+            ) : null}
+          </View>
         </View>
       </View>
 
       {/* Mandatory Age Assurance Gating Notice */}
       {!isAgeVerified && (
-        <AgeVerificationBanner onVerifyPress={() => router.push('/(auth)/verify-age')} />
+        <AgeVerificationBanner
+          onVerifyPress={() => router.push('/(auth)/verify-age')}
+          onCheckStatus={handleCheckVerificationStatus}
+        />
       )}
 
       {/* Main Deck Container */}
       <View style={styles.content}>
-        {isLoading ? (
+        {isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore)) ? (
           <View style={styles.loadingContainer}>
             <ActivityIndicator color={colors.gold} size="large" />
             <Text style={styles.loadingText}>Curating your exclusive deck...</Text>
           </View>
-        ) : !isAgeVerified ? (
-          <View style={styles.lockContainer} testID="age-locked-feed-state">
-            <View style={styles.lockIconCircle}>
-              <Text style={styles.lockIcon}>🛡️</Text>
-            </View>
-            <Text style={styles.lockTitle}>18+ Age Assurance Required</Text>
-            <Text style={styles.lockSubtitle}>MANDATORY COMMUNITY PROTECTION</Text>
-            <Text style={styles.lockDescription}>
-              Dating discovery, matching, and messaging are locked until your adult status is confirmed. Complete a
-              quick verification selfie to unlock the deck and connect with members waiting nearby.
-            </Text>
-            <View style={styles.lockButtonsContainer}>
-              <TouchableOpacity
-                style={styles.lockPrimaryButton}
-                onPress={() => router.push('/(auth)/verify-age')}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.lockPrimaryButtonText}>Complete Age Verification</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.lockSecondaryButton}
-                onPress={async () => {
-                  await refreshProfile();
-                  await loadFeed();
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={styles.lockSecondaryButtonText}>Check Verification Status</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
+        ) : showSponsoredBreak ? (
+          <SponsoredCard
+            onDismiss={() => {
+              setShowSponsoredBreak(false);
+              adBreakManager.onAdCompleted();
+            }}
+          />
+        ) : activeCandidate ? (
+          <DiscoveryCard
+            key={activeCandidate.user_id || activeCandidate.id || `candidate-${currentIndex}`}
+            candidate={activeCandidate}
+            onLike={() => handleSwipe('LIKE')}
+            onPass={() => handleSwipe('PASS')}
+            onSuperSpark={() => handleSwipe('SUPER_SPARK')}
+            onRewind={handleRewind}
+            canRewind={canRewind && currentIndex > 0}
+          />
         ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
           <View style={styles.lockContainer} testID="photo-minimum-feed-state">
             <View style={styles.lockIconCircle}>
@@ -272,26 +353,49 @@ export default function DiscoveryScreen() {
               </TouchableOpacity>
             </View>
           </View>
-        ) : showSponsoredBreak ? (
-          <SponsoredCard
-            onDismiss={() => {
-              setShowSponsoredBreak(false);
-              adBreakManager.onAdCompleted();
-            }}
-          />
-        ) : activeCandidate ? (
-          <DiscoveryCard
-            candidate={activeCandidate}
-            onLike={() => handleSwipe('LIKE')}
-            onPass={() => handleSwipe('PASS')}
-            onSuperSpark={() => handleSwipe('SUPER_SPARK')}
-            onRewind={handleRewind}
-            canRewind={canRewind && currentIndex > 0}
-          />
+        ) : !isAgeVerified ? (
+          emptyStateReason === 'AGE_VERIFICATION_REQUIRED' ? (
+            <View style={styles.lockContainer} testID="age-locked-feed-state">
+              <View style={styles.lockIconCircle}>
+                <Text style={styles.lockIcon}>🛡️</Text>
+              </View>
+              <Text style={styles.lockTitle}>18+ Age Assurance Required</Text>
+              <Text style={styles.lockSubtitle}>MANDATORY COMMUNITY PROTECTION</Text>
+              <Text style={styles.lockDescription}>
+                Dating discovery, matching, and messaging are locked until your adult status is confirmed. Complete a
+                quick verification selfie to unlock the deck and connect with members waiting nearby.
+              </Text>
+              <View style={styles.lockButtonsContainer}>
+                <TouchableOpacity
+                  style={styles.lockPrimaryButton}
+                  onPress={() => router.push('/(auth)/verify-age')}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.lockPrimaryButtonText}>Complete Age Verification</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.lockSecondaryButton}
+                  onPress={handleCheckVerificationStatus}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.lockSecondaryButtonText}>Check Verification Status</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <DealbreakerEmptyState
+              onAdjustFilters={() => router.push('/(tabs)/profile')}
+              onRefresh={loadFeed}
+              reason={emptyStateReason}
+              errorMessage={feedError}
+            />
+          )
         ) : (
           <DealbreakerEmptyState
             onAdjustFilters={() => router.push('/(tabs)/profile')}
             onRefresh={loadFeed}
+            reason={emptyStateReason}
+            errorMessage={feedError}
           />
         )}
       </View>
@@ -363,6 +467,24 @@ const styles = StyleSheet.create({
     borderBottomColor: colors.border,
   },
   headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  searchButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  searchIcon: {
+    fontSize: 16,
+  },
+  headerBadges: {
     flexDirection: 'column',
     alignItems: 'flex-end',
     gap: 4,
@@ -412,6 +534,7 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    paddingVertical: 2,
   },
   loadingContainer: {
     alignItems: 'center',

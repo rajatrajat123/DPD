@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
+	"time"
 
 	"github.com/auradating/platform/backend/internal/config"
 	"github.com/auradating/platform/backend/internal/identity"
@@ -18,8 +20,12 @@ type Service struct {
 	mediaSvc           *media.Service
 	verifier           *SSVVerifier
 	entitlementChecker EntitlementChecker
+	ageChecker         AgeChecker
 	logger             *slog.Logger
 }
+
+// AgeChecker verifies whether an actor has approved age verification.
+type AgeChecker func(ctx context.Context, userID string) (bool, error)
 
 // EntitlementChecker verifies whether a user holds a valid unexpired entitlement.
 type EntitlementChecker func(ctx context.Context, userID, code string) bool
@@ -73,6 +79,10 @@ func (s *Service) SetSSVVerifier(v *SSVVerifier) {
 
 func (s *Service) SetEntitlementChecker(checker EntitlementChecker) {
 	s.entitlementChecker = checker
+}
+
+func (s *Service) SetAgeChecker(checker AgeChecker) {
+	s.ageChecker = checker
 }
 
 func (s *Service) GetSwipeAllowance(ctx context.Context, userID string) (int, bool, error) {
@@ -136,7 +146,19 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 }
 
 func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor string, limit int) (*DiscoveryFeedResponse, error) {
-	// Actor must have at least 3 approved profile gallery photos to access discovery feed
+	// Enforce 18+ adult validation: birthdate must confirm 18+.
+	if s.identRepo != nil {
+		profile, err := s.identRepo.GetProfile(ctx, actorID)
+		if err == nil && profile != nil {
+			if profile.Birthdate.IsZero() {
+				return nil, ErrBirthdateRequired
+			}
+			if time.Now().UTC().Before(profile.Birthdate.AddDate(18, 0, 0)) {
+				return nil, ErrUnderageProhibited
+			}
+		}
+	}
+
 	if s.mediaSvc != nil {
 		actorGallery, err := s.mediaSvc.ListUserGallery(ctx, actorID)
 		if err != nil || len(actorGallery) < 3 {
@@ -149,7 +171,12 @@ func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor s
 		}
 	}
 
-	candidates, nextCursor, emptyReason, err := s.repo.GetCandidates(ctx, actorID, cursor, limit)
+	effectiveLimit := limit
+	if effectiveLimit <= 0 || effectiveLimit > 50 {
+		effectiveLimit = 20
+	}
+
+	candidates, nextCursor, emptyReason, err := s.repo.GetCandidates(ctx, actorID, cursor, effectiveLimit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch candidates: %w", err)
 	}
@@ -179,11 +206,11 @@ func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor s
 				if card == "" && len(g.Derivatives) > 0 {
 					card = g.Derivatives[0].URL
 				}
-				if thumb == "" {
-					thumb = card
-				}
 				if full == "" {
 					full = card
+				}
+				if thumb == "" {
+					thumb = card
 				}
 				cards = append(cards, PhotoCard{
 					AssetID:  g.ID,
@@ -194,10 +221,15 @@ func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor s
 			}
 			c.Photos = cards
 		}
+
+		if c.ApproximateDistanceKm < 1 {
+			c.ApproximateDistanceKm = 1
+		}
+
 		filteredCandidates = append(filteredCandidates, c)
 	}
 
-	if len(filteredCandidates) == 0 && emptyReason == "" {
+	if len(filteredCandidates) == 0 && emptyReason == "" && cursor == "" {
 		emptyReason = "NO_CANDIDATES_AVAILABLE"
 	}
 
@@ -206,6 +238,171 @@ func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor s
 		NextCursor:       nextCursor,
 		Count:            len(filteredCandidates),
 		EmptyStateReason: emptyReason,
+	}, nil
+}
+
+func (s *Service) SearchProfiles(ctx context.Context, actorID string, query string, limit int) (*DiscoverySearchResponse, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+
+	candidates, err := s.repo.SearchProfiles(ctx, actorID, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+
+	filteredCandidates := make([]DiscoveryCandidate, 0, len(candidates))
+	for i := range candidates {
+		c := candidates[i]
+		if s.mediaSvc != nil {
+			gallery, err := s.mediaSvc.ListUserGallery(ctx, c.UserID)
+			if err == nil {
+				cards := make([]PhotoCard, 0, len(gallery))
+				for _, g := range gallery {
+					var thumb, card, full string
+					for _, d := range g.Derivatives {
+						switch d.Variant {
+						case media.VariantThumbWebP:
+							thumb = d.URL
+						case media.VariantCardWebP, media.VariantCardAVIF:
+							card = d.URL
+						case media.VariantFullWebP, media.VariantFullAVIF:
+							full = d.URL
+						}
+					}
+					if card == "" && len(g.Derivatives) > 0 {
+						card = g.Derivatives[0].URL
+					}
+					if full == "" {
+						full = card
+					}
+					if thumb == "" {
+						thumb = card
+					}
+					cards = append(cards, PhotoCard{
+						AssetID:  g.ID,
+						ThumbURL: thumb,
+						CardURL:  card,
+						FullURL:  full,
+					})
+				}
+				c.Photos = cards
+			}
+		}
+
+		if c.ApproximateDistanceKm < 1 {
+			c.ApproximateDistanceKm = 1
+		}
+
+		filteredCandidates = append(filteredCandidates, c)
+	}
+
+	return &DiscoverySearchResponse{
+		Query:      query,
+		Count:      len(filteredCandidates),
+		Candidates: filteredCandidates,
+	}, nil
+}
+
+func (s *Service) GetPublicProfile(ctx context.Context, actorID, targetID string) (*DiscoveryCandidate, error) {
+	if targetID == "" {
+		return nil, ErrCandidateInvalid
+	}
+
+	// If target is another user, check bi-directional block
+	if actorID != targetID {
+		isBlocked, err := s.repo.IsBlocked(ctx, actorID, targetID)
+		if err == nil && isBlocked {
+			return nil, ErrCandidateBlocked
+		}
+	}
+
+	prof, err := s.identRepo.GetProfile(ctx, targetID)
+	if err != nil || prof == nil {
+		return nil, ErrCandidateInvalid
+	}
+	if prof.IncognitoEnabled && actorID != targetID {
+		return nil, ErrCandidateInvalid
+	}
+
+	age := calculateAge(prof.Birthdate, time.Now().UTC())
+	if age < 18 {
+		return nil, ErrUnderageProhibited
+	}
+
+	distKm := 1
+	actorLoc, _ := s.identRepo.GetLocation(ctx, actorID)
+	targetLoc, _ := s.identRepo.GetLocation(ctx, targetID)
+	if actorLoc != nil && targetLoc != nil && (actorLoc.Latitude != 0 || actorLoc.Longitude != 0) && (targetLoc.Latitude != 0 || targetLoc.Longitude != 0) {
+		calculated := int(math.Ceil(haversineDistance(actorLoc.Latitude, actorLoc.Longitude, targetLoc.Latitude, targetLoc.Longitude)))
+		if calculated > 0 {
+			distKm = calculated
+		}
+	}
+
+	pronouns := prof.Pronouns
+	if prof.VisibilitySettings.Pronouns == identity.VisibilityHidden {
+		pronouns = nil
+	}
+	genders := prof.GenderIdentities
+	if prof.VisibilitySettings.GenderIdentity == identity.VisibilityHidden {
+		genders = nil
+	}
+	orientations := prof.SexualOrientations
+	if prof.VisibilitySettings.SexualOrientation == identity.VisibilityHidden {
+		orientations = nil
+	}
+
+	photos := []PhotoCard{}
+	if s.mediaSvc != nil {
+		gallery, err := s.mediaSvc.ListUserGallery(ctx, targetID)
+		if err == nil {
+			for _, g := range gallery {
+				var thumb, card, full string
+				for _, d := range g.Derivatives {
+					switch d.Variant {
+					case media.VariantThumbWebP:
+						thumb = d.URL
+					case media.VariantCardWebP, media.VariantCardAVIF:
+						card = d.URL
+					case media.VariantFullWebP, media.VariantFullAVIF:
+						full = d.URL
+					}
+				}
+				if card == "" && len(g.Derivatives) > 0 {
+					card = g.Derivatives[0].URL
+				}
+				if full == "" {
+					full = card
+				}
+				if thumb == "" {
+					thumb = card
+				}
+				photos = append(photos, PhotoCard{
+					AssetID:  g.ID,
+					ThumbURL: thumb,
+					CardURL:  card,
+					FullURL:  full,
+				})
+			}
+		}
+	}
+
+	return &DiscoveryCandidate{
+		UserID:                targetID,
+		DisplayName:           prof.DisplayName,
+		Age:                   age,
+		Bio:                   prof.Bio,
+		Pronouns:              pronouns,
+		GenderIdentities:      genders,
+		SexualOrientations:    orientations,
+		RelationshipIntents:   prof.RelationshipIntents,
+		RelationshipStructure: string(prof.RelationshipStructure),
+		SmokingHabit:          string(prof.SmokingHabit),
+		DrinkingHabit:         string(prof.DrinkingHabit),
+		ApproximateDistanceKm: distKm,
+		IsPhotoVerified:       prof.IsPhotoVerified,
+		Photos:                photos,
 	}, nil
 }
 
@@ -222,21 +419,34 @@ func (s *Service) Swipe(ctx context.Context, actorID string, req SwipeRequest, c
 		return nil, ErrSelfSwipe
 	}
 
-	// Actor must have at least 3 approved profile gallery photos to swipe
-	if s.mediaSvc != nil {
-		gallery, err := s.mediaSvc.ListUserGallery(ctx, actorID)
-		if err != nil || len(gallery) < 3 {
-			return nil, ErrSwipePhotoMinimumRequired
-		}
-	}
-
 	direction, err := ValidateSwipeDirection(req.Direction)
 	if err != nil {
 		return nil, err
 	}
 
-	// Check like quota & entitlements (PASS swipes are always free; LIKE / SUPER_SPARK consume allowance)
+	// Enforce 18+ adult age validation: birthdate must confirm 18+.
+	// Third-party age assurance review is not required to swipe/like/match/chat for confirmed adults.
+	if s.identRepo != nil {
+		profile, err := s.identRepo.GetProfile(ctx, actorID)
+		if err == nil && profile != nil {
+			if profile.Birthdate.IsZero() {
+				return nil, ErrBirthdateRequired
+			}
+			if time.Now().UTC().Before(profile.Birthdate.AddDate(18, 0, 0)) {
+				return nil, ErrUnderageProhibited
+			}
+		}
+	}
+
 	if direction != SwipePass {
+		// Actor must have at least 3 approved profile gallery photos to like
+		if s.mediaSvc != nil {
+			gallery, err := s.mediaSvc.ListUserGallery(ctx, actorID)
+			if err != nil || len(gallery) < 3 {
+				return nil, ErrSwipePhotoMinimumRequired
+			}
+		}
+
 		allowance, err := s.GetSwipeAllowanceDetail(ctx, actorID)
 		if err == nil && !allowance.IsUnlimited {
 			if allowance.RemainingRegularLikes <= 0 {

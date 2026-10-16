@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/auradating/platform/backend/internal/affiliate"
 	"github.com/auradating/platform/backend/internal/analytics"
@@ -161,15 +162,17 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		cfg.JWTSigningSecret,
 		identity.WithLoginTracker(safetySvc),
 		identity.WithNotificationSink(notificationSink),
+		identity.WithLogger(logger),
 	)
 	identHandler := identity.NewHandler(identSvc, cfg.MaxRequestBodyBytes)
+	identHandler.SetExpoGoURLBase(cfg.ExpoGoURLBase)
 
 	authMw := identity.RequireAuth(cfg.JWTSigningSecret)
 	activeMw := safety.RequireActiveAccount(identityRepo)
-	ageMw := safety.RequireAgeVerified(safetySvc)
+	adultMw := safety.RequireAdult(identityRepo)
 
 	communityMw := func(h http.Handler) http.Handler {
-		return authMw(activeMw(ageMw(h)))
+		return authMw(activeMw(adultMw(h)))
 	}
 	memberMw := func(h http.Handler) http.Handler {
 		return authMw(activeMw(h))
@@ -182,6 +185,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.HandleFunc("/api/v1/auth/logout", identHandler.Logout)
 	mux.HandleFunc("/api/v1/auth/password-reset/request", identHandler.RequestPasswordReset)
 	mux.HandleFunc("/api/v1/auth/password-reset/confirm", identHandler.ConfirmPasswordReset)
+	mux.HandleFunc("/auth/reset-password", identHandler.ResetPasswordWebPage)
+	mux.HandleFunc("/api/v1/auth/reset-password", identHandler.ResetPasswordWebPage)
 
 	// Authenticated Verification & Step-Up Endpoints
 	mux.Handle("/api/v1/auth/verify/send", authMw(http.HandlerFunc(identHandler.SendVerification)))
@@ -299,10 +304,12 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	discoSvc := discovery.NewService(discoRepo, identityRepo, mediaSvc, logger,
 		discovery.WithEnvironment(string(cfg.Environment)),
 	)
+	discoSvc.SetAgeChecker(safetySvc.IsAgeVerified)
 	discoHandler := discovery.NewHandler(discoSvc)
 
 	// Authenticated Discovery Endpoints
 	mux.Handle("/api/v1/discovery/feed", communityMw(http.HandlerFunc(discoHandler.Feed)))
+	mux.Handle("/api/v1/discovery/search", communityMw(http.HandlerFunc(discoHandler.Search)))
 	mux.Handle("/api/v1/discovery/matching-summary", communityMw(http.HandlerFunc(discoHandler.MatchingSummary)))
 	mux.Handle("/api/v1/swipes", communityMw(http.HandlerFunc(discoHandler.Swipe)))
 	mux.Handle("/api/v1/swipes/rewind", communityMw(http.HandlerFunc(discoHandler.Rewind)))
@@ -311,6 +318,26 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/matches/", communityMw(http.HandlerFunc(discoHandler.MatchDetail)))
 	mux.Handle("/api/v1/blocks", communityMw(http.HandlerFunc(discoHandler.Block)))
 	mux.HandleFunc("/api/v1/ads/admob/ssv", discoHandler.AdMobSSV)
+
+	// Authenticated Public Profile Lookup
+	mux.Handle("/api/v1/profiles/", communityMw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			reqID := middleware.GetRequestID(r.Context())
+			apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+			return
+		}
+		targetID := strings.TrimPrefix(r.URL.Path, "/api/v1/profiles/")
+		if targetID == "me" {
+			identHandler.GetMyProfile(w, r)
+			return
+		}
+		if targetID == "" || strings.Contains(targetID, "/") {
+			reqID := middleware.GetRequestID(r.Context())
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Invalid profile user ID"))
+			return
+		}
+		discoHandler.GetPublicProfile(w, r, targetID)
+	})))
 
 	// Notifications & Push Delivery Infrastructure
 	var notifRepo notification.Repository
@@ -346,9 +373,12 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		if u.Status != identity.StatusActive {
 			return fmt.Errorf("account status is %s", u.Status)
 		}
-		verified, err := safetySvc.IsAgeVerified(ctx, userID)
-		if err != nil || !verified {
-			return errors.New("mandatory 18+ age verification required")
+		p, err := identityRepo.GetProfile(ctx, userID)
+		if err != nil || p == nil || p.Birthdate.IsZero() {
+			return errors.New("server-validated birthdate is required")
+		}
+		if time.Now().UTC().Before(p.Birthdate.AddDate(18, 0, 0)) {
+			return errors.New("must be at least 18 years old to access chat")
 		}
 		return nil
 	}))

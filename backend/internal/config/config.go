@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -64,6 +65,7 @@ type Config struct {
 	ResendAPIKey         string
 	ResendFromEmail      string
 	PasswordResetURLBase string
+	ExpoGoURLBase        string
 
 	CORSAllowedOrigins []string
 }
@@ -75,6 +77,14 @@ func LoadFromEnv() (*Config, error) {
 
 func loadDotEnv() {
 	paths := []string{".env", "../.env", "../../.env", "backend/.env"}
+	initialEnv := make(map[string]bool)
+	for _, env := range os.Environ() {
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) > 0 {
+			initialEnv[parts[0]] = true
+		}
+	}
+
 	for _, p := range paths {
 		f, err := os.Open(p)
 		if err != nil {
@@ -97,7 +107,7 @@ func loadDotEnv() {
 			} else if strings.HasPrefix(val, "'") && strings.HasSuffix(val, "'") && len(val) >= 2 {
 				val = val[1 : len(val)-1]
 			}
-			if os.Getenv(key) == "" {
+			if !initialEnv[key] {
 				_ = os.Setenv(key, val)
 			}
 		}
@@ -107,7 +117,7 @@ func loadDotEnv() {
 }
 
 func Load(getenv func(string) string) (*Config, error) {
-	corsRaw := getString(getenv, "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081")
+	corsRaw := getString(getenv, "CORS_ALLOWED_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000,http://localhost:8081,http://192.168.29.15:8080,http://192.168.29.15:8081")
 	var corsOrigins []string
 	for _, orig := range strings.Split(corsRaw, ",") {
 		trimmed := strings.TrimSpace(orig)
@@ -119,9 +129,13 @@ func Load(getenv func(string) string) (*Config, error) {
 	appEnv := Environment(getString(getenv, "APP_ENV", string(EnvLocal)))
 	defaultBundleID := "com.aura.dating"
 	defaultPackageName := "com.aura.dating"
+	defaultResetURL := "http://192.168.29.15:8080/auth/reset-password"
+	defaultExpoURL := "exp://192.168.29.15:8081/--/reset-password"
 	if appEnv == EnvStaging || appEnv == EnvProduction {
 		defaultBundleID = ""
 		defaultPackageName = ""
+		defaultResetURL = "https://auradating.com/auth/reset-password"
+		defaultExpoURL = "aura://reset-password"
 	}
 
 	cfg := &Config{
@@ -148,7 +162,7 @@ func Load(getenv func(string) string) (*Config, error) {
 
 		MediaMaxImageBytes:      getInt64(getenv, "MEDIA_MAX_IMAGE_BYTES", 15*1024*1024),  // 15 MiB
 		MediaMaxVideoBytes:      getInt64(getenv, "MEDIA_MAX_VIDEO_BYTES", 100*1024*1024), // 100 MiB
-		MediaStorageDir:         getString(getenv, "MEDIA_STORAGE_DIR", "data/media"),
+		MediaStorageDir:         resolveMediaStorageDir(getString(getenv, "MEDIA_STORAGE_DIR", "data/media")),
 		MediaRetentionInterval:  getDuration(getenv, "MEDIA_RETENTION_INTERVAL", 1*time.Hour),
 		MediaRetentionBatchSize: getInt(getenv, "MEDIA_RETENTION_BATCH_SIZE", 100),
 
@@ -168,7 +182,8 @@ func Load(getenv func(string) string) (*Config, error) {
 
 		ResendAPIKey:         getString(getenv, "RESEND_API_KEY", ""),
 		ResendFromEmail:      getString(getenv, "RESEND_FROM_EMAIL", "Aura <security@aura.dating>"),
-		PasswordResetURLBase: getString(getenv, "PASSWORD_RESET_URL_BASE", "http://localhost:3000/auth/reset-password"),
+		PasswordResetURLBase: getString(getenv, "PASSWORD_RESET_URL_BASE", defaultResetURL),
+		ExpoGoURLBase:        getString(getenv, "EXPO_GO_URL_BASE", defaultExpoURL),
 
 		CORSAllowedOrigins: corsOrigins,
 	}
@@ -275,4 +290,39 @@ func getDuration(getenv func(string) string, key string, fallback time.Duration)
 		}
 	}
 	return fallback
+}
+
+func resolveMediaStorageDir(rawPath string) string {
+	rawPath = strings.TrimSpace(rawPath)
+	if rawPath == "" {
+		rawPath = "data/media"
+	}
+	if filepath.IsAbs(rawPath) {
+		return filepath.Clean(rawPath)
+	}
+
+	candidates := []string{
+		rawPath,
+		filepath.Join("backend", rawPath),
+		filepath.Join("..", rawPath),
+		filepath.Join("..", "..", rawPath),
+		filepath.Join("..", "backend", rawPath),
+	}
+
+	for _, cand := range candidates {
+		info, err := os.Stat(cand)
+		if err == nil && info.IsDir() {
+			abs, err := filepath.Abs(cand)
+			if err == nil {
+				return abs
+			}
+			return filepath.Clean(cand)
+		}
+	}
+
+	abs, err := filepath.Abs(rawPath)
+	if err == nil {
+		return abs
+	}
+	return filepath.Clean(rawPath)
 }

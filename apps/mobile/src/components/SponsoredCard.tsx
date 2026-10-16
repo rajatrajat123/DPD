@@ -8,7 +8,7 @@ import {
   Platform,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius } from '../theme';
-import { AD_UNIT_IDS, admobService } from '../services/ads/admobService';
+import { AD_UNIT_IDS, admobService, isGoogleMobileAdsAvailable } from '../services/ads/admobService';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = SCREEN_WIDTH - spacing.lg * 2;
@@ -42,14 +42,16 @@ export const SponsoredCard: React.FC<SponsoredCardProps> = ({
   }> | null = null;
   let BannerAdSize: Record<string, string> | null = null;
 
-  try {
-    const mobileAds = require('react-native-google-mobile-ads');
-    if (mobileAds && mobileAds.BannerAd && mobileAds.BannerAdSize) {
-      NativeBanner = mobileAds.BannerAd;
-      BannerAdSize = mobileAds.BannerAdSize;
+  if (isGoogleMobileAdsAvailable()) {
+    try {
+      const mobileAds = require('react-native-google-mobile-ads');
+      if (mobileAds && mobileAds.BannerAd && mobileAds.BannerAdSize) {
+        NativeBanner = mobileAds.BannerAd;
+        BannerAdSize = mobileAds.BannerAdSize;
+      }
+    } catch {
+      // In headless test or Expo Go environments, fallback UI renders safely
     }
-  } catch {
-    // In headless test or Expo Go environments, fallback UI renders safely
   }
 
   const adUnitId = AD_UNIT_IDS.BANNER || 'ca-app-pub-3940256099942544/6300978111';

@@ -4,70 +4,105 @@ import { colors, typography, spacing, borderRadius } from '../theme';
 
 interface AgeVerificationBannerProps {
   onVerifyPress: () => void;
+  onCheckStatus?: () => void;
 }
 
-export const AgeVerificationBanner: React.FC<AgeVerificationBannerProps> = ({ onVerifyPress }) => {
+export const AgeVerificationBanner: React.FC<AgeVerificationBannerProps> = ({ onVerifyPress, onCheckStatus }) => {
   return (
-    <View style={styles.banner}>
-      <View style={styles.content}>
-        <Text style={styles.icon}>⚠️</Text>
-        <View style={styles.textContainer}>
-          <Text style={styles.title}>18+ Age Assurance Required</Text>
-          <Text style={styles.description}>
-            Dating discovery, matching, and messaging are locked until your age is verified.
-          </Text>
+    <View style={styles.banner} testID="compact-age-verification-banner">
+      <View style={styles.leftGroup}>
+        <Text style={styles.icon}>⏳</Text>
+        <View style={styles.textGroup}>
+          <Text style={styles.title} numberOfLines={1}>Verification Pending</Text>
+          <Text style={styles.subtitle} numberOfLines={1}>Get verified for your badge</Text>
         </View>
       </View>
-      <TouchableOpacity style={styles.button} activeOpacity={0.8} onPress={onVerifyPress}>
-        <Text style={styles.buttonText}>Verify Now</Text>
-      </TouchableOpacity>
+      <View style={styles.actionsGroup}>
+        <TouchableOpacity style={styles.primaryButton} activeOpacity={0.8} onPress={onVerifyPress}>
+          <Text style={styles.primaryButtonText}>Get Verified</Text>
+        </TouchableOpacity>
+        {onCheckStatus && (
+          <TouchableOpacity style={styles.secondaryButton} activeOpacity={0.8} onPress={onCheckStatus}>
+            <Text style={styles.secondaryButtonText}>Check Status</Text>
+          </TouchableOpacity>
+        )}
+      </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   banner: {
-    backgroundColor: colors.amberMuted,
+    backgroundColor: '#16130E',
     borderWidth: 1,
-    borderColor: colors.amber,
-    borderRadius: borderRadius.md,
-    padding: spacing.md,
-    marginHorizontal: spacing.lg,
-    marginVertical: spacing.sm,
-  },
-  content: {
+    borderColor: 'rgba(212, 175, 55, 0.35)',
+    borderRadius: borderRadius.sm,
+    paddingVertical: 6,
+    paddingHorizontal: spacing.sm + 2,
+    marginHorizontal: spacing.md,
+    marginTop: 6,
+    marginBottom: 4,
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.sm,
+    justifyContent: 'space-between',
+  },
+  leftGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: spacing.xs,
   },
   icon: {
-    fontSize: 24,
-    marginRight: spacing.md,
+    fontSize: 15,
+    marginRight: 6,
   },
-  textContainer: {
-    flex: 1,
+  textGroup: {
+    flexShrink: 1,
   },
   title: {
-    ...typography.h3,
+    ...typography.caption,
     color: colors.amber,
-    fontSize: 15,
-    marginBottom: 2,
+    fontSize: 12,
+    fontWeight: '700',
+    lineHeight: 15,
   },
-  description: {
-    ...typography.bodySmall,
+  subtitle: {
+    ...typography.caption,
     color: colors.textMuted,
-    lineHeight: 16,
+    fontSize: 10,
+    lineHeight: 13,
   },
-  button: {
+  actionsGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  primaryButton: {
     backgroundColor: colors.amber,
     borderRadius: borderRadius.xs,
-    paddingVertical: spacing.xs,
-    paddingHorizontal: spacing.md,
-    alignSelf: 'flex-start',
+    paddingVertical: 5,
+    paddingHorizontal: 8,
   },
-  buttonText: {
+  primaryButtonText: {
     ...typography.caption,
     color: colors.textInverse,
     fontWeight: '700',
+    fontSize: 11,
+  },
+  secondaryButton: {
+    backgroundColor: 'rgba(245, 158, 11, 0.08)',
+    borderWidth: 1,
+    borderColor: 'rgba(245, 158, 11, 0.4)',
+    borderRadius: borderRadius.xs,
+    paddingVertical: 4,
+    paddingHorizontal: 7,
+  },
+  secondaryButtonText: {
+    ...typography.caption,
+    color: colors.amber,
+    fontWeight: '600',
+    fontSize: 11,
   },
 });
+
+

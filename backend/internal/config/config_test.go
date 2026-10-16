@@ -128,3 +128,13 @@ func TestLoad_EnvExampleCompatibility(t *testing.T) {
 		t.Errorf("expected default DatabaseURL to target 'aura_dev' matching docker-compose.yml, got %q", cfg.DatabaseURL)
 	}
 }
+
+func TestResolveMediaStorageDir(t *testing.T) {
+	resolved := resolveMediaStorageDir("data/media")
+	if resolved == "" {
+		t.Fatal("expected non-empty resolved media storage dir")
+	}
+	if !strings.HasSuffix(strings.ReplaceAll(resolved, "\\", "/"), "data/media") {
+		t.Errorf("expected resolved path to end with data/media, got: %s", resolved)
+	}
+}

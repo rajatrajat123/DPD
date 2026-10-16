@@ -434,11 +434,13 @@ export class AdBreakManager {
 
   /**
    * Checks whether the current swipe count meets the threshold for a required ad.
-   * - 1st ad in introductory month: 15 profiles
-   * - Subsequent ads: 35 profiles
+   * Free users view an interstitial ad at natural transitions after every 15 unique browsed profiles.
    */
   shouldShowRequiredAd(isIntroductory: boolean = false): boolean {
-    const threshold = isIntroductory && !this.firstAdCompleted ? 15 : 35;
+    if (!isGoogleMobileAdsAvailable()) {
+      return false;
+    }
+    const threshold = 15;
     return this.swipeCount >= threshold;
   }
 

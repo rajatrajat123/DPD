@@ -681,3 +681,317 @@ func TestDiscovery_PhotoMinimumRequirement(t *testing.T) {
 	}
 }
 
+func TestDiscovery_UnverifiedAge_LimitedFeedAndSwipeGating(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+
+	storage, _ := media.NewFileStorageEngine(t.TempDir(), "test-secret")
+	proc := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024, media.WithEnvironment("development"))
+	mediaRepo := media.NewMemoryRepository()
+	mediaSvc := media.NewService(mediaRepo, storage, proc, logger)
+	t.Cleanup(func() {
+		mediaSvc.Stop()
+	})
+
+	discoSvc := discovery.NewService(discoRepo, identRepo, mediaSvc, logger)
+
+	actorID := "actor-unverified-age"
+	candID := "cand-eligible-public"
+	dob := time.Now().AddDate(-24, 0, 0)
+	createTestUser(t, identRepo, actorID, "actor-unv@test.com", "Actor Unv", dob, []string{"non-binary"}, []string{"queer"}, 52.52, 13.40, 50)
+	createTestUser(t, identRepo, candID, "cand-pub@test.com", "Cand Pub", dob, []string{"non-binary"}, []string{"queer"}, 52.52, 13.40, 50)
+
+	// Candidate has 3 approved photos
+	for i := 1; i <= 3; i++ {
+		img := media.GenerateTestJPEG(200+i*20, 200+i*20)
+		_, err := mediaSvc.UploadDirect(ctx, candID, string(media.PurposeProfileGallery), string(media.MediaTypeImage), fmt.Sprintf("cp%d.jpg", i), bytes.NewReader(img), int64(len(img)), fmt.Sprintf("k-unv-%d", i))
+		if err != nil {
+			t.Fatalf("failed to upload candidate photo: %v", err)
+		}
+	}
+
+	// Actor also has 3 approved photos
+	for i := 1; i <= 3; i++ {
+		img := media.GenerateTestJPEG(200+i*20, 200+i*20)
+		_, err := mediaSvc.UploadDirect(ctx, actorID, string(media.PurposeProfileGallery), string(media.MediaTypeImage), fmt.Sprintf("ap%d.jpg", i), bytes.NewReader(img), int64(len(img)), fmt.Sprintf("k-act-%d", i))
+		if err != nil {
+			t.Fatalf("failed to upload actor photo: %v", err)
+		}
+	}
+
+	// 1. Wire ageChecker that reports pending (unverified)
+	verifiedMap := map[string]bool{actorID: false}
+	discoSvc.SetAgeChecker(func(ctx context.Context, userID string) (bool, error) {
+		return verifiedMap[userID], nil
+	})
+
+	// 2. Adult actor with pending verification can browse discovery feed and see candidate
+	feed, err := discoSvc.GetDiscoveryFeed(ctx, actorID, "", 10)
+	if err != nil {
+		t.Fatalf("GetDiscoveryFeed failed for unverified adult user: %v", err)
+	}
+	if len(feed.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate in feed, got %d", len(feed.Candidates))
+	}
+	if feed.Candidates[0].UserID != candID {
+		t.Fatalf("expected candidate %s, got %s", candID, feed.Candidates[0].UserID)
+	}
+
+	// 3. Swiping PASS is allowed for pending adult users
+	passRes, err := discoSvc.Swipe(ctx, actorID, discovery.SwipeRequest{TargetUserID: candID, Direction: "PASS"}, "swipe-pass-ok")
+	if err != nil {
+		t.Fatalf("expected PASS swipe to succeed for unverified adult user, got: %v", err)
+	}
+	if passRes == nil {
+		t.Fatalf("expected non-nil swipe response on PASS")
+	}
+
+	// 4. Swiping LIKE and SUPER_SPARK is allowed for pending adult users
+	likeRes, err := discoSvc.Swipe(ctx, actorID, discovery.SwipeRequest{TargetUserID: candID, Direction: "LIKE"}, "swipe-like-ok")
+	if err != nil {
+		t.Fatalf("expected LIKE swipe to succeed for unverified adult user, got: %v", err)
+	}
+	if likeRes == nil {
+		t.Fatalf("expected non-nil swipe response on LIKE")
+	}
+
+	// 5. Underage user is rejected with ErrUnderageProhibited
+	underageID := "actor-underage"
+	underageDOB := time.Now().AddDate(-16, 0, 0) // 16 years old
+	createTestUser(t, identRepo, underageID, "underage@test.com", "Underage", underageDOB, []string{"non-binary"}, []string{"queer"}, 52.52, 13.40, 50)
+	_, err = discoSvc.Swipe(ctx, underageID, discovery.SwipeRequest{TargetUserID: candID, Direction: "PASS"}, "underage-swipe")
+	if !errors.Is(err, discovery.ErrUnderageProhibited) {
+		t.Fatalf("expected ErrUnderageProhibited for underage user, got: %v", err)
+	}
+	_, err = discoSvc.GetDiscoveryFeed(ctx, underageID, "", 10)
+	if !errors.Is(err, discovery.ErrUnderageProhibited) {
+		t.Fatalf("expected ErrUnderageProhibited on feed for underage user, got: %v", err)
+	}
+}
+
+func TestDiscovery_SearchProfiles(t *testing.T) {
+	ctx := context.Background()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	discoSvc := discovery.NewService(discoRepo, identRepo, nil, logger)
+
+	actorID := "search-actor"
+	if err := identRepo.CreateUser(ctx, &identity.User{ID: actorID, Email: actorID + "@aura.local", Status: identity.StatusActive, Role: identity.RoleMember, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("failed to create actor: %v", err)
+	}
+	if err := identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:      actorID,
+		DisplayName: "Actor",
+		Birthdate:   time.Now().AddDate(-25, 0, 0),
+		CreatedAt:   time.Now().UTC(),
+		UpdatedAt:   time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to upsert actor profile: %v", err)
+	}
+
+	user1 := "search-user-1"
+	if err := identRepo.CreateUser(ctx, &identity.User{ID: user1, Email: user1 + "@aura.local", Status: identity.StatusActive, Role: identity.RoleMember, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("failed to create user1: %v", err)
+	}
+	if err := identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:             user1,
+		DisplayName:        "River Martinez",
+		Bio:                "Coffee enthusiast and queer poet in Brooklyn",
+		GenderIdentities:   []string{"non_binary", "genderqueer"},
+		SexualOrientations: []string{"pansexual"},
+		Birthdate:          time.Now().AddDate(-24, 0, 0),
+		IsPhotoVerified:    true,
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to upsert user1 profile: %v", err)
+	}
+
+	user2 := "search-user-2"
+	if err := identRepo.CreateUser(ctx, &identity.User{ID: user2, Email: user2 + "@aura.local", Status: identity.StatusActive, Role: identity.RoleMember, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("failed to create user2: %v", err)
+	}
+	if err := identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:             user2,
+		DisplayName:        "Jordan Lee",
+		Bio:                "Designer and climber",
+		GenderIdentities:   []string{"transgender_woman"},
+		SexualOrientations: []string{"lesbian"},
+		Birthdate:          time.Now().AddDate(-28, 0, 0),
+		CreatedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to upsert user2 profile: %v", err)
+	}
+
+	// Incognito user should not appear
+	incognitoUser := "search-incognito"
+	if err := identRepo.CreateUser(ctx, &identity.User{ID: incognitoUser, Email: incognitoUser + "@aura.local", Status: identity.StatusActive, Role: identity.RoleMember, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("failed to create incognito user: %v", err)
+	}
+	if err := identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:           incognitoUser,
+		DisplayName:      "River Hidden",
+		IncognitoEnabled: true,
+		Birthdate:        time.Now().AddDate(-30, 0, 0),
+		CreatedAt:        time.Now().UTC(),
+		UpdatedAt:        time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("failed to upsert incognito profile: %v", err)
+	}
+
+	// 1. Search by name match
+	res, err := discoSvc.SearchProfiles(ctx, actorID, "River", 20)
+	if err != nil {
+		t.Fatalf("SearchProfiles failed: %v", err)
+	}
+	if res.Count != 1 {
+		t.Fatalf("expected 1 result for 'River', got %d", res.Count)
+	}
+	if res.Candidates[0].UserID != user1 {
+		t.Fatalf("expected user %s, got %s", user1, res.Candidates[0].UserID)
+	}
+
+	// 2. Search by bio keyword
+	res, err = discoSvc.SearchProfiles(ctx, actorID, "climber", 20)
+	if err != nil {
+		t.Fatalf("SearchProfiles failed: %v", err)
+	}
+	if res.Count != 1 || res.Candidates[0].UserID != user2 {
+		t.Fatalf("expected user2 for 'climber', got: %+v", res)
+	}
+
+	// 3. Search by tag
+	res, err = discoSvc.SearchProfiles(ctx, actorID, "lesbian", 20)
+	if err != nil {
+		t.Fatalf("SearchProfiles failed: %v", err)
+	}
+	if res.Count != 1 || res.Candidates[0].UserID != user2 {
+		t.Fatalf("expected user2 for 'lesbian', got: %+v", res)
+	}
+
+	// 4. Blocked user should be excluded
+	_ = discoRepo.BlockUser(ctx, actorID, user1, "test block")
+	res, err = discoSvc.SearchProfiles(ctx, actorID, "River", 20)
+	if err != nil {
+		t.Fatalf("SearchProfiles failed: %v", err)
+	}
+	if res.Count != 0 {
+		t.Fatalf("expected 0 results after block, got %d", res.Count)
+	}
+}
+
+func TestDiscoveryFeed_CursorPagination3Batches(t *testing.T) {
+	discoSvc, _, identRepo := setupTestDiscovery(t)
+	ctx := context.Background()
+
+	actorID := "actor_pagination_user"
+	now := time.Now().UTC()
+	createTestUser(t, identRepo, actorID, "actor_pag@example.com", "Actor Pag", now.AddDate(-25, 0, 0), []string{"non_binary"}, []string{"queer"}, 37.7749, -122.4194, 100)
+
+	// Create 5 test candidate users
+	candidateIDs := []string{"pag_u1", "pag_u2", "pag_u3", "pag_u4", "pag_u5"}
+	for i, cid := range candidateIDs {
+		createTestUser(t, identRepo, cid, fmt.Sprintf("%s@example.com", cid), fmt.Sprintf("Candidate %d", i+1), now.AddDate(-24, 0, 0), []string{"non_binary"}, []string{"queer"}, 37.7750, -122.4195, 100)
+	}
+
+	// Batch 1: limit 2
+	b1, err := discoSvc.GetDiscoveryFeed(ctx, actorID, "", 2)
+	if err != nil {
+		t.Fatalf("Batch 1 failed: %v", err)
+	}
+	if len(b1.Candidates) != 2 {
+		t.Fatalf("expected 2 candidates in batch 1, got %d", len(b1.Candidates))
+	}
+	if b1.NextCursor == "" {
+		t.Fatalf("expected non-empty next_cursor in batch 1")
+	}
+
+	// Batch 2: limit 2 with cursor from batch 1
+	b2, err := discoSvc.GetDiscoveryFeed(ctx, actorID, b1.NextCursor, 2)
+	if err != nil {
+		t.Fatalf("Batch 2 failed: %v", err)
+	}
+	if len(b2.Candidates) != 2 {
+		t.Fatalf("expected 2 candidates in batch 2, got %d", len(b2.Candidates))
+	}
+	if b2.NextCursor == "" {
+		t.Fatalf("expected non-empty next_cursor in batch 2")
+	}
+
+	// Batch 3: limit 2 with cursor from batch 2
+	b3, err := discoSvc.GetDiscoveryFeed(ctx, actorID, b2.NextCursor, 2)
+	if err != nil {
+		t.Fatalf("Batch 3 failed: %v", err)
+	}
+	if len(b3.Candidates) != 1 {
+		t.Fatalf("expected 1 candidate in batch 3, got %d", len(b3.Candidates))
+	}
+	if b3.NextCursor != "" {
+		t.Fatalf("expected empty next_cursor after batch 3, got %s", b3.NextCursor)
+	}
+
+	// Verify all 5 candidates are distinct
+	seen := make(map[string]bool)
+	all := append(append(b1.Candidates, b2.Candidates...), b3.Candidates...)
+	if len(all) != 5 {
+		t.Fatalf("expected 5 total candidates, got %d", len(all))
+	}
+	for _, c := range all {
+		if seen[c.UserID] {
+			t.Fatalf("duplicate candidate across batches: %s", c.UserID)
+		}
+		seen[c.UserID] = true
+	}
+}
+
+func TestGetPublicProfile_SanitizedAndSafe(t *testing.T) {
+	discoSvc, discoRepo, identRepo := setupTestDiscovery(t)
+	ctx := context.Background()
+
+	actorID := "actor_profile_tester"
+	targetID := "target_profile_user"
+	now := time.Now().UTC()
+
+	createTestUser(t, identRepo, actorID, "actor_prof@example.com", "Actor", now.AddDate(-26, 0, 0), []string{"non_binary"}, []string{"queer"}, 37.7749, -122.4194, 100)
+	createTestUser(t, identRepo, targetID, "target_prof@example.com", "Target Member", now.AddDate(-24, 0, 0), []string{"transgender_woman"}, []string{"lesbian"}, 37.7755, -122.4180, 100)
+
+	// 1. Successful fetch
+	cand, err := discoSvc.GetPublicProfile(ctx, actorID, targetID)
+	if err != nil {
+		t.Fatalf("GetPublicProfile failed: %v", err)
+	}
+	if cand.UserID != targetID {
+		t.Fatalf("expected user_id %s, got %s", targetID, cand.UserID)
+	}
+	if cand.DisplayName != "Target Member" {
+		t.Fatalf("expected DisplayName 'Target Member', got %s", cand.DisplayName)
+	}
+	if cand.Age != 24 {
+		t.Fatalf("expected Age 24, got %d", cand.Age)
+	}
+	if cand.ApproximateDistanceKm < 1 {
+		t.Fatalf("expected positive distance, got %d", cand.ApproximateDistanceKm)
+	}
+
+	// 2. Blocked profile
+	_ = discoRepo.BlockUser(ctx, actorID, targetID, "harassment")
+	_, err = discoSvc.GetPublicProfile(ctx, actorID, targetID)
+	if err == nil || !errors.Is(err, discovery.ErrCandidateBlocked) {
+		t.Fatalf("expected ErrCandidateBlocked for blocked target, got %v", err)
+	}
+
+	// 3. Underage profile
+	underageID := "underage_user"
+	createTestUser(t, identRepo, underageID, "underage@example.com", "Minor", now.AddDate(-17, 0, 0), []string{"cisgender_man"}, []string{"gay"}, 37.7749, -122.4194, 100)
+	_, err = discoSvc.GetPublicProfile(ctx, actorID, underageID)
+	if err == nil || !errors.Is(err, discovery.ErrUnderageProhibited) {
+		t.Fatalf("expected ErrUnderageProhibited for underage profile, got %v", err)
+	}
+}
+
+
+

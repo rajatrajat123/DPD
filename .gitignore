@@ -13,8 +13,13 @@ web/playwright/.cache/
 # Go build artifacts and test coverage
 backend/bin/
 backend/*.exe
+backend/**/*.exe
+*.exe
+**/*.exe
 backend/*.out
 backend/coverage.txt
+apps/mobile/dist/
+dist/
 
 # Environment & secrets
 .env
@@ -44,6 +49,8 @@ GoogleService-Info.plist
 credentials.json
 service-account*.json
 *.bak
+*.bak*
+*.bak_*
 
 # OS & Editor files
 .DS_Store

@@ -23,6 +23,39 @@ export interface MatchingSummaryResponse {
   dealbreakers_active: boolean;
 }
 
+export function normalizeCandidate(raw: any): DiscoveryCandidate {
+  const rawPhotos = Array.isArray(raw.photos) ? raw.photos : [];
+  const photos: ProfilePhoto[] = rawPhotos.map((p: any, idx: number) => {
+    const rawUrl = p.card_url || p.full_url || p.url || p.thumb_url || '';
+    const rawThumb = p.thumb_url || p.card_url || p.url || '';
+    return {
+      id: p.asset_id || p.id || `photo_${idx}`,
+      url: buildMediaUrl(rawUrl),
+      thumb_url: rawThumb ? buildMediaUrl(rawThumb) : undefined,
+      is_primary: idx === 0,
+      order: p.order ?? idx,
+    };
+  });
+
+  return {
+    id: raw.user_id || raw.id,
+    user_id: raw.user_id || raw.id,
+    display_name: raw.display_name || '',
+    age: raw.age || 0,
+    bio: raw.bio || '',
+    pronouns: raw.pronouns || [],
+    gender_identities: raw.gender_identities || [],
+    sexual_orientations: raw.sexual_orientations || [],
+    relationship_intents: raw.relationship_intents || [],
+    smoking_preference: raw.smoking_habit || raw.smoking_preference || 'NON_SMOKER',
+    distance_bucket_km: raw.approximate_distance_km ?? raw.distance_bucket_km ?? 1,
+    photos,
+    compatibility_score: raw.compatibility_score || 0,
+    is_verified: Boolean(raw.is_photo_verified || raw.is_verified),
+    relationship_structure: raw.relationship_structure,
+  };
+}
+
 export const discoveryService = {
   /**
    * Fetches discovery feed adhering strictly to server-side dealbreakers
@@ -38,38 +71,7 @@ export const discoveryService = {
       cursor,
     });
 
-    const candidates: DiscoveryCandidate[] = (res.candidates || []).map((raw: any) => {
-      const rawPhotos = Array.isArray(raw.photos) ? raw.photos : [];
-      const photos: ProfilePhoto[] = rawPhotos.map((p: any, idx: number) => {
-        const rawUrl = p.card_url || p.full_url || p.url || p.thumb_url || '';
-        const rawThumb = p.thumb_url || p.card_url || p.url || '';
-        return {
-          id: p.asset_id || p.id || `photo_${idx}`,
-          url: buildMediaUrl(rawUrl),
-          thumb_url: rawThumb ? buildMediaUrl(rawThumb) : undefined,
-          is_primary: idx === 0,
-          order: p.order ?? idx,
-        };
-      });
-
-      return {
-        id: raw.user_id || raw.id,
-        user_id: raw.user_id || raw.id,
-        display_name: raw.display_name || '',
-        age: raw.age || 0,
-        bio: raw.bio || '',
-        pronouns: raw.pronouns || [],
-        gender_identities: raw.gender_identities || [],
-        sexual_orientations: raw.sexual_orientations || [],
-        relationship_intents: raw.relationship_intents || [],
-        smoking_preference: raw.smoking_habit || raw.smoking_preference || 'NON_SMOKER',
-        distance_bucket_km: raw.approximate_distance_km ?? raw.distance_bucket_km ?? 1,
-        photos,
-        compatibility_score: raw.compatibility_score || 0,
-        is_verified: Boolean(raw.is_photo_verified || raw.is_verified),
-        relationship_structure: raw.relationship_structure,
-      };
-    });
+    const candidates: DiscoveryCandidate[] = (res.candidates || []).map(normalizeCandidate);
 
     return {
       candidates,
@@ -79,6 +81,37 @@ export const discoveryService = {
       dealbreakers_applied: true,
     };
   },
+
+  /**
+   * Searches public eligible profiles by query (display name, bio, tags)
+   */
+  async search(query: string, limit = 20): Promise<FeedResponse> {
+    const res = await api.get<{
+      candidates?: any[];
+      count?: number;
+      query?: string;
+    }>('/api/v1/discovery/search', {
+      q: query,
+      limit,
+    });
+
+    const candidates: DiscoveryCandidate[] = (res.candidates || []).map(normalizeCandidate);
+
+    return {
+      candidates,
+      count: res.count ?? candidates.length,
+      dealbreakers_applied: false,
+    };
+  },
+
+  /**
+   * Fetches full public profile details for another member
+   */
+  async getPublicProfile(userId: string): Promise<DiscoveryCandidate> {
+    const res = await api.get<any>(`/api/v1/profiles/${userId}`);
+    return normalizeCandidate(res);
+  },
+
 
   /**
    * Submits a swipe action to backend

@@ -235,10 +235,7 @@ export const mediaUploader = {
         attempts++;
       }
 
-      return {
-        media_id: assetId,
-        status: 'PROCESSING',
-      };
+      throw new ApiError(500, 'UPLOAD_PROCESSING_TIMEOUT', 'Media processing timed out. Please try again.');
     } catch (uploadErr) {
       if (__DEV__) {
         console.error('[mediaUploader.uploadPhoto] Failure:', {
@@ -275,7 +272,7 @@ export const mediaUploader = {
   /**
    * Fetches current user's profile gallery assets from backend and maps to ProfilePhoto[]
    */
-  async getMyGallery(): Promise<ProfilePhoto[]> {
+  async getMyGallery(throwOnError = false): Promise<ProfilePhoto[]> {
     try {
       const res = await api.get<{ count: number; assets: MediaAssetApi[] }>('/api/v1/media/gallery/me');
       if (!res || !Array.isArray(res.assets)) {
@@ -288,6 +285,9 @@ export const mediaUploader = {
     } catch (err) {
       if (__DEV__) {
         console.warn('[mediaUploader.getMyGallery] Failed to fetch gallery:', err);
+      }
+      if (throwOnError) {
+        throw err;
       }
       return [];
     }

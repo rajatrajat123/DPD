@@ -44,12 +44,13 @@ function NavigationGuard({ children }: { children: React.ReactNode }) {
 
     const inAuthGroup = segments[0] === '(auth)';
     const onVerifyAgeScreen = pathname === '/(auth)/verify-age' || segments[1] === 'verify-age';
+    const onResetPasswordScreen = pathname === '/(auth)/reset-password' || pathname === '/reset-password' || segments[1] === 'reset-password';
 
     if (!isAuthenticated && !inAuthGroup) {
       // Redirect to login preserving destination
       const redirectParam = pathname && pathname !== '/' ? `?redirect=${encodeURIComponent(pathname)}` : '';
       router.replace(`/(auth)/login${redirectParam}` as any);
-    } else if (isAuthenticated && inAuthGroup && !onVerifyAgeScreen) {
+    } else if (isAuthenticated && inAuthGroup && !onVerifyAgeScreen && !onResetPasswordScreen) {
       // Already authenticated, redirect out of login/register:
       // If user is unverified, guide to age assurance onboarding first; otherwise go to tabs
       if (!isAgeVerified) {
@@ -91,6 +92,8 @@ export default function RootLayout() {
             <Stack.Screen name="(auth)/reset-password" options={{ headerShown: false }} />
             <Stack.Screen name="(auth)/verify-age" options={{ headerShown: false, presentation: 'modal' }} />
             <Stack.Screen name="chat/[id]" options={{ headerShown: false }} />
+            <Stack.Screen name="search" options={{ headerShown: false }} />
+            <Stack.Screen name="profile/[id]" options={{ headerShown: false }} />
           </Stack>
         </NavigationGuard>
         {/* Global privacy veil shielding sensitive content in app switcher and biometric lock */}

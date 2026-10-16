@@ -51,6 +51,64 @@ func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
 	apperror.WriteJSON(w, http.StatusOK, feed)
 }
 
+// Search handles GET /api/v1/discovery/search.
+func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	limit := 20
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 50 {
+			limit = l
+		}
+	}
+
+	q := r.URL.Query().Get("q")
+	if q == "" {
+		q = r.URL.Query().Get("query")
+	}
+
+	resp, err := h.svc.SearchProfiles(r.Context(), authUser.ID, q, limit)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, resp)
+}
+
+// GetPublicProfile handles GET /api/v1/profiles/{id}.
+func (h *Handler) GetPublicProfile(w http.ResponseWriter, r *http.Request, targetID string) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	cand, err := h.svc.GetPublicProfile(r.Context(), authUser.ID, targetID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, cand)
+}
+
 // MatchingSummary handles GET /api/v1/discovery/matching-summary.
 func (h *Handler) MatchingSummary(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
@@ -224,6 +282,10 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, reqID string, err er
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeBusinessRuleViolation, "Daily free swipe limit reached; match reward or subscription boost required"))
 	case errors.Is(err, ErrBonusLikesVerifiedOnly):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "BONUS_LIKES_VERIFIED_ONLY", err.Error()))
+	case errors.Is(err, ErrBirthdateRequired), errors.Is(err, ErrAgeVerificationRequired):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "AGE_ASSURANCE_REQUIRED", err.Error()))
+	case errors.Is(err, ErrUnderageProhibited):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "UNDERAGE_PROHIBITED", err.Error()))
 	default:
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
 	}

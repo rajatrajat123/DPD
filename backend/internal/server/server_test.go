@@ -294,8 +294,8 @@ func TestServer_RoutesAndErrorEnvelope(t *testing.T) {
 		}
 	})
 
-	t.Run("GET /api/v1/discovery/feed rejects unverified user with 403 AGE_VERIFICATION_REQUIRED", func(t *testing.T) {
-		reqBody := `{"email":"unverified_feed@aura.dating","password":"Password123!Secure","display_name":"Unverified User","birthdate":"1995-05-05","gender_identities":["non-binary"],"sexual_orientations":["queer"]}`
+	t.Run("GET /api/v1/discovery/feed and GET /api/v1/matches allow eligible adult pending verification", func(t *testing.T) {
+		reqBody := `{"email":"adult_pending@aura.dating","password":"Password123!Secure","display_name":"Adult Pending User","birthdate":"1995-05-05","gender_identities":["non-binary"],"sexual_orientations":["queer"]}`
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(reqBody))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
@@ -312,16 +312,24 @@ func TestServer_RoutesAndErrorEnvelope(t *testing.T) {
 			t.Fatalf("failed to decode auth response: %v", err)
 		}
 
+		// 1. Discovery feed is accessible to adult member with pending third-party verification
 		feedReq := httptest.NewRequest(http.MethodGet, "/api/v1/discovery/feed", nil)
 		feedReq.Header.Set("Authorization", "Bearer "+authResp.AccessToken)
 		feedRec := httptest.NewRecorder()
 		srv.Handler().ServeHTTP(feedRec, feedReq)
 
-		if feedRec.Code != http.StatusForbidden {
-			t.Fatalf("expected 403 Forbidden for unverified user, got %d: %s", feedRec.Code, feedRec.Body.String())
+		if feedRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for adult pending user browsing feed, got %d: %s", feedRec.Code, feedRec.Body.String())
 		}
-		if !strings.Contains(feedRec.Body.String(), "AGE_VERIFICATION_REQUIRED") {
-			t.Errorf("expected error code AGE_VERIFICATION_REQUIRED in response body: %s", feedRec.Body.String())
+
+		// 2. Matches is accessible to adult member with pending third-party verification
+		matchReq := httptest.NewRequest(http.MethodGet, "/api/v1/matches", nil)
+		matchReq.Header.Set("Authorization", "Bearer "+authResp.AccessToken)
+		matchRec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(matchRec, matchReq)
+
+		if matchRec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK for adult pending user on matches, got %d: %s", matchRec.Code, matchRec.Body.String())
 		}
 	})
 

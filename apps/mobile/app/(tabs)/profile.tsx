@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,7 @@ import { useAuth } from '../../src/context/AuthContext';
 import { mediaUploader } from '../../src/services/media/mediaUploader';
 import { authService } from '../../src/services/auth/authService';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
-import { SmokingPreference } from '../../src/types';
+import { SmokingPreference, ProfilePhoto } from '../../src/types';
 import {
   GENDER_IDENTITY_OPTIONS,
   LOOKING_FOR_OPTIONS,
@@ -79,6 +79,37 @@ export default function ProfileScreen() {
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
   const [isSaving, setIsSaving] = useState(false);
+  const [galleryPhotos, setGalleryPhotos] = useState<ProfilePhoto[]>([]);
+  const [isLoadingGallery, setIsLoadingGallery] = useState(false);
+  const [galleryError, setGalleryError] = useState<string | null>(null);
+
+  const loadGallery = useCallback(async () => {
+    setIsLoadingGallery(true);
+    setGalleryError(null);
+    try {
+      const photos = await mediaUploader.getMyGallery(true);
+      setGalleryPhotos(photos);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not load gallery photos.';
+      setGalleryError(msg);
+    } finally {
+      setIsLoadingGallery(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshProfile();
+  }, [refreshProfile]);
+
+  useEffect(() => {
+    loadGallery();
+  }, [loadGallery]);
+
+  useEffect(() => {
+    if (profile?.photos && profile.photos.length > 0 && galleryPhotos.length === 0) {
+      setGalleryPhotos(profile.photos);
+    }
+  }, [profile?.photos, galleryPhotos.length]);
 
   useEffect(() => {
     if (profile) {
@@ -120,6 +151,35 @@ export default function ProfileScreen() {
     );
   };
 
+  const handleCheckVerificationStatus = async () => {
+    try {
+      const statusRes = await authService.getAgeAssuranceStatus();
+      if (statusRes?.status === 'VERIFIED') {
+        await refreshProfile();
+        Alert.alert(
+          'Age Verified',
+          'Your 18+ age verification is approved! Likes, mutual matching, and messaging are now fully unlocked.'
+        );
+      } else if (statusRes?.status === 'REJECTED') {
+        Alert.alert(
+          'Verification Rejected',
+          'We were unable to verify your age with the submitted selfie. Please retake your verification selfie.',
+          [
+            { text: 'Retake Selfie', onPress: () => router.push('/(auth)/verify-age') },
+            { text: 'Dismiss', style: 'cancel' },
+          ]
+        );
+      } else {
+        Alert.alert(
+          'Verification Pending',
+          'Your age verification is currently being reviewed by our team. You can continue browsing profiles in the meantime.'
+        );
+      }
+    } catch {
+      Alert.alert('Status Check Failed', 'Could not reach verification service. Please try again.');
+    }
+  };
+
   const handleDeletePhoto = async (photoId: string) => {
     Alert.alert('Delete Photo', 'Are you sure you want to remove this photo from your gallery?', [
       { text: 'Cancel', style: 'cancel' },
@@ -129,6 +189,7 @@ export default function ProfileScreen() {
         onPress: async () => {
           try {
             await mediaUploader.deletePhoto(photoId);
+            await loadGallery();
             await refreshProfile();
           } catch (err: unknown) {
             const message = err instanceof Error ? err.message : 'Could not delete photo. Please try again.';
@@ -140,14 +201,16 @@ export default function ProfileScreen() {
   };
 
   const handleMovePhoto = async (fromIndex: number, toIndex: number) => {
-    if (!profile?.photos || toIndex < 0 || toIndex >= profile.photos.length) return;
-    const reordered = [...profile.photos];
+    const currentList = galleryPhotos.length > 0 ? galleryPhotos : (profile?.photos || []);
+    if (!currentList || toIndex < 0 || toIndex >= currentList.length) return;
+    const reordered = [...currentList];
     const [moved] = reordered.splice(fromIndex, 1);
     reordered.splice(toIndex, 0, moved);
 
     const assetIds = reordered.map((p) => p.id).filter(Boolean);
     try {
       await mediaUploader.reorderGallery(assetIds);
+      await loadGallery();
       await refreshProfile();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Could not reorder photos. Please try again.';
@@ -181,10 +244,11 @@ export default function ProfileScreen() {
         }
       });
 
-      if (!uploaded || !uploaded.media_id) {
-        throw new Error('Server failed to confirm media upload.');
+      if (!uploaded || !uploaded.media_id || uploaded.status !== 'READY') {
+        throw new Error('Photo processing timed out or failed to complete.');
       }
 
+      await loadGallery();
       await refreshProfile();
       Alert.alert('Photo Uploaded', 'Your photo has been sanitized and added to your profile.');
     } catch (err: unknown) {
@@ -258,7 +322,8 @@ export default function ProfileScreen() {
     }
   };
 
-  const primaryPhoto = profile?.photos?.[0]?.url;
+  const displayPhotos = galleryPhotos.length > 0 ? galleryPhotos : (profile?.photos || []);
+  const primaryPhoto = displayPhotos[0]?.url;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -344,83 +409,97 @@ export default function ProfileScreen() {
           <View style={styles.sectionTitleRow}>
             <Text style={styles.sectionTitle}>Profile Gallery</Text>
             <Text style={styles.photoCountText}>
-              {profile?.photos?.length || 0}/6 Photos
+              {displayPhotos.length}/6 Photos
             </Text>
           </View>
           <Text style={styles.sectionDesc}>
             GPS and camera metadata are automatically stripped before upload.
           </Text>
 
-          <View style={styles.photosGrid}>
-            {profile?.photos?.map((photo, index) => (
-              <View key={photo.id || index} style={styles.photoWrap}>
-                <Image source={{ uri: photo.url }} style={styles.gridPhoto} />
-                {photo.is_primary && (
-                  <View style={styles.primaryBadge}>
-                    <Text style={styles.primaryBadgeText}>Primary</Text>
-                  </View>
-                )}
-
-                {/* Delete Button */}
-                <TouchableOpacity
-                  style={styles.deletePhotoBtn}
-                  onPress={() => handleDeletePhoto(photo.id)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={styles.deletePhotoBtnText}>✕</Text>
-                </TouchableOpacity>
-
-                {/* Reorder Arrows */}
-                <View style={styles.reorderControls}>
-                  {index > 0 && (
-                    <TouchableOpacity
-                      style={styles.moveBtn}
-                      onPress={() => handleMovePhoto(index, index - 1)}
-                      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.moveBtnText}>◀</Text>
-                    </TouchableOpacity>
-                  )}
-                  {profile.photos && index < profile.photos.length - 1 && (
-                    <TouchableOpacity
-                      style={styles.moveBtn}
-                      onPress={() => handleMovePhoto(index, index + 1)}
-                      hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
-                      activeOpacity={0.7}
-                    >
-                      <Text style={styles.moveBtnText}>▶</Text>
-                    </TouchableOpacity>
-                  )}
-                </View>
-              </View>
-            ))}
-
-            {/* Add Photo Button Slot */}
-            {(!profile?.photos || profile.photos.length < 6) && (
-              <TouchableOpacity
-                style={styles.addPhotoBtn}
-                onPress={handleAddPhoto}
-                disabled={isUploadingPhoto}
-                activeOpacity={0.8}
-              >
-                {isUploadingPhoto ? (
-                  <View style={styles.uploadingBox}>
-                    <ActivityIndicator color={colors.gold} size="small" />
-                    <Text style={styles.uploadingText}>{uploadProgressText}</Text>
-                  </View>
-                ) : (
-                  <>
-                    <View style={styles.addIconCircle}>
-                      <Text style={styles.addPhotoIcon}>+</Text>
-                    </View>
-                    <Text style={styles.addPhotoLabel}>Add Photo</Text>
-                  </>
-                )}
+          {isLoadingGallery && displayPhotos.length === 0 ? (
+            <View style={styles.galleryStatusBox}>
+              <ActivityIndicator color={colors.gold} size="small" />
+              <Text style={styles.galleryStatusText}>Loading gallery photos...</Text>
+            </View>
+          ) : galleryError && displayPhotos.length === 0 ? (
+            <View style={styles.galleryStatusBox}>
+              <Text style={styles.galleryErrorText}>{galleryError}</Text>
+              <TouchableOpacity style={styles.retryGalleryBtn} onPress={loadGallery} activeOpacity={0.8}>
+                <Text style={styles.retryGalleryBtnText}>Retry Loading Photos</Text>
               </TouchableOpacity>
-            )}
-          </View>
+            </View>
+          ) : (
+            <View style={styles.photosGrid}>
+              {displayPhotos.map((photo, index) => (
+                <View key={photo.id || index} style={styles.photoWrap}>
+                  <Image source={{ uri: photo.url }} style={styles.gridPhoto} />
+                  {photo.is_primary && (
+                    <View style={styles.primaryBadge}>
+                      <Text style={styles.primaryBadgeText}>Primary</Text>
+                    </View>
+                  )}
+
+                  {/* Delete Button */}
+                  <TouchableOpacity
+                    style={styles.deletePhotoBtn}
+                    onPress={() => handleDeletePhoto(photo.id)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.deletePhotoBtnText}>✕</Text>
+                  </TouchableOpacity>
+
+                  {/* Reorder Arrows */}
+                  <View style={styles.reorderControls}>
+                    {index > 0 && (
+                      <TouchableOpacity
+                        style={styles.moveBtn}
+                        onPress={() => handleMovePhoto(index, index - 1)}
+                        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.moveBtnText}>◀</Text>
+                      </TouchableOpacity>
+                    )}
+                    {index < displayPhotos.length - 1 && (
+                      <TouchableOpacity
+                        style={styles.moveBtn}
+                        onPress={() => handleMovePhoto(index, index + 1)}
+                        hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={styles.moveBtnText}>▶</Text>
+                      </TouchableOpacity>
+                    )}
+                  </View>
+                </View>
+              ))}
+
+              {/* Add Photo Button Slot */}
+              {displayPhotos.length < 6 && (
+                <TouchableOpacity
+                  style={styles.addPhotoBtn}
+                  onPress={handleAddPhoto}
+                  disabled={isUploadingPhoto}
+                  activeOpacity={0.8}
+                >
+                  {isUploadingPhoto ? (
+                    <View style={styles.uploadingBox}>
+                      <ActivityIndicator color={colors.gold} size="small" />
+                      <Text style={styles.uploadingText}>{uploadProgressText}</Text>
+                    </View>
+                  ) : (
+                    <>
+                      <View style={styles.addIconCircle}>
+                        <Text style={styles.addPhotoIcon}>+</Text>
+                      </View>
+                      <Text style={styles.addPhotoLabel}>Add Photo</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
         </View>
 
         {/* Basic Details Section */}
@@ -685,7 +764,11 @@ export default function ProfileScreen() {
           {!profile?.is_photo_verified && (
             <TouchableOpacity
               style={styles.verifyActionBtn}
-              onPress={() => router.push('/(auth)/verify-age')}
+              onPress={
+                profile?.verification_status === 'PENDING'
+                  ? handleCheckVerificationStatus
+                  : () => router.push('/(auth)/verify-age')
+              }
               activeOpacity={0.8}
             >
               <Text style={styles.verifyActionBtnText}>
@@ -1225,4 +1308,34 @@ const styles = StyleSheet.create({
     lineHeight: 17,
     fontSize: 12,
   },
+  galleryStatusBox: {
+    paddingVertical: spacing.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  galleryStatusText: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+  },
+  galleryErrorText: {
+    ...typography.bodySmall,
+    color: colors.ruby,
+    textAlign: 'center',
+  },
+  retryGalleryBtn: {
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    borderRadius: borderRadius.sm,
+    paddingVertical: spacing.xs,
+    paddingHorizontal: spacing.md,
+    marginTop: spacing.xs,
+  },
+  retryGalleryBtnText: {
+    ...typography.caption,
+    color: colors.gold,
+    fontWeight: '600',
+  },
 });
+

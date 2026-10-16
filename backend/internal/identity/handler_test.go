@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,7 @@ func setupTestRouter() (http.Handler, *Service, string) {
 	mux.HandleFunc("/api/v1/auth/logout", handler.Logout)
 	mux.HandleFunc("/api/v1/auth/password-reset/request", handler.RequestPasswordReset)
 	mux.HandleFunc("/api/v1/auth/password-reset/confirm", handler.ConfirmPasswordReset)
+	mux.HandleFunc("/auth/reset-password", handler.ResetPasswordWebPage)
 
 	authMiddleware := RequireAuth(secret)
 	mux.Handle("/api/v1/auth/verify/send", authMiddleware(http.HandlerFunc(handler.SendVerification)))
@@ -187,4 +189,167 @@ func TestHandler_AuthenticatedProfileAndPreferences_HTTP(t *testing.T) {
 			t.Errorf("unexpected preferences: %v", pref)
 		}
 	})
+}
+
+func TestHandler_ResetPasswordWebPage(t *testing.T) {
+	router, _, _ := setupTestRouter()
+
+	t.Run("GET /auth/reset-password with missing token renders incomplete link notice", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/auth/reset-password", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rec.Code)
+		}
+		ct := rec.Header().Get("Content-Type")
+		if !strings.Contains(ct, "text/html") {
+			t.Errorf("expected text/html Content-Type, got: %s", ct)
+		}
+		if rec.Header().Get("X-Content-Type-Options") != "nosniff" {
+			t.Errorf("expected X-Content-Type-Options nosniff")
+		}
+		if rec.Header().Get("X-Frame-Options") != "DENY" {
+			t.Errorf("expected X-Frame-Options DENY")
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "Reset Link Incomplete") {
+			t.Errorf("expected missing token notice, got body: %s", body)
+		}
+	})
+
+	t.Run("GET /auth/reset-password with valid token renders Expo Go & standalone links and web form", func(t *testing.T) {
+		token := "a1b2c3d4e5f678901234567890abcdef"
+		req := httptest.NewRequest(http.MethodGet, "/auth/reset-password?token="+token, nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200 OK, got %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, "exp://192.168.29.15:8081/--/reset-password?token="+token) {
+			t.Errorf("expected Expo Go deep link in HTML, got body: %s", body)
+		}
+		if !strings.Contains(body, "aura://reset-password?token="+token) {
+			t.Errorf("expected standalone aura deep link in HTML, got body: %s", body)
+		}
+		if !strings.Contains(body, "Account Recovery") {
+			t.Errorf("expected Account Recovery title in HTML")
+		}
+		if !strings.Contains(body, "Update Password") {
+			t.Errorf("expected Update Password button in HTML")
+		}
+	})
+
+	t.Run("POST /auth/reset-password returns 405 Method Not Allowed", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/auth/reset-password", nil)
+		rec := httptest.NewRecorder()
+
+		router.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("expected 405 Method Not Allowed, got %d", rec.Code)
+		}
+	})
+}
+
+func TestHandler_PasswordResetEndToEnd_Flow(t *testing.T) {
+	router, svc, _ := setupTestRouter()
+
+	// 1. Register test member
+	regBody := map[string]any{
+		"email":                "flow_member@aura.dating",
+		"password":             "OriginalPass123!",
+		"display_name":         "Flow Member",
+		"birthdate":            "1998-05-15",
+		"gender_identities":    []string{"non-binary"},
+		"sexual_orientations":  []string{"queer"},
+		"pronouns":             []string{"they/them"},
+		"relationship_intents": []string{"serious dating"},
+	}
+	regBytes, _ := json.Marshal(regBody)
+	regReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", bytes.NewReader(regBytes))
+	regReq.Header.Set("Content-Type", "application/json")
+	regRec := httptest.NewRecorder()
+	router.ServeHTTP(regRec, regReq)
+	if regRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created on registration, got %d: %s", regRec.Code, regRec.Body.String())
+	}
+
+	// 2. Request password reset via service to acquire token
+	token, err := svc.RequestPasswordReset(context.Background(), "flow_member@aura.dating")
+	if err != nil {
+		t.Fatalf("failed to request password reset: %v", err)
+	}
+	if token == "" {
+		t.Fatal("expected non-empty reset token")
+	}
+
+	// 3. Confirm reset with weak password -> fails policy validation
+	weakBody := map[string]string{
+		"token":        token,
+		"new_password": "short",
+	}
+	weakBytes, _ := json.Marshal(weakBody)
+	weakReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-reset/confirm", bytes.NewReader(weakBytes))
+	weakReq.Header.Set("Content-Type", "application/json")
+	weakRec := httptest.NewRecorder()
+	router.ServeHTTP(weakRec, weakReq)
+	if weakRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request on weak password, got %d", weakRec.Code)
+	}
+
+	// 4. Confirm reset with policy-compliant password -> succeeds
+	confirmBody := map[string]string{
+		"token":        token,
+		"new_password": "NewSecretPass456!",
+	}
+	confirmBytes, _ := json.Marshal(confirmBody)
+	confirmReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-reset/confirm", bytes.NewReader(confirmBytes))
+	confirmReq.Header.Set("Content-Type", "application/json")
+	confirmRec := httptest.NewRecorder()
+	router.ServeHTTP(confirmRec, confirmReq)
+	if confirmRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK on confirm password reset, got %d: %s", confirmRec.Code, confirmRec.Body.String())
+	}
+
+	// 5. Token reuse -> rejected (single use token)
+	reuseReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password-reset/confirm", bytes.NewReader(confirmBytes))
+	reuseReq.Header.Set("Content-Type", "application/json")
+	reuseRec := httptest.NewRecorder()
+	router.ServeHTTP(reuseRec, reuseReq)
+	if reuseRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request on token reuse, got %d", reuseRec.Code)
+	}
+
+	// 6. Old password no longer works
+	oldLogin := map[string]string{
+		"email":    "flow_member@aura.dating",
+		"password": "OriginalPass123!",
+	}
+	oldBytes, _ := json.Marshal(oldLogin)
+	oldReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(oldBytes))
+	oldReq.Header.Set("Content-Type", "application/json")
+	oldRec := httptest.NewRecorder()
+	router.ServeHTTP(oldRec, oldReq)
+	if oldRec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 Unauthorized for old password, got %d", oldRec.Code)
+	}
+
+	// 7. New password succeeds
+	newLogin := map[string]string{
+		"email":    "flow_member@aura.dating",
+		"password": "NewSecretPass456!",
+	}
+	newBytes, _ := json.Marshal(newLogin)
+	newReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", bytes.NewReader(newBytes))
+	newReq.Header.Set("Content-Type", "application/json")
+	newRec := httptest.NewRecorder()
+	router.ServeHTTP(newRec, newReq)
+	if newRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for new password login, got %d: %s", newRec.Code, newRec.Body.String())
+	}
 }

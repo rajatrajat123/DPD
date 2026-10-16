@@ -95,6 +95,12 @@ type DiscoveryFeedResponse struct {
 	EmptyStateReason string               `json:"empty_state_reason,omitempty"`
 }
 
+type DiscoverySearchResponse struct {
+	Query      string               `json:"query"`
+	Count      int                  `json:"count"`
+	Candidates []DiscoveryCandidate `json:"candidates"`
+}
+
 type MatchingSummaryResponse struct {
 	Count               int       `json:"count"`
 	DisplayText         string    `json:"display_text"`

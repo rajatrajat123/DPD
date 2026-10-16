@@ -2,11 +2,42 @@ package safety
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/auradating/platform/backend/internal/apperror"
 	"github.com/auradating/platform/backend/internal/identity"
 	"github.com/auradating/platform/backend/internal/middleware"
 )
+
+// RequireAdult ensures the authenticated user has an active profile and server-validated birthdate confirming 18+.
+// Eligible adult users with pending third-party age verification are allowed to access dating features.
+func RequireAdult(idRepo identity.Repository) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			reqID := middleware.GetRequestID(r.Context())
+			authUser, ok := identity.GetAuthUser(r.Context())
+			if !ok || authUser == nil {
+				apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+				return
+			}
+
+			if idRepo != nil {
+				profile, err := idRepo.GetProfile(r.Context(), authUser.ID)
+				if err != nil || profile == nil || profile.Birthdate.IsZero() {
+					apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "AGE_ASSURANCE_REQUIRED", "Server-validated birthdate confirming 18+ is required to access community dating features"))
+					return
+				}
+
+				if time.Now().UTC().Before(profile.Birthdate.AddDate(18, 0, 0)) {
+					apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "UNDERAGE_PROHIBITED", "You must be at least 18 years of age to access community dating features"))
+					return
+				}
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
+}
 
 // RequireAgeVerified gates access to adult dating features (discovery, matching, messaging, media).
 func RequireAgeVerified(safetySvc *Service) func(http.Handler) http.Handler {

@@ -12,6 +12,7 @@ import {
   Alert,
 } from 'react-native';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import * as Linking from 'expo-linking';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { authService } from '../../src/services/auth/authService';
 import { ApiError } from '../../src/services/api/client';
@@ -28,10 +29,28 @@ export default function ResetPasswordScreen() {
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
-    if (params.token && !token) {
+    if (params.token) {
       setToken(params.token);
     }
-  }, [params.token, token]);
+  }, [params.token]);
+
+  useEffect(() => {
+    const handleUrl = (url: string | null) => {
+      if (!url) return;
+      try {
+        const parsed = Linking.parse(url);
+        if (parsed.queryParams && typeof parsed.queryParams.token === 'string') {
+          setToken(parsed.queryParams.token);
+        }
+      } catch {
+        // Ignore deep link parsing error
+      }
+    };
+
+    Linking.getInitialURL().then(handleUrl);
+    const sub = Linking.addEventListener('url', (event) => handleUrl(event.url));
+    return () => sub.remove();
+  }, []);
 
   // Validation rules aligning with Go backend ValidatePasswordPolicy
   const hasMinLength = password.length >= 8 && password.length <= 128;

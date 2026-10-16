@@ -10,14 +10,13 @@ import {
   PanResponder,
   Modal,
   ScrollView,
+  useWindowDimensions,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius } from '../theme';
 import { DiscoveryCandidate } from '../types';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const CARD_WIDTH = SCREEN_WIDTH - spacing.md * 2;
-const CARD_HEIGHT = Math.min(CARD_WIDTH * 1.48, SCREEN_HEIGHT * 0.65);
+const SCREEN_WIDTH = Dimensions.get('window').width;
 
 interface DiscoveryCardProps {
   candidate: DiscoveryCandidate;
@@ -36,22 +35,36 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   onRewind,
   canRewind = false,
 }) => {
+  const { width: windowWidth, height: windowHeight } = useWindowDimensions();
+  const cardWidth = Math.min(windowWidth - spacing.md * 2, 420);
+  // Responsively scale photo height so the total card (photo + ~74px actionsBar) starts completely
+  // below the header & compact banner and fits above the bottom tab bar without overlapping.
+  const maxAvailablePhotoHeight = Math.max(windowHeight - 310, 280);
+  const photoHeight = Math.min(
+    cardWidth * 1.34,
+    maxAvailablePhotoHeight,
+    windowHeight * 0.54,
+    460
+  );
+
   const [photoIndex, setPhotoIndex] = useState(0);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [imageError, setImageError] = useState(false);
 
   const photos =
     candidate.photos && candidate.photos.length > 0
       ? candidate.photos
       : [{ id: 'default', url: '', is_primary: true, order: 0 }];
-  const currentPhoto = photos[photoIndex];
+  const currentPhoto = photos[photoIndex] || photos[0] || { id: 'default', url: '', is_primary: true, order: 0 };
 
   const pan = useRef(new Animated.ValueXY()).current;
 
   useEffect(() => {
     pan.setValue({ x: 0, y: 0 });
     setPhotoIndex(0);
+    setImageError(false);
     setShowDetailsModal(false);
-  }, [candidate.id || candidate.user_id]);
+  }, [candidate.id, candidate.user_id]);
 
   const panResponder = useRef(
     PanResponder.create({
@@ -60,15 +73,15 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       },
       onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
       onPanResponderRelease: (_, gestureState) => {
-        if (gestureState.dx > 120) {
+        if (gestureState.dx > 110) {
           Animated.timing(pan, {
-            toValue: { x: SCREEN_WIDTH + 150, y: gestureState.dy },
+            toValue: { x: windowWidth + 150, y: gestureState.dy },
             duration: 200,
             useNativeDriver: false,
           }).start(() => onLike());
-        } else if (gestureState.dx < -120) {
+        } else if (gestureState.dx < -110) {
           Animated.timing(pan, {
-            toValue: { x: -SCREEN_WIDTH - 150, y: gestureState.dy },
+            toValue: { x: -windowWidth - 150, y: gestureState.dy },
             duration: 200,
             useNativeDriver: false,
           }).start(() => onPass());
@@ -84,7 +97,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   ).current;
 
   const rotate = pan.x.interpolate({
-    inputRange: [-SCREEN_WIDTH * 1.5, 0, SCREEN_WIDTH * 1.5],
+    inputRange: [-windowWidth * 1.5, 0, windowWidth * 1.5],
     outputRange: ['-18deg', '0deg', '18deg'],
   });
 
@@ -106,7 +119,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
   const handleLikeBtn = () => {
     Animated.timing(pan, {
-      toValue: { x: SCREEN_WIDTH + 150, y: 0 },
+      toValue: { x: windowWidth + 150, y: 0 },
       duration: 250,
       useNativeDriver: false,
     }).start(() => onLike());
@@ -114,7 +127,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
   const handlePassBtn = () => {
     Animated.timing(pan, {
-      toValue: { x: -SCREEN_WIDTH - 150, y: 0 },
+      toValue: { x: -windowWidth - 150, y: 0 },
       duration: 250,
       useNativeDriver: false,
     }).start(() => onPass());
@@ -123,18 +136,20 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   const handleNextPhoto = () => {
     if (photoIndex < photos.length - 1) {
       setPhotoIndex(photoIndex + 1);
+      setImageError(false);
     }
   };
 
   const handlePrevPhoto = () => {
     if (photoIndex > 0) {
       setPhotoIndex(photoIndex - 1);
+      setImageError(false);
     }
   };
 
   return (
     <View style={styles.cardContainer}>
-      <Animated.View style={[styles.card, animatedCardStyle]} {...panResponder.panHandlers}>
+      <Animated.View style={[styles.card, { width: cardWidth }, animatedCardStyle]} {...panResponder.panHandlers}>
         {/* Swipe Stamp: LIKE (Red stamp matching new red Like action) */}
         <Animated.View style={[styles.stampContainer, styles.likeStamp, { opacity: likeOpacity }]} pointerEvents="none">
           <Text style={styles.likeStampText}>LIKE</Text>
@@ -146,9 +161,14 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         </Animated.View>
 
         {/* Main Photo Container */}
-        <View style={styles.photoContainer}>
-          {currentPhoto.url ? (
-            <Image source={{ uri: currentPhoto.url }} style={styles.photo} resizeMode="cover" />
+        <View style={[styles.photoContainer, { height: photoHeight }]}>
+          {currentPhoto.url && !imageError ? (
+            <Image
+              source={{ uri: currentPhoto.url }}
+              style={styles.photo}
+              resizeMode="cover"
+              onError={() => setImageError(true)}
+            />
           ) : (
             <View style={styles.placeholderPhoto}>
               <Text style={styles.placeholderMonogram}>{candidate.display_name.charAt(0)}</Text>
@@ -454,7 +474,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm,
   },
   card: {
-    width: CARD_WIDTH,
     backgroundColor: colors.card,
     borderRadius: 24,
     overflow: 'hidden',
@@ -468,7 +487,6 @@ const styles = StyleSheet.create({
   },
   photoContainer: {
     width: '100%',
-    height: CARD_HEIGHT,
     position: 'relative',
     backgroundColor: colors.backgroundElevated,
   },
@@ -490,7 +508,7 @@ const styles = StyleSheet.create({
   },
   paginationRow: {
     position: 'absolute',
-    top: spacing.sm + 2,
+    top: 6,
     left: spacing.md,
     right: spacing.md,
     flexDirection: 'row',
@@ -508,7 +526,7 @@ const styles = StyleSheet.create({
   },
   topBadgesRow: {
     position: 'absolute',
-    top: spacing.lg,
+    top: 14,
     left: spacing.md,
     right: spacing.md,
     flexDirection: 'row',
@@ -657,8 +675,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'center',
     alignItems: 'center',
-    gap: spacing.lg,
-    paddingVertical: spacing.md,
+    gap: spacing.md,
+    paddingVertical: 10,
     backgroundColor: '#10121A',
   },
   actionBtn: {
@@ -671,53 +689,53 @@ const styles = StyleSheet.create({
     elevation: 4,
   },
   rewindBtn: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.gold,
   },
   rewindIcon: {
-    fontSize: 18,
+    fontSize: 16,
     color: colors.gold,
     fontWeight: '700',
   },
   passBtn: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
     backgroundColor: '#1D202B',
     borderWidth: 1,
     borderColor: '#2D3243',
   },
   passIcon: {
-    fontSize: 24,
+    fontSize: 22,
     color: '#8E95A8',
     fontWeight: '700',
   },
   superSparkBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: '#1D202B',
     borderWidth: 1,
     borderColor: colors.gold,
   },
   superSparkIcon: {
-    fontSize: 22,
+    fontSize: 20,
     color: colors.gold,
   },
   likeBtn: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
     backgroundColor: '#E53935', // Red Like Button per user specifications
     borderWidth: 1,
     borderColor: '#FF5252',
   },
   likeIcon: {
-    fontSize: 28,
+    fontSize: 24,
     color: '#FFFFFF',
     fontWeight: '700',
   },
