@@ -268,18 +268,24 @@ type PasswordReset struct {
 var ValidGenderIdentities = map[string]struct{}{
 	"cisgender man":     {},
 	"cis man":           {},
+	"cisgender_man":     {},
 	"transgender man":   {},
 	"trans man":         {},
+	"transgender_man":   {},
 	"cisgender woman":   {},
 	"cis woman":         {},
+	"cisgender_woman":   {},
 	"transgender woman": {},
 	"trans woman":       {},
+	"transgender_woman": {},
 	"woman":             {},
 	"man":               {},
 	"non-binary":        {},
+	"non_binary":        {},
 	"genderfluid":       {},
 	"agender":           {},
 	"two-spirit":        {},
+	"two_spirit":        {},
 	"genderqueer":       {},
 	"intersex":          {},
 	"prefer not to say": {},
@@ -307,17 +313,23 @@ var ValidPronouns = map[string]struct{}{
 	"he/him":    {},
 	"she/her":   {},
 	"they/them": {},
+	"she/they":  {},
+	"he/they":   {},
 	"ze/zir":    {},
 	"custom":    {},
 }
 
 var ValidRelationshipIntents = map[string]struct{}{
 	"long-term partner":   {},
+	"long_term":           {},
 	"serious dating":      {},
 	"casual dating":       {},
+	"casual":              {},
 	"queer platonic":      {},
 	"community / friends": {},
+	"friendship":          {},
 	"exploring":           {},
+	"dating":              {},
 }
 
 func ValidateTaxonomy(genders, orientations, pronouns, intents []string) error {

@@ -49,6 +49,11 @@ export interface Profile {
   relationship_structure?: 'MONOGAMOUS' | 'ENM' | 'POLYAMOROUS' | 'OPEN' | 'EXPLORING' | string;
   interests?: string[];
   non_smoker_dealbreaker: boolean;
+  dealbreakers?: {
+    non_smoker_only?: boolean;
+    require_verified?: boolean;
+    require_monogamous?: boolean;
+  };
   height_cm?: number;
   weight_kg?: number;
   visibility_settings?: {

@@ -180,10 +180,10 @@ export default function ProfileScreen() {
   const [customLookingForText, setCustomLookingForText] = useState('');
   const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
   const [requireVerifiedDealbreaker, setRequireVerifiedDealbreaker] = useState<boolean>(
-    profile?.visibility_settings?.require_verified ?? false
+    profile?.dealbreakers?.require_verified ?? profile?.visibility_settings?.require_verified ?? false
   );
   const [requireMonogamousDealbreaker, setRequireMonogamousDealbreaker] = useState<boolean>(
-    profile?.visibility_settings?.require_monogamous ?? false
+    profile?.dealbreakers?.require_monogamous ?? profile?.visibility_settings?.require_monogamous ?? false
   );
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
@@ -257,10 +257,15 @@ export default function ProfileScreen() {
       if (profile.interests && Array.isArray(profile.interests)) {
         setSelectedInterests(profile.interests);
       }
-      if (profile.visibility_settings?.require_verified !== undefined) {
+      if (profile.dealbreakers?.require_verified !== undefined) {
+        setRequireVerifiedDealbreaker(Boolean(profile.dealbreakers.require_verified));
+      } else if (profile.visibility_settings?.require_verified !== undefined) {
         setRequireVerifiedDealbreaker(Boolean(profile.visibility_settings.require_verified));
       }
-      if (profile.visibility_settings?.require_monogamous !== undefined) {
+
+      if (profile.dealbreakers?.require_monogamous !== undefined) {
+        setRequireMonogamousDealbreaker(Boolean(profile.dealbreakers.require_monogamous));
+      } else if (profile.visibility_settings?.require_monogamous !== undefined) {
         setRequireMonogamousDealbreaker(Boolean(profile.visibility_settings.require_monogamous));
       }
 
@@ -507,7 +512,31 @@ export default function ProfileScreen() {
 
     setIsSaving(true);
     try {
-      // 1. Update profile details on backend using exact DTO fields
+      // 1. Build clean visibility settings strictly matching backend VisibilitySettings struct
+      const cleanVisibility: Record<string, string | boolean> = {
+        height: heightVisibility,
+        weight: weightVisibility,
+      };
+      if (profile?.visibility_settings) {
+        const allowedVisibilityKeys = [
+          'gender_identity',
+          'sexual_orientation',
+          'pronouns',
+          'distance',
+          'online_status',
+          'traveler_safety',
+        ];
+        for (const key of allowedVisibilityKeys) {
+          if (profile.visibility_settings[key] !== undefined) {
+            cleanVisibility[key] = profile.visibility_settings[key];
+          }
+        }
+      }
+
+      let profileUpdateSuccess = false;
+      let preferencesUpdateSuccess = false;
+
+      // 2. Update profile details on backend using exact DTO fields
       await authService.updateMyProfile({
         display_name: displayName.trim(),
         bio: bio.trim(),
@@ -518,33 +547,36 @@ export default function ProfileScreen() {
         sexual_orientations: finalOrientations,
         smoking_habit: smokingPref,
         smoking_preference: smokingPref,
+        non_smoker_dealbreaker: nonSmokerDealbreaker,
         drinking_habit: drinkingHabit,
         relationship_intents: selectedIntents,
         relationship_structure: relationshipStructure,
         interests: selectedInterests,
         height_cm: finalHeightCm,
         weight_kg: finalWeightKg,
-        visibility_settings: {
-          ...(profile?.visibility_settings || {}),
-          height: heightVisibility,
-          weight: weightVisibility,
-          require_verified: requireVerifiedDealbreaker,
-          require_monogamous: requireMonogamousDealbreaker,
-        },
+        visibility_settings: cleanVisibility,
       });
+      profileUpdateSuccess = true;
 
-      // 2. Update discovery preferences dealbreaker and preferred genders on backend
-      await discoveryService.updatePreferences({
-        preferred_genders: finalLookingFor,
-        preferred_intents: selectedIntents,
-        dealbreakers: {
-          non_smoker_only: nonSmokerDealbreaker,
-          require_verified: requireVerifiedDealbreaker,
-          require_monogamous: requireMonogamousDealbreaker,
-        },
-      });
+      // 3. Update discovery preferences dealbreaker and preferred genders on backend
+      try {
+        await discoveryService.updatePreferences({
+          preferred_genders: finalLookingFor,
+          preferred_intents: selectedIntents,
+          dealbreakers: {
+            non_smoker_only: nonSmokerDealbreaker,
+            require_verified: requireVerifiedDealbreaker,
+            require_monogamous: requireMonogamousDealbreaker,
+          },
+        });
+        preferencesUpdateSuccess = true;
+      } catch (prefErr) {
+        if (__DEV__) {
+          console.warn('[ProfileSave] Preferences sync warning:', prefErr);
+        }
+      }
 
-      // 3. Re-affirm active theme persistence
+      // 4. Re-affirm active theme persistence
       try {
         await setTheme(themeId);
       } catch {
@@ -552,7 +584,12 @@ export default function ProfileScreen() {
       }
 
       await refreshProfile();
-      Alert.alert('Profile Saved', 'Your profile and discovery preferences have been updated.');
+
+      if (profileUpdateSuccess && preferencesUpdateSuccess) {
+        Alert.alert('Profile Saved', 'Your profile and discovery preferences have been updated.');
+      } else if (profileUpdateSuccess) {
+        Alert.alert('Profile Saved', 'Your profile details were updated, but matching preferences could not be synchronized.');
+      }
     } catch (err: unknown) {
       if (__DEV__) {
         console.error('[ProfileSave] Failed:', err);

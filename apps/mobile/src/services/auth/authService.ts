@@ -183,7 +183,15 @@ export const authService = {
       rawProfile.smoking_habit = rawProfile.smoking_preference;
     }
 
-    // Normalize non-smoker dealbreaker from preferences
+    // Normalize dealbreakers and non-smoker dealbreaker from preferences
+    if (res.preferences?.dealbreakers) {
+      rawProfile.dealbreakers = {
+        non_smoker_only: Boolean(res.preferences.dealbreakers.non_smoker_only),
+        require_verified: Boolean(res.preferences.dealbreakers.require_verified),
+        require_monogamous: Boolean(res.preferences.dealbreakers.require_monogamous),
+      };
+    }
+
     if (res.preferences?.dealbreakers?.non_smoker_only !== undefined) {
       rawProfile.non_smoker_dealbreaker = Boolean(res.preferences.dealbreakers.non_smoker_only);
     } else if (rawProfile.non_smoker_dealbreaker === undefined) {
@@ -246,7 +254,30 @@ export const authService = {
       payload.weight_kg = updates.weight_kg;
     }
     if (updates.visibility_settings !== undefined) {
-      payload.visibility_settings = updates.visibility_settings;
+      const allowedVisibilityKeys = [
+        'gender_identity',
+        'sexual_orientation',
+        'pronouns',
+        'distance',
+        'online_status',
+        'traveler_safety',
+        'height',
+        'weight',
+      ];
+      const sanitizedVisibility: Record<string, unknown> = {};
+      const rawVis = updates.visibility_settings as Record<string, unknown>;
+      for (const key of allowedVisibilityKeys) {
+        if (rawVis[key] !== undefined) {
+          sanitizedVisibility[key] = rawVis[key];
+        }
+      }
+      payload.visibility_settings = sanitizedVisibility;
+    }
+
+    if (updates.non_smoker_dealbreaker !== undefined) {
+      payload.non_smoker_dealbreaker = updates.non_smoker_dealbreaker;
+    } else if (updates.dealbreakers?.non_smoker_only !== undefined) {
+      payload.non_smoker_dealbreaker = updates.dealbreakers.non_smoker_only;
     }
 
     // Map smoking preference to backend smoking_habit

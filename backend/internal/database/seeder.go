@@ -125,6 +125,13 @@ func SeedEmail(index int) string {
 	return fmt.Sprintf("seed_%05d@%s", index, SeedEmailDomain)
 }
 
+// DeterministicIndex returns a pseudo-random deterministic index in [0, maxVal) based on user index and attribute salt
+func DeterministicIndex(index int, salt string, maxVal int) int {
+	h := sha256.Sum256([]byte(fmt.Sprintf("seed-v2:%d:%s", index, salt)))
+	val := uint32(h[0])<<24 | uint32(h[1])<<16 | uint32(h[2])<<8 | uint32(h[3])
+	return int(val % uint32(maxVal))
+}
+
 // SeedDevProfiles idempotently creates exactly 5,000 synthetic eligible profiles
 func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, logger *slog.Logger) (*SeedStats, error) {
 	startTime := time.Now()
@@ -161,35 +168,6 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 	}
 	stats.ExistingCount = existingSeedCount
 
-	// If exactly 5,000 seed profiles already exist, verify media and eligibility without duplicating
-	if existingSeedCount >= TotalSeedProfiles {
-		stats.ReusedCount = existingSeedCount
-		stats.CreatedCount = 0
-
-		// Verify eligibility count
-		var eligibleCount int
-		elQuery := `
-			SELECT COUNT(DISTINCT u.id)
-			FROM users u
-			JOIN profiles p ON p.user_id = u.id
-			WHERE u.email LIKE '%@` + SeedEmailDomain + `'
-			  AND u.status = 'ACTIVE'
-			  AND p.incognito_enabled = FALSE
-			  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) >= 18
-			  AND (
-				  SELECT COUNT(*) FROM media_assets ma 
-				  WHERE ma.owner_user_id = u.id 
-				    AND ma.purpose = 'PROFILE_GALLERY' 
-				    AND ma.status = 'READY' 
-				    AND ma.moderation_verdict = 'APPROVED'
-			  ) >= 3;
-		`
-		_ = pool.QueryRow(ctx, elQuery).Scan(&eligibleCount)
-		stats.EligibleCount = eligibleCount
-		stats.DurationMs = time.Since(startTime).Milliseconds()
-		return stats, nil
-	}
-
 	// 5. Seed synthetic records in batches of 500 for high performance
 	batchSize := 500
 	totalBatches := (TotalSeedProfiles + batchSize - 1) / batchSize
@@ -208,38 +186,112 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 		"Davis", "Wilson", "Anderson", "Thomas", "Jackson", "White", "Harris", "Martin",
 	}
 
+	pronounPool := [][]string{
+		{"she/her"},
+		{"he/him"},
+		{"they/them"},
+		{"she/they"},
+		{"he/they"},
+		{"she/her"},
+		{"he/him"},
+		{"they/them"},
+		{"she/they"},
+		{"he/they"},
+		{"she/her"},
+		{"he/him"},
+		{"they/them"},
+		{"she/her", "they/them"},
+		{"he/him", "they/them"},
+		{"she/her"},
+		{"he/him"},
+		{"they/them"},
+		{"ze/zir"},
+		{"custom:fae/faer"},
+	}
+
 	genderTaxonomies := [][]string{
-		{"non_binary"},
-		{"cisgender_woman"},
-		{"transgender_woman"},
-		{"cisgender_man"},
-		{"transgender_man"},
+		{"woman"},
+		{"man"},
+		{"non-binary"},
+		{"transgender woman"},
+		{"transgender man"},
+		{"cisgender woman"},
+		{"cisgender man"},
 		{"genderqueer"},
-		{"non_binary", "genderqueer"},
-		{"two_spirit"},
+		{"genderfluid"},
 		{"agender"},
+		{"two-spirit"},
+		{"woman"},
+		{"man"},
+		{"non-binary"},
+		{"transgender woman"},
+		{"transgender man"},
+		{"cisgender woman"},
+		{"cisgender man"},
+		{"genderqueer"},
+		{"genderfluid"},
+		{"transgender woman", "woman"},
+		{"transgender man", "man"},
+		{"non-binary", "genderqueer"},
+		{"genderfluid", "non-binary"},
+		{"agender", "non-binary"},
 	}
 
 	sexualOrientations := [][]string{
 		{"queer"},
 		{"lesbian"},
 		{"gay"},
-		{"pansexual"},
 		{"bisexual"},
+		{"pansexual"},
 		{"asexual"},
+		{"demisexual"},
+		{"questioning"},
+		{"queer"},
+		{"lesbian"},
+		{"gay"},
+		{"bisexual"},
+		{"pansexual"},
+		{"demisexual"},
+		{"bisexual", "queer"},
+		{"queer", "lesbian"},
+		{"queer", "gay"},
+		{"demisexual", "pansexual"},
 	}
 
 	relationshipIntents := [][]string{
-		{"long_term"},
-		{"dating"},
-		{"friendship"},
-		{"casual"},
-		{"long_term", "dating"},
+		{"long-term partner"},
+		{"serious dating"},
+		{"casual dating"},
+		{"queer platonic"},
+		{"community / friends"},
+		{"exploring"},
+		{"long-term partner", "serious dating"},
+		{"casual dating", "exploring"},
 	}
 
 	structures := []string{"MONOGAMOUS", "MONOGAMOUS", "MONOGAMOUS", "ENM", "POLYAMOROUS", "OPEN", "EXPLORING"}
-	smokingHabits := []string{"NON_SMOKER", "NON_SMOKER", "NON_SMOKER", "NON_SMOKER", "SOCIAL_SMOKER"}
-	drinkingHabits := []string{"SOCIALLY", "SOCIALLY", "NEVER", "SOBER"}
+	smokingHabits := []string{"NON_SMOKER", "NON_SMOKER", "NON_SMOKER", "NON_SMOKER", "SOCIAL_SMOKER", "REGULAR_SMOKER", "CANNABIS_ONLY"}
+	drinkingHabits := []string{"SOCIALLY", "SOCIALLY", "NEVER", "SOBER", "FREQUENTLY"}
+
+	prefGenderProfiles := [][]string{
+		{"woman", "cisgender woman", "transgender woman"},
+		{"man", "cisgender man", "transgender man"},
+		{"non-binary", "genderqueer", "genderfluid", "agender"},
+		{"transgender woman", "transgender man", "non-binary"},
+		{"woman", "transgender woman", "cisgender woman", "non-binary"},
+		{"man", "transgender man", "cisgender man", "non-binary"},
+		{"all", "everyone", "woman", "man", "non-binary", "transgender woman", "transgender man", "cisgender woman", "cisgender man", "genderqueer", "genderfluid", "agender", "two-spirit"},
+	}
+
+	prefAgeWindows := [][2]int{
+		{18, 30},
+		{21, 35},
+		{25, 45},
+		{28, 52},
+		{18, 99},
+	}
+
+	prefDistanceLimits := []int{25, 50, 80, 100, 160}
 
 	// Metro anchor coordinates (New York, Berlin, San Francisco, London, Chicago, Austin)
 	metroHubs := [][2]float64{
@@ -288,20 +340,21 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 				createdUsers++
 			}
 
-			// 2. Insert profile
-			age := 18 + (i % 34) // 18 to 51
-			birthdate := time.Now().UTC().AddDate(-age, -((i*3)%12), -((i*5)%28))
-			genders := genderTaxonomies[i%len(genderTaxonomies)]
-			orientations := sexualOrientations[(i*3)%len(sexualOrientations)]
-			intents := relationshipIntents[(i*5)%len(relationshipIntents)]
-			structure := structures[i%len(structures)]
-			smoking := smokingHabits[i%len(smokingHabits)]
-			drinking := drinkingHabits[i%len(drinkingHabits)]
-			isPhotoVerified := (i%2 == 0)
+			// 2. Insert or update profile (independent SHA-256 salts for complete decoupling)
+			age := 18 + DeterministicIndex(i, "age", 34) // 18 to 51
+			birthdate := time.Now().UTC().AddDate(-age, -DeterministicIndex(i, "month", 12), -DeterministicIndex(i, "day", 28))
+			pronouns := pronounPool[DeterministicIndex(i, "pronouns", len(pronounPool))]
+			genders := genderTaxonomies[DeterministicIndex(i, "genders", len(genderTaxonomies))]
+			orientations := sexualOrientations[DeterministicIndex(i, "orientations", len(sexualOrientations))]
+			intents := relationshipIntents[DeterministicIndex(i, "intents", len(relationshipIntents))]
+			structure := structures[DeterministicIndex(i, "structure", len(structures))]
+			smoking := smokingHabits[DeterministicIndex(i, "smoking", len(smokingHabits))]
+			drinking := drinkingHabits[DeterministicIndex(i, "drinking", len(drinkingHabits))]
+			isPhotoVerified := DeterministicIndex(i, "photo_verified", 2) == 0
 
 			bio := fmt.Sprintf("Hi, I'm %s. Queer creative exploring local coffee, community art, and good conversation. (%s)", name, SeedMarkerTag)
-			heightCm := 155 + (i % 40)
-			weightKg := 50 + (i % 45)
+			heightCm := 150 + DeterministicIndex(i, "height", 45)
+			weightKg := 48 + DeterministicIndex(i, "weight", 55)
 
 			profileQuery := `
 				INSERT INTO profiles (
@@ -317,21 +370,28 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 				)
 				ON CONFLICT (user_id) DO UPDATE SET
 					display_name = EXCLUDED.display_name,
+					birthdate = EXCLUDED.birthdate,
 					bio = EXCLUDED.bio,
+					pronouns = EXCLUDED.pronouns,
+					gender_identities = EXCLUDED.gender_identities,
+					sexual_orientations = EXCLUDED.sexual_orientations,
+					relationship_intents = EXCLUDED.relationship_intents,
+					relationship_structure = EXCLUDED.relationship_structure,
 					is_photo_verified = EXCLUDED.is_photo_verified,
 					smoking_habit = EXCLUDED.smoking_habit,
 					drinking_habit = EXCLUDED.drinking_habit,
 					height_cm = EXCLUDED.height_cm,
-					weight_kg = EXCLUDED.weight_kg;
+					weight_kg = EXCLUDED.weight_kg,
+					updated_at = NOW();
 			`
 			_, err = tx.Exec(ctx, profileQuery,
-				userID, name, birthdate, bio, []string{"they/them"}, genders,
+				userID, name, birthdate, bio, pronouns, genders,
 				orientations, intents, structure, isPhotoVerified, smoking, drinking,
 				heightCm, weightKg,
 			)
 			if err != nil {
 				_ = tx.Rollback(ctx)
-				return nil, fmt.Errorf("insert profile %s: %w", userID, err)
+				return nil, fmt.Errorf("insert/update profile %s: %w", userID, err)
 			}
 
 			// 3. Insert profile location
@@ -355,27 +415,41 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 				return nil, fmt.Errorf("insert location %s: %w", userID, err)
 			}
 
-			// 4. Insert dating preferences (inclusive reciprocal filtering)
+			// 4. Insert or update dating preferences (varied reciprocal filtering)
+			prefGenders := prefGenderProfiles[DeterministicIndex(i, "pref_genders", len(prefGenderProfiles))]
+			ageWin := prefAgeWindows[DeterministicIndex(i, "pref_age", len(prefAgeWindows))]
+			prefMinAge := ageWin[0]
+			prefMaxAge := ageWin[1]
+			prefDist := prefDistanceLimits[DeterministicIndex(i, "pref_dist", len(prefDistanceLimits))]
+
+			nonSmokerOnly := DeterministicIndex(i, "dealbreaker_smoke", 10) < 4      // 40%
+			requireVerified := DeterministicIndex(i, "dealbreaker_verified", 10) < 3   // 30%
+			requireMonogamous := DeterministicIndex(i, "dealbreaker_monogamous", 10) < 4 // 40%
+			verifiedOnly := DeterministicIndex(i, "pref_verified_only", 10) < 3      // 30%
+
+			dealbreakerJSON := fmt.Sprintf(`{"non_smoker_only":%t,"require_verified":%t,"require_monogamous":%t}`, nonSmokerOnly, requireVerified, requireMonogamous)
+
 			prefQuery := `
 				INSERT INTO dating_preferences (
 					user_id, min_age, max_age, max_distance_km, preferred_genders,
 					preferred_intents, verified_profiles_only, dealbreakers, updated_at
 				) VALUES (
-					$1, 18, 99, 100,
-					ARRAY['non_binary','cisgender_woman','transgender_woman','cisgender_man','transgender_man','genderqueer','all','everyone'],
-					ARRAY['long_term','dating','friendship','casual'],
-					FALSE,
-					'{"non_smoker_only":false,"require_verified":false,"require_monogamous":false}',
-					NOW()
+					$1, $2, $3, $4, $5, $6, $7, $8, NOW()
 				)
 				ON CONFLICT (user_id) DO UPDATE SET
+					min_age = EXCLUDED.min_age,
+					max_age = EXCLUDED.max_age,
+					max_distance_km = EXCLUDED.max_distance_km,
 					preferred_genders = EXCLUDED.preferred_genders,
-					dealbreakers = EXCLUDED.dealbreakers;
+					preferred_intents = EXCLUDED.preferred_intents,
+					verified_profiles_only = EXCLUDED.verified_profiles_only,
+					dealbreakers = EXCLUDED.dealbreakers,
+					updated_at = NOW();
 			`
-			_, err = tx.Exec(ctx, prefQuery, userID)
+			_, err = tx.Exec(ctx, prefQuery, userID, prefMinAge, prefMaxAge, prefDist, prefGenders, intents, verifiedOnly, dealbreakerJSON)
 			if err != nil {
 				_ = tx.Rollback(ctx)
-				return nil, fmt.Errorf("insert preferences %s: %w", userID, err)
+				return nil, fmt.Errorf("insert/update preferences %s: %w", userID, err)
 			}
 
 			// 5. Insert exactly 3 approved public media assets + derivatives per user (satisfying Discovery threshold >= 3)

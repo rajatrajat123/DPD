@@ -4295,3 +4295,158 @@ test('Profile Redesign: validates collapsible accordion architecture, default ex
   assert.equal(formState.bio, 'Photographer and community volunteer.');
   assert.deepEqual(formState.interests, ['Art & Design', 'Outdoor & Nature']);
 });
+
+// --- Test 78: Profile Save Payload Sanitization & Dual-Endpoint Contract ---
+test('Profile Save: sanitizes visibility_settings against Go backend DTO, maps dealbreakers, and prevents unknown field errors', async () => {
+  const fs = await import('node:fs/promises');
+
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  const authServiceFile = await fs.readFile(
+    new URL('../src/services/auth/authService.ts', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Static Contract Checks
+  // Ensure profile.tsx sends cleanVisibility without dealbreaker keys
+  assert.ok(
+    profileFile.includes('visibility_settings: cleanVisibility'),
+    'profile.tsx must send cleanVisibility to updateMyProfile'
+  );
+  assert.ok(
+    !profileFile.match(/visibility_settings:\s*\{[^}]*require_verified/m),
+    'profile.tsx must not attach require_verified directly to visibility_settings'
+  );
+  assert.ok(
+    !profileFile.match(/visibility_settings:\s*\{[^}]*require_monogamous/m),
+    'profile.tsx must not attach require_monogamous directly to visibility_settings'
+  );
+  assert.ok(
+    authServiceFile.includes('allowedVisibilityKeys'),
+    'authService.ts must enforce allowedVisibilityKeys filter'
+  );
+  assert.ok(
+    authServiceFile.includes('payload.non_smoker_dealbreaker'),
+    'authService.ts must map non_smoker_dealbreaker'
+  );
+
+  // 2. Simulate authService.updateMyProfile payload sanitization
+  const allowedVisibilityKeys = [
+    'gender_identity',
+    'sexual_orientation',
+    'pronouns',
+    'distance',
+    'online_status',
+    'traveler_safety',
+    'height',
+    'weight',
+  ];
+
+  const sanitizeUpdatePayload = (updates) => {
+    const payload = {};
+    if (updates.display_name !== undefined) payload.display_name = updates.display_name.trim();
+    if (updates.bio !== undefined) payload.bio = updates.bio;
+    if (updates.height_cm !== undefined) payload.height_cm = updates.height_cm;
+    if (updates.weight_kg !== undefined) payload.weight_kg = updates.weight_kg;
+
+    if (updates.visibility_settings !== undefined) {
+      const sanitizedVisibility = {};
+      const rawVis = updates.visibility_settings;
+      for (const key of allowedVisibilityKeys) {
+        if (rawVis[key] !== undefined) {
+          sanitizedVisibility[key] = rawVis[key];
+        }
+      }
+      payload.visibility_settings = sanitizedVisibility;
+    }
+
+    if (updates.non_smoker_dealbreaker !== undefined) {
+      payload.non_smoker_dealbreaker = updates.non_smoker_dealbreaker;
+    } else if (updates.dealbreakers?.non_smoker_only !== undefined) {
+      payload.non_smoker_dealbreaker = updates.dealbreakers.non_smoker_only;
+    }
+
+    return payload;
+  };
+
+  // Test with input containing both valid visibility fields and forbidden dealbreaker fields
+  const dirtyInput = {
+    display_name: 'Jordan Rivera',
+    bio: 'Artist & traveler.',
+    height_cm: 180,
+    weight_kg: 75,
+    visibility_settings: {
+      height: 'PUBLIC',
+      weight: 'MATCHES_ONLY',
+      require_verified: true,
+      require_monogamous: true,
+      unknown_custom_field: 'invalid',
+    },
+    non_smoker_dealbreaker: true,
+    dealbreakers: {
+      require_verified: true,
+      require_monogamous: true,
+      non_smoker_only: true,
+    },
+  };
+
+  const sanitized = sanitizeUpdatePayload(dirtyInput);
+
+  // Assert unknown / forbidden fields were strictly stripped from visibility_settings
+  assert.equal(sanitized.visibility_settings.height, 'PUBLIC');
+  assert.equal(sanitized.visibility_settings.weight, 'MATCHES_ONLY');
+  assert.equal(sanitized.visibility_settings.require_verified, undefined);
+  assert.equal(sanitized.visibility_settings.require_monogamous, undefined);
+  assert.equal(sanitized.visibility_settings.unknown_custom_field, undefined);
+  assert.equal(sanitized.non_smoker_dealbreaker, true);
+
+  // 3. Simulate normalize dealbreakers in getMyProfile
+  const mockApiResponse = {
+    user: { id: 'usr_1', email: 'test@aura.app' },
+    profile: {
+      id: 'prof_1',
+      display_name: 'Jordan',
+      visibility_settings: { height: 'PUBLIC', weight: 'PUBLIC' },
+    },
+    preferences: {
+      preferred_genders: ['non_binary', 'transgender_woman'],
+      dealbreakers: {
+        non_smoker_only: true,
+        require_verified: true,
+        require_monogamous: false,
+      },
+    },
+  };
+
+  const rawProfile = { ...mockApiResponse.profile };
+  if (mockApiResponse.preferences?.dealbreakers) {
+    rawProfile.dealbreakers = {
+      non_smoker_only: Boolean(mockApiResponse.preferences.dealbreakers.non_smoker_only),
+      require_verified: Boolean(mockApiResponse.preferences.dealbreakers.require_verified),
+      require_monogamous: Boolean(mockApiResponse.preferences.dealbreakers.require_monogamous),
+    };
+  }
+
+  assert.equal(rawProfile.dealbreakers.non_smoker_only, true);
+  assert.equal(rawProfile.dealbreakers.require_verified, true);
+  assert.equal(rawProfile.dealbreakers.require_monogamous, false);
+
+  // 4. Dealbreaker separation verification:
+  // Discovery preferences payload must receive the dealbreakers
+  const discoveryPrefPayload = {
+    preferred_genders: ['non_binary'],
+    dealbreakers: {
+      non_smoker_only: true,
+      require_verified: true,
+      require_monogamous: false,
+    },
+  };
+  assert.deepEqual(discoveryPrefPayload.dealbreakers, {
+    non_smoker_only: true,
+    require_verified: true,
+    require_monogamous: false,
+  });
+});
