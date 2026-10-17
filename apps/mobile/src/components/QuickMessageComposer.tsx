@@ -67,6 +67,7 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
           onChangeText={setText}
           onFocus={onFocus}
           onBlur={onBlur}
+          autoFocus={false}
           placeholder={`Intro note for ${recipientName || 'Member'}...`}
           placeholderTextColor={colors.textSubtle}
           maxLength={charLimit}

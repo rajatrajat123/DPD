@@ -367,8 +367,11 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 			FROM messages
 			WHERE conversation_id = $1
 			  AND deleted_at IS NULL
-			  AND created_at < (SELECT created_at FROM messages WHERE id = $2)
-			ORDER BY created_at DESC
+			  AND (
+				created_at < (SELECT created_at FROM messages WHERE id = $2)
+				OR (created_at = (SELECT created_at FROM messages WHERE id = $2) AND id < $2)
+			  )
+			ORDER BY created_at DESC, id DESC
 			LIMIT $3
 		`
 		rows, err = r.pool.Query(ctx, query, conversationID, beforeID, limit+1)
@@ -377,7 +380,7 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 			SELECT id, conversation_id, sender_user_id, client_message_id, body, message_type, media_asset_id, delivered_at, read_at, deleted_at, created_at
 			FROM messages
 			WHERE conversation_id = $1 AND deleted_at IS NULL
-			ORDER BY created_at DESC
+			ORDER BY created_at DESC, id DESC
 			LIMIT $2
 		`
 		rows, err = r.pool.Query(ctx, query, conversationID, limit+1)

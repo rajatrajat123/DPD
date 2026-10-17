@@ -54,10 +54,10 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     : Math.max(windowHeight - 560, 140);
 
   const photoHeight = Math.min(
-    cardWidth * (isKeyboardOpen ? 0.65 : 1.34),
+    cardWidth * (isKeyboardOpen ? 0.75 : 1.34),
     isKeyboardOpen ? keyboardBudgetedHeight : normalMaxPhotoHeight,
     isKeyboardOpen ? keyboardBudgetedHeight : windowHeight * 0.52,
-    isKeyboardOpen ? 200 : 450
+    isKeyboardOpen ? 310 : 450
   );
 
   const [photoIndex, setPhotoIndex] = useState(0);

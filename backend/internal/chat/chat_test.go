@@ -537,3 +537,95 @@ func TestChat_WebSocketOriginValidation(t *testing.T) {
 	}
 }
 
+func TestChat_EqualTimestampsAndDeterministicOrdering(t *testing.T) {
+	ctx := context.Background()
+	svc, chatRepo, identRepo, _ := setupTestChatSystem(t)
+
+	userA := "usr_phoneA_01"
+	userB := "usr_phoneB_02"
+	createTestUser(t, identRepo, userA, "phoneA@example.com", "Phone A User")
+	createTestUser(t, identRepo, userB, "phoneB@example.com", "Phone B User")
+
+	match := &discovery.Match{
+		ID:         "match_phoneA_phoneB",
+		UserLowID:  userA,
+		UserHighID: userB,
+		Status:     discovery.MatchActive,
+		MatchedAt:  time.Now().UTC(),
+	}
+	chatRepo.SeedMatch(match)
+	conv, err := chatRepo.GetOrCreateConversationForMatch(ctx, match.ID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+
+	// 1. Phone A sends Message 1
+	msg1, err := svc.SendMessage(ctx, userA, conv.ID, SendMessageRequest{
+		ClientMessageID: "phoneA-msg-001",
+		Body:            "Message 1 from Phone A",
+	})
+	if err != nil {
+		t.Fatalf("failed Phone A message 1: %v", err)
+	}
+
+	// 2. Phone B replies with Message 2
+	msg2, err := svc.SendMessage(ctx, userB, conv.ID, SendMessageRequest{
+		ClientMessageID: "phoneB-msg-002",
+		Body:            "Message 2 from Phone B",
+	})
+	if err != nil {
+		t.Fatalf("failed Phone B message 2: %v", err)
+	}
+
+	// 3. Phone A replies with Message 3
+	msg3, err := svc.SendMessage(ctx, userA, conv.ID, SendMessageRequest{
+		ClientMessageID: "phoneA-msg-003",
+		Body:            "Message 3 from Phone A",
+	})
+	if err != nil {
+		t.Fatalf("failed Phone A message 3: %v", err)
+	}
+
+	// Query conversation messages
+	page, err := svc.GetMessages(ctx, conv.ID, userA, "", 50)
+	if err != nil {
+		t.Fatalf("failed to get messages: %v", err)
+	}
+
+	if len(page.Messages) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(page.Messages))
+	}
+
+	// Chronological contract: oldest first, newest last
+	if page.Messages[0].ID != msg1.ID {
+		t.Errorf("expected first message to be %s (Message 1), got %s", msg1.ID, page.Messages[0].ID)
+	}
+	if page.Messages[1].ID != msg2.ID {
+		t.Errorf("expected second message to be %s (Message 2), got %s", msg2.ID, page.Messages[1].ID)
+	}
+	if page.Messages[2].ID != msg3.ID {
+		t.Errorf("expected third message to be %s (Message 3), got %s", msg3.ID, page.Messages[2].ID)
+	}
+
+	// 4. Test pagination cursor with NextCursor
+	paged, err := svc.GetMessages(ctx, conv.ID, userA, "", 2)
+	if err != nil {
+		t.Fatalf("failed paged fetch: %v", err)
+	}
+	if len(paged.Messages) != 2 {
+		t.Fatalf("expected 2 messages in page 1, got %d", len(paged.Messages))
+	}
+	// The 2 newest messages in chronological order: msg2 and msg3
+	if paged.Messages[0].ID != msg2.ID || paged.Messages[1].ID != msg3.ID {
+		t.Errorf("expected paged messages to be msg2 and msg3, got %s and %s", paged.Messages[0].ID, paged.Messages[1].ID)
+	}
+
+	// Older page before NextCursor
+	olderPage, err := svc.GetMessages(ctx, conv.ID, userA, paged.NextCursor, 2)
+	if err != nil {
+		t.Fatalf("failed olderPage fetch: %v", err)
+	}
+	if len(olderPage.Messages) != 1 || olderPage.Messages[0].ID != msg1.ID {
+		t.Errorf("expected olderPage message to be msg1, got %v", olderPage.Messages)
+	}
+}

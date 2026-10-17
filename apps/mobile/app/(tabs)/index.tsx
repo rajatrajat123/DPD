@@ -10,9 +10,11 @@ import {
   Platform,
   Keyboard,
   TouchableWithoutFeedback,
+  Dimensions,
+  LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { DiscoveryCandidate, SwipeResponse, DiscoveryPreferences } from '../../src/types';
@@ -25,6 +27,7 @@ import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModa
 import { SwipeQuotaModal } from '../../src/components/SwipeQuotaModal';
 import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
 import { QuickMessageComposer } from '../../src/components/QuickMessageComposer';
+import { computeAndroidKeyboardCompensation } from '../../src/components/ChatRoom';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { authService } from '../../src/services/auth/authService';
 import { admobService, adBreakManager, SwipeAllowance, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
@@ -48,23 +51,137 @@ export default function DiscoveryScreen() {
   const [showSponsoredBreak, setShowSponsoredBreak] = useState(false);
   const isSwipingRef = useRef(false);
   const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [avoidancePadding, setAvoidancePadding] = useState<number>(0);
+  const avoidancePaddingRef = useRef<number>(0);
+  const idleContainerHeightRef = useRef<number>(0);
+  const currentContainerHeightRef = useRef<number>(0);
+  const isKeyboardOpenRef = useRef<boolean>(false);
+  const lastKeyboardHeightRef = useRef<number>(0);
+  const lastKeyboardScreenYRef = useRef<number>(0);
   const [cardRegionHeight, setCardRegionHeight] = useState<number>(0);
+
+  // Ensure keyboard dismisses cleanly when leaving the Discovery tab
+  useFocusEffect(
+    useCallback(() => {
+      return () => {
+        Keyboard.dismiss();
+      };
+    }, [])
+  );
+
+  const composerRef = useRef<View>(null);
+
+  const updateAndroidAvoidance = useCallback(
+    (kbHeight: number, keyboardScreenY?: number) => {
+      if (Platform.OS !== 'android') return;
+      const screenH = Dimensions.get('screen').height;
+      const idleH = idleContainerHeightRef.current;
+      const currentH = currentContainerHeightRef.current;
+      const effectiveIdleH = idleH > 0 ? idleH : screenH;
+      const effectiveCurrentH = currentH > 0 ? currentH : effectiveIdleH;
+      const nativeShrinkage = Math.max(0, effectiveIdleH - effectiveCurrentH);
+
+      // In screen coordinates: when adjustResize does not shrink the window (Phone B),
+      // the container bottom sits at screenH. The keyboard intrudes by screenH - keyboardScreenY.
+      // Passing screenH as idleHeight guarantees consistent screen-space calculation with keyboardScreenY.
+      const compensation = computeAndroidKeyboardCompensation({
+        kbHeight,
+        idleHeight: screenH,
+        currentHeight: screenH - nativeShrinkage,
+        bottomInset: insets.bottom,
+        keyboardScreenY: keyboardScreenY || (kbHeight > 0 ? screenH - kbHeight : screenH),
+      });
+      avoidancePaddingRef.current = compensation;
+      setAvoidancePadding(compensation);
+
+      setTimeout(() => {
+        try {
+          const effectiveScreenY = keyboardScreenY || (kbHeight > 0 ? screenH - kbHeight : screenH);
+          composerRef.current?.measureInWindow((ix, iy, iw, ih) => {
+            const composerBottom = iy + ih;
+            const isCovered = kbHeight > 0 && composerBottom > effectiveScreenY + 2;
+            let verdict = 'HEALTHY';
+            if (isCovered) {
+              verdict = `COVERED_BY_KEYBOARD (composer bottom ${composerBottom.toFixed(1)}px > keyboard top ${effectiveScreenY}px by ${(composerBottom - effectiveScreenY).toFixed(1)}px)`;
+            } else {
+              verdict = `HEALTHY (composer bottom ${composerBottom.toFixed(1)}px <= keyboard top ${effectiveScreenY}px by ${(effectiveScreenY - composerBottom).toFixed(1)}px)`;
+            }
+
+            console.log(
+              '[AURA_DISCOVERY_LAYOUT_AUDIT]',
+              JSON.stringify({
+                trigger: 'composer_layout_verified',
+                state: 'OPEN',
+                verdict,
+                kbHeight: Math.round(kbHeight),
+                keyboardScreenY: Math.round(effectiveScreenY),
+                composer: { y: Math.round(iy), height: Math.round(ih), bottom: Math.round(composerBottom) },
+                compensation: Math.round(compensation),
+                insets: { top: insets.top, bottom: insets.bottom },
+              })
+            );
+          });
+        } catch {
+          // non-blocking
+        }
+      }, 50);
+    },
+    [insets.bottom, insets.top]
+  );
+
+  const handleContainerLayout = (e: LayoutChangeEvent) => {
+    const height = e.nativeEvent.layout.height;
+    currentContainerHeightRef.current = height;
+    if (!isKeyboardOpenRef.current && height > 0) {
+      if (idleContainerHeightRef.current === 0 || height >= idleContainerHeightRef.current - 50) {
+        idleContainerHeightRef.current = height;
+      }
+    }
+  };
 
   // Monitor software keyboard visibility for responsive Discovery layout
   useEffect(() => {
-    const showSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => setIsKeyboardOpen(true)
-    );
-    const hideSub = Keyboard.addListener(
-      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
-      () => setIsKeyboardOpen(false)
-    );
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+
+    const showSub = Keyboard.addListener(showEvent, (e) => {
+      setIsKeyboardOpen(true);
+      isKeyboardOpenRef.current = true;
+      const kbH = e?.endCoordinates?.height || 0;
+      const kbScreenY = e?.endCoordinates?.screenY;
+      lastKeyboardHeightRef.current = kbH;
+      if (kbScreenY) {
+        lastKeyboardScreenYRef.current = kbScreenY;
+      }
+      updateAndroidAvoidance(kbH, kbScreenY);
+    });
+
+    const hideSub = Keyboard.addListener(hideEvent, () => {
+      setIsKeyboardOpen(false);
+      isKeyboardOpenRef.current = false;
+      lastKeyboardHeightRef.current = 0;
+      avoidancePaddingRef.current = 0;
+      setAvoidancePadding(0);
+
+      try {
+        console.log(
+          '[AURA_DISCOVERY_LAYOUT_AUDIT]',
+          JSON.stringify({
+            trigger: 'keyboard_hidden',
+            state: 'CLOSED',
+            compensation: 0,
+          })
+        );
+      } catch {
+        // non-blocking audit
+      }
+    });
+
     return () => {
       showSub.remove();
       hideSub.remove();
     };
-  }, []);
+  }, [updateAndroidAvoidance]);
 
   // Match Celebration Modal state
   const [matchedCandidate, setMatchedCandidate] = useState<DiscoveryCandidate | null>(null);
@@ -322,7 +439,7 @@ export default function DiscoveryScreen() {
   const activeCandidate = candidates[currentIndex];
 
   return (
-    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+    <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <KeyboardAvoidingView
         style={styles.keyboardAvoidContainer}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -404,7 +521,10 @@ export default function DiscoveryScreen() {
         )}
 
         {/* Main Deck Container */}
-        <View style={[styles.content, isKeyboardOpen && styles.contentKeyboard]}>
+        <View
+          style={[styles.content, isKeyboardOpen && styles.contentKeyboard]}
+          onLayout={handleContainerLayout}
+        >
           {isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore)) ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator color={colors.gold} size="large" />
@@ -418,7 +538,13 @@ export default function DiscoveryScreen() {
               }}
             />
           ) : activeCandidate ? (
-            <View style={[styles.deckContainer, isKeyboardOpen && styles.deckContainerKeyboard]}>
+            <View
+              style={[
+                styles.deckContainer,
+                isKeyboardOpen && styles.deckContainerKeyboard,
+                Platform.OS === 'android' && avoidancePadding > 0 && { paddingBottom: avoidancePadding },
+              ]}
+            >
               {/* Region 1: Flexible Card Area (Takes remaining space, scales down to fit) */}
               <TouchableWithoutFeedback
                 disabled={!isKeyboardOpen}
@@ -426,7 +552,7 @@ export default function DiscoveryScreen() {
                 accessible={false}
               >
                 <View
-                  style={styles.cardRegion}
+                  style={[styles.cardRegion, isKeyboardOpen && styles.cardRegionKeyboard]}
                   onLayout={(e) => {
                     const h = e.nativeEvent.layout.height;
                     if (h > 0 && Math.abs(h - cardRegionHeight) > 2) {
@@ -449,7 +575,7 @@ export default function DiscoveryScreen() {
               </TouchableWithoutFeedback>
 
               {/* Region 2: Dedicated Composer Area (Pinned right above keyboard) */}
-              <View style={[styles.composerRegion, isKeyboardOpen && styles.composerRegionKeyboard]}>
+              <View ref={composerRef} style={[styles.composerRegion, isKeyboardOpen && styles.composerRegionKeyboard]}>
                 <QuickMessageComposer
                   recipientId={activeCandidate.user_id || activeCandidate.id}
                   recipientName={activeCandidate.display_name}
@@ -717,6 +843,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
+  },
+  cardRegionKeyboard: {
+    justifyContent: 'center',
+    paddingVertical: 2,
   },
   composerRegion: {
     width: '100%',

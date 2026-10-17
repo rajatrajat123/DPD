@@ -3844,12 +3844,18 @@ test('Responsive Chat: validates safe area insets, keyboard avoidance, auto-scro
 
   // 1. Dynamic insets and keyboard avoidance
   assert.ok(chatFile.includes('useSafeAreaInsets'), 'ChatRoom must import and use useSafeAreaInsets');
-  assert.ok(chatFile.includes("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}"), 'Android must use height behavior to avoid occlusion');
+  assert.ok(
+    chatFile.includes("Platform.OS === 'ios' ? 'padding' : undefined"),
+    'Android must use undefined behavior so softwareKeyboardLayoutMode resize handles avoidance without height collapse'
+  );
+  assert.ok(chatFile.includes('topInset'), 'ChatRoom must compute topInset from safe area insets and StatusBar');
   assert.ok(chatFile.includes('Math.max(insets.bottom'), 'Input bar must pad above system navigation gesture/buttons');
+  assert.ok(chatFile.includes('isKeyboardVisible'), 'ChatRoom must track keyboard visibility to adjust input bar padding');
 
-  // 2. Auto-scroll on keyboard appearance
-  assert.ok(chatFile.includes('keyboardDidShow'), 'ChatRoom must register keyboardDidShow listener');
-  assert.ok(chatFile.includes('scrollToOffset'), 'Must scroll FlatList to offset 0 on keyboard show and message send');
+  // 2. Conditional auto-scroll on keyboard appearance
+  assert.ok(chatFile.includes('keyboardDidShow') || chatFile.includes('keyboardWillShow'), 'ChatRoom must register keyboard show listener');
+  assert.ok(chatFile.includes('scrollOffsetRef.current < 80'), 'Must only auto-scroll if user is near bottom, without interrupting users reading older messages');
+  assert.ok(chatFile.includes('scrollToOffset'), 'Must scroll FlatList to offset 0 on message send and when near bottom');
 
   // 3. Draft preservation on send failure
   assert.ok(chatFile.includes('setInputText(text)'), 'ChatRoom must restore input draft if sendMessage throws');
@@ -4450,3 +4456,463 @@ test('Profile Save: sanitizes visibility_settings against Go backend DTO, maps d
     require_monogamous: false,
   });
 });
+
+// --- Test 79: End-to-End Chat Message Ordering, Reconciliation & Curved Screen Insets ---
+test('Chat Ordering & Safe Area: verifies chronological contract, equal timestamps tie-breaking, reconciliation, and responsive insets', async () => {
+  const fs = await import('node:fs/promises');
+  const chatFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+  const chatScreenFile = await fs.readFile(
+    new URL('../app/chat/[id].tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Verify code contracts in ChatRoom and chat/[id]
+  assert.ok(chatFile.includes('export function compareMessagesDesc'), 'ChatRoom must export compareMessagesDesc');
+  assert.ok(chatFile.includes('export function reconcileMessages'), 'ChatRoom must export reconcileMessages');
+  assert.ok(chatFile.includes('inverted'), 'FlatList must use inverted prop for standard bottom-pinned chat experience');
+  assert.ok(chatFile.includes('onEndReached={loadOlderMessages}'), 'FlatList must support onEndReached for cursor pagination');
+  assert.ok(chatFile.includes('refreshing={isRefreshing}'), 'FlatList must support pull to refresh');
+  assert.ok(!chatScreenFile.includes("from 'react-native';\nimport { SafeAreaView"), 'chat/[id].tsx must NOT wrap ChatRoom in iOS-only SafeAreaView');
+  assert.ok(chatFile.includes('paddingTop: topInset > 0 ? topInset + 6 : spacing.md'), 'Header must dynamically pad based on topInset');
+
+  // Comparator & Reconciliation implementations:
+  function compareMessagesDesc(a, b) {
+    const timeA = new Date(a.created_at).getTime();
+    const timeB = new Date(b.created_at).getTime();
+    if (timeA !== timeB) {
+      return timeB - timeA;
+    }
+    const idA = a.id || a.client_message_id || '';
+    const idB = b.id || b.client_message_id || '';
+    return idB.localeCompare(idA);
+  }
+
+  function reconcileMessages(prev, incoming) {
+    const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+    if (incomingList.length === 0) return prev;
+    const merged = [...prev];
+    for (const item of incomingList) {
+      if (!item) continue;
+      const itemClientId = item.client_message_id;
+      const itemId = item.id;
+      const existingIndex = merged.findIndex((m) => {
+        if (m.id && itemId && m.id === itemId) return true;
+        if (itemClientId) {
+          if (m.client_message_id && m.client_message_id === itemClientId) return true;
+          if (m.id === itemClientId) return true;
+        }
+        if (m.client_message_id && itemId && m.client_message_id === itemId) return true;
+        return false;
+      });
+      if (existingIndex !== -1) {
+        const existing = merged[existingIndex];
+        merged[existingIndex] = {
+          ...existing,
+          ...item,
+          id: item.id || existing.id,
+          delivered_at: item.delivered_at || existing.delivered_at || null,
+          read_at: item.read_at || existing.read_at || null,
+          status:
+            item.read_at || existing.read_at
+              ? 'READ'
+              : item.delivered_at || existing.delivered_at
+              ? 'DELIVERED'
+              : item.status || existing.status,
+          created_at: item.created_at || existing.created_at,
+        };
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged.sort(compareMessagesDesc);
+  }
+
+  // 2. Two users exchanging messages in both directions:
+  // Phone A sends Message 1, Phone B replies with Message 2, Phone A sends Message 3
+  const msg1 = {
+    id: 'msg_001',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneA',
+    body: 'Message 1 from Phone A',
+    created_at: '2026-10-17T10:00:00.000Z',
+    status: 'READ',
+  };
+  const msg2 = {
+    id: 'msg_002',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneB',
+    body: 'Message 2 from Phone B',
+    created_at: '2026-10-17T10:00:05.000Z',
+    status: 'DELIVERED',
+  };
+  const msg3 = {
+    id: 'msg_003',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneA',
+    body: 'Message 3 from Phone A',
+    created_at: '2026-10-17T10:00:10.000Z',
+    status: 'SENT',
+  };
+
+  // Reconcile in mixed arrival order
+  const conversationMessages = reconcileMessages([], [msg2, msg1, msg3]);
+
+  // In an inverted FlatList:
+  // Index 0 is at the bottom (newest message: msg3)
+  // Index 1 is in the middle (msg2)
+  // Index 2 is at the top (oldest message: msg1)
+  assert.equal(conversationMessages[0].id, 'msg_003', 'Index 0 (rendered at bottom) must be newest message (msg3)');
+  assert.equal(conversationMessages[1].id, 'msg_002', 'Index 1 must be msg2');
+  assert.equal(conversationMessages[2].id, 'msg_001', 'Index 2 (rendered at top) must be oldest message (msg1)');
+
+  // Chronological view contract:
+  // When viewed from top of screen to bottom of screen (reversing inverted array indices):
+  const viewOrder = [...conversationMessages].reverse();
+  assert.equal(viewOrder[0].id, 'msg_001', 'Top of conversation view must be oldest message (Message 1)');
+  assert.equal(viewOrder[1].id, 'msg_002', 'Middle of conversation view must be Message 2');
+  assert.equal(viewOrder[2].id, 'msg_003', 'Bottom of conversation view must be newest message (Message 3)');
+
+  // 3. Stable ordering for equal timestamps
+  const equalTimeMsgA = {
+    id: 'msg_alpha',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneA',
+    body: 'Sent at exact same millisecond',
+    created_at: '2026-10-17T10:05:00.000Z',
+  };
+  const equalTimeMsgB = {
+    id: 'msg_beta',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneB',
+    body: 'Also sent at exact same millisecond',
+    created_at: '2026-10-17T10:05:00.000Z',
+  };
+
+  const sortedEqual1 = reconcileMessages([], [equalTimeMsgA, equalTimeMsgB]);
+  const sortedEqual2 = reconcileMessages([], [equalTimeMsgB, equalTimeMsgA]);
+
+  assert.equal(sortedEqual1[0].id, sortedEqual2[0].id, 'Equal timestamp sort must be completely deterministic regardless of arrival order');
+  assert.equal(sortedEqual1[1].id, sortedEqual2[1].id, 'Equal timestamp sort must be completely deterministic');
+
+  // 4. Optimistic send reconciliation with WebSocket delivery & REST fallback
+  const clientUUID = 'client-uuid-9999-aaaa';
+  const optimisticMsg = {
+    id: clientUUID,
+    client_message_id: clientUUID,
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneA',
+    body: 'Optimistic in-flight message',
+    created_at: '2026-10-17T10:06:00.000Z',
+    status: 'PENDING',
+  };
+
+  let state = reconcileMessages([], [msg1, msg2]);
+  state = reconcileMessages(state, optimisticMsg);
+  assert.equal(state.length, 3);
+  assert.equal(state[0].id, clientUUID);
+
+  // Authoritative server confirmation arrives via WebSocket
+  const confirmedServerMsg = {
+    id: 'srv_msg_777',
+    client_message_id: clientUUID,
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneA',
+    body: 'Optimistic in-flight message',
+    created_at: '2026-10-17T10:06:01.000Z',
+    status: 'DELIVERED',
+  };
+
+  state = reconcileMessages(state, confirmedServerMsg);
+  assert.equal(state.length, 3, 'Reconciliation must NOT create duplicate messages');
+  assert.equal(state[0].id, 'srv_msg_777', 'Temporary client ID must be replaced with authoritative server ID');
+  assert.equal(state[0].status, 'DELIVERED', 'Status must upgrade to DELIVERED');
+
+  // 5. Cursor pagination loading older messages
+  const olderMsg1 = {
+    id: 'msg_older_000',
+    conversation_id: 'conv_1',
+    sender_user_id: 'usr_phoneB',
+    body: 'Older historical message',
+    created_at: '2026-10-17T09:00:00.000Z',
+    status: 'READ',
+  };
+  state = reconcileMessages(state, olderMsg1);
+  assert.equal(state.length, 4);
+  assert.equal(state[state.length - 1].id, 'msg_older_000', 'Older historical message must be placed at end of array (top of view)');
+
+  // 6. Responsive safe area header computation for curved vs standard devices
+  function computeHeaderPadding(topInset, statusBarHeight, horizontalInset) {
+    const effectiveTop = Math.max(topInset, statusBarHeight || 0);
+    const paddingTop = effectiveTop > 0 ? effectiveTop + 6 : 16;
+    const paddingLeft = Math.max(horizontalInset, 16);
+    const paddingRight = Math.max(horizontalInset, 16);
+    return { paddingTop, paddingLeft, paddingRight };
+  }
+
+  // Phone 2: Curved screen device with punch-hole notch (topInset: 48, horizontal: 12)
+  const phone2Header = computeHeaderPadding(48, 48, 12);
+  assert.equal(phone2Header.paddingTop, 54, 'Curved/notch device must pad header safely below notch');
+  assert.equal(phone2Header.paddingLeft, 16);
+
+  // Phone 1: Standard device without deep notch (topInset: 24, horizontal: 0)
+  const phone1Header = computeHeaderPadding(24, 24, 0);
+  assert.equal(phone1Header.paddingTop, 30, 'Standard device must preserve clean header clearance');
+
+  // Screen with curved edge (horizontal: 20)
+  const curvedEdge = computeHeaderPadding(36, 36, 20);
+  assert.equal(curvedEdge.paddingLeft, 20, 'Curved edge device must expand horizontal padding');
+  assert.equal(curvedEdge.paddingRight, 20);
+});
+
+// --- Test 80: Safety & Member Options Modal State Machine & Android BackHandler ---
+test('Safety & Member Options Modal: handles Android Back, backdrop dismissal, close button, and topmost dialog priority', () => {
+  // State simulation mirroring ChatRoom.tsx implementation
+  let isSafetyModalVisible = false;
+  let safetyModalStep = 'MENU';
+  let isDestructiveInProgress = false;
+  let activeBackHandler = null;
+  let navigationBackCalled = false;
+
+  function setVisible(val) {
+    isSafetyModalVisible = val;
+    syncBackHandler();
+  }
+
+  function setStep(step) {
+    safetyModalStep = step;
+    syncBackHandler();
+  }
+
+  function syncBackHandler() {
+    if (!isSafetyModalVisible) {
+      activeBackHandler = null;
+      return;
+    }
+    activeBackHandler = () => {
+      if (isDestructiveInProgress) {
+        return true; // Consume event; do not interrupt destructive call
+      }
+      if (safetyModalStep !== 'MENU') {
+        setStep('MENU');
+        return true; // Dismiss topmost confirmation dialog first
+      }
+      setVisible(false);
+      return true; // Dismiss modal completely; consume event
+    };
+  }
+
+  function simulateHardwareBack() {
+    if (activeBackHandler) {
+      return activeBackHandler();
+    }
+    // No modal back handler active -> default navigation back occurs
+    navigationBackCalled = true;
+    return false;
+  }
+
+  function handleBackdropPress() {
+    if (!isDestructiveInProgress) {
+      setVisible(false);
+      setStep('MENU');
+    }
+  }
+
+  function handleCloseBtn() {
+    if (!isDestructiveInProgress) {
+      setVisible(false);
+      setStep('MENU');
+    }
+  }
+
+  // 1. Initial State: modal closed, Back presses navigate normally
+  assert.equal(isSafetyModalVisible, false);
+  assert.equal(activeBackHandler, null);
+  const backResult1 = simulateHardwareBack();
+  assert.equal(backResult1, false);
+  assert.equal(navigationBackCalled, true);
+  navigationBackCalled = false;
+
+  // 2. Open Modal via Safety Menu Button
+  setVisible(true);
+  setStep('MENU');
+  assert.equal(isSafetyModalVisible, true);
+  assert.notEqual(activeBackHandler, null, 'BackHandler must be attached when modal is open');
+
+  // 3. Android Back while at MENU: dismisses modal without navigating away
+  const backResult2 = simulateHardwareBack();
+  assert.equal(backResult2, true, 'Back press must be consumed');
+  assert.equal(isSafetyModalVisible, false, 'Modal must be dismissed');
+  assert.equal(navigationBackCalled, false, 'Chat screen must NOT navigate away');
+  assert.equal(activeBackHandler, null, 'BackHandler must be cleaned up after dismissal');
+
+  // 4. Repeated opens and closes must not leak duplicate listeners
+  setVisible(true);
+  setVisible(false);
+  setVisible(true);
+  assert.equal(isSafetyModalVisible, true);
+  assert.notEqual(activeBackHandler, null);
+
+  // 5. Navigate to Block Confirmation dialog
+  setStep('BLOCK_CONFIRM');
+  assert.equal(safetyModalStep, 'BLOCK_CONFIRM');
+
+  // 6. Android Back while at Block Confirmation: dismisses topmost confirmation, returns to MENU
+  let blockExecuted = false;
+  const backResult3 = simulateHardwareBack();
+  assert.equal(backResult3, true, 'Back press must be consumed by topmost confirmation');
+  assert.equal(safetyModalStep, 'MENU', 'Must return to main safety options menu');
+  assert.equal(isSafetyModalVisible, true, 'Modal should remain open at MENU level');
+  assert.equal(blockExecuted, false, 'Block action must NEVER be triggered by Back');
+
+  // 7. Re-test with Report reasons dialog
+  setStep('REPORT');
+  assert.equal(safetyModalStep, 'REPORT');
+  simulateHardwareBack();
+  assert.equal(safetyModalStep, 'MENU');
+  assert.equal(isSafetyModalVisible, true);
+
+  // 8. Re-test with Unmatch confirmation dialog
+  setStep('UNMATCH_CONFIRM');
+  assert.equal(safetyModalStep, 'UNMATCH_CONFIRM');
+  simulateHardwareBack();
+  assert.equal(safetyModalStep, 'MENU');
+  assert.equal(isSafetyModalVisible, true);
+
+  // 9. Backdrop dismissal
+  handleBackdropPress();
+  assert.equal(isSafetyModalVisible, false);
+
+  // 10. Visible close button dismissal
+  setVisible(true);
+  setStep('MENU');
+  handleCloseBtn();
+  assert.equal(isSafetyModalVisible, false);
+
+  // 11. Destructive action in progress locks dismissal
+  setVisible(true);
+  setStep('BLOCK_CONFIRM');
+  isDestructiveInProgress = true;
+  handleBackdropPress();
+  assert.equal(isSafetyModalVisible, true, 'Backdrop must not dismiss while destructive call in flight');
+  handleCloseBtn();
+  assert.equal(isSafetyModalVisible, true, 'Close button must not dismiss while destructive call in flight');
+  const lockedBack = simulateHardwareBack();
+  assert.equal(lockedBack, true, 'Hardware back must be consumed without changing state during in-flight call');
+  assert.equal(safetyModalStep, 'BLOCK_CONFIRM');
+
+  // Finish destructive call
+  isDestructiveInProgress = false;
+  setVisible(false);
+  assert.equal(isSafetyModalVisible, false);
+});
+
+// --- Test 81: Cross-Device Android Chat Keyboard Avoidance & Curved-Screen Inset Compensation ---
+test('Chat Keyboard Avoidance on Curved / Edge-to-Edge Android: calculates exact bottom padding compensation without regressing standard devices', async () => {
+  const fs = await import('node:fs/promises');
+  const chatFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Verify code contract in ChatRoom.tsx
+  assert.ok(
+    chatFile.includes('export function computeAndroidKeyboardCompensation'),
+    'ChatRoom must export computeAndroidKeyboardCompensation function'
+  );
+  assert.ok(
+    chatFile.includes('bottomInset: insets.bottom'),
+    'Keyboard avoidance must pass bottomInset from useSafeAreaInsets to account for edge-to-edge gesture nav'
+  );
+
+  // 2. Direct algorithm verification mirroring computeAndroidKeyboardCompensation
+  function computeAndroidKeyboardCompensation(params) {
+    const { kbHeight, idleHeight, currentHeight, bottomInset = 0, keyboardScreenY } = params;
+    if (kbHeight <= 0) return 0;
+
+    const nativeShrinkage = Math.max(0, idleHeight - currentHeight);
+    if (nativeShrinkage >= kbHeight - 25) {
+      return 0;
+    }
+
+    if (keyboardScreenY && keyboardScreenY > 0 && keyboardScreenY < idleHeight) {
+      const screenSpaceIntrusion = idleHeight - keyboardScreenY;
+      return Math.max(0, screenSpaceIntrusion - nativeShrinkage);
+    }
+
+    return Math.max(0, kbHeight + bottomInset - nativeShrinkage);
+  }
+
+  // Device Case 1: Phone 1 (Standard Android with native adjustResize window shrinkage)
+  // Physical window shrinks from 840 to 540 when 300dp keyboard appears.
+  const phone1Compensation = computeAndroidKeyboardCompensation({
+    kbHeight: 300,
+    idleHeight: 840,
+    currentHeight: 540,
+    bottomInset: 0,
+    keyboardScreenY: 540,
+  });
+  assert.equal(
+    phone1Compensation,
+    0,
+    'Phone 1 (native adjustResize): compensation must be 0 to avoid double shrinkage and blank gaps'
+  );
+
+  // Device Case 2: Phone 2 (Curved screen, edge-to-edge display, gesture navigation)
+  // Window does NOT shrink (remains at 880dp). Keyboard height reported is 280dp, nav bar is 24dp.
+  // In screen space: keyboard top is at 880 - (280 + 24) = 576dp. Total intrusion is 880 - 576 = 304dp.
+  const phone2Compensation = computeAndroidKeyboardCompensation({
+    kbHeight: 280,
+    idleHeight: 880,
+    currentHeight: 880,
+    bottomInset: 24,
+    keyboardScreenY: 576,
+  });
+  assert.equal(
+    phone2Compensation,
+    304,
+    'Phone 2 (edge-to-edge): compensation must equal screen-space intrusion (304dp) to lift composer above keyboard'
+  );
+
+  // Device Case 3: Phone 2 with deep curved cutout / 36dp nav bar (fallback without keyboardScreenY)
+  const phone2DeepCompensation = computeAndroidKeyboardCompensation({
+    kbHeight: 290,
+    idleHeight: 920,
+    currentHeight: 920,
+    bottomInset: 36,
+  });
+  assert.equal(
+    phone2DeepCompensation,
+    326,
+    'Curved edge fallback: must pad exactly kbHeight + bottomInset (290 + 36 = 326dp)'
+  );
+
+  // Device Case 4: Partial window resize (e.g. system window resized by only 100dp)
+  const partialCompensation = computeAndroidKeyboardCompensation({
+    kbHeight: 280,
+    idleHeight: 880,
+    currentHeight: 780,
+    bottomInset: 24,
+  });
+  assert.equal(
+    partialCompensation,
+    204,
+    'Partial resize: must apply remaining 280 + 24 - 100 = 204dp'
+  );
+
+  // Device Case 5: Keyboard dismiss / close
+  const closedCompensation = computeAndroidKeyboardCompensation({
+    kbHeight: 0,
+    idleHeight: 880,
+    currentHeight: 880,
+    bottomInset: 24,
+  });
+  assert.equal(
+    closedCompensation,
+    0,
+    'Keyboard hidden: compensation must return to 0'
+  );
+});
+

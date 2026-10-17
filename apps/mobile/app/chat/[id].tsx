@@ -1,11 +1,12 @@
 import React from 'react';
-import { SafeAreaView, StyleSheet } from 'react-native';
+import { View, StyleSheet } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { ChatRoom } from '../../src/components/ChatRoom';
-import { colors } from '../../src/theme';
+import { useTheme } from '../../src/theme';
 
 export default function ChatScreen() {
   const router = useRouter();
+  const { colors } = useTheme();
   const params = useLocalSearchParams<{ id: string; name?: string; recipientId?: string }>();
 
   const conversationId = params.id || '';
@@ -13,7 +14,7 @@ export default function ChatScreen() {
   const recipientId = params.recipientId || '';
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={[styles.container, { backgroundColor: colors.background }]}>
       <ChatRoom
         conversationId={conversationId}
         recipientName={recipientName}
@@ -21,13 +22,12 @@ export default function ChatScreen() {
         onBack={() => router.back()}
         onUnmatched={() => router.replace('/(tabs)/matches')}
       />
-    </SafeAreaView>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
+  container: {
     flex: 1,
-    backgroundColor: colors.background,
   },
 });
