@@ -35,6 +35,7 @@ type Repository interface {
 	AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (conversationID, matchID string, err error)
 	DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error
 	BlockMessageRequest(ctx context.Context, requestID, recipientID string) error
+	CanAccessMediaAsset(ctx context.Context, assetID, userID string) (bool, error)
 }
 
 // -----------------------------------------------------------------------------
@@ -759,6 +760,25 @@ func (r *PostgresRepository) BlockMessageRequest(ctx context.Context, requestID,
 	return tx.Commit(ctx)
 }
 
+func (r *PostgresRepository) CanAccessMediaAsset(ctx context.Context, assetID, userID string) (bool, error) {
+	query := `
+		SELECT EXISTS (
+			SELECT 1 FROM messages m
+			JOIN conversations c ON m.conversation_id = c.id
+			JOIN matches match ON match.id = c.match_id
+			WHERE m.media_asset_id = $1::uuid
+			  AND (match.user_low_id = $2::uuid OR match.user_high_id = $2::uuid)
+			  AND m.deleted_at IS NULL
+		)
+	`
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, assetID, userID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 // -----------------------------------------------------------------------------
 // MemoryRepository
 // -----------------------------------------------------------------------------
@@ -1307,6 +1327,22 @@ func (m *MemoryRepository) BlockMessageRequest(ctx context.Context, requestID, r
 	req.RespondedAt = &now
 	m.blocks[recipientID+":"+req.SenderUserID] = struct{}{}
 	return nil
+}
+
+func (m *MemoryRepository) CanAccessMediaAsset(ctx context.Context, assetID, userID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for convID, msgs := range m.messages {
+		for _, msg := range msgs {
+			if msg.MediaAssetID != nil && *msg.MediaAssetID == assetID && msg.DeletedAt == nil {
+				if conv, ok := m.convs[convID]; ok && conv.IsParticipant(userID) {
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
 }
 
 func canonicalPair(u1, u2 string) (low, high string) {

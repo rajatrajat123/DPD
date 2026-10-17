@@ -17,6 +17,8 @@ import {
   Modal,
   BackHandler,
   Dimensions,
+  Image,
+  Linking,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
@@ -24,6 +26,7 @@ import { Message, Conversation } from '../types';
 import { chatService, chatWebSocket, ConnectionStatus } from '../services/chat/chatService';
 import { discoveryService } from '../services/discovery/discoveryService';
 import { privacyManager } from '../services/security/privacyManager';
+import { mediaUploader, PickedMedia, UploadedAsset } from '../services/media/mediaUploader';
 import { useAuth } from '../context/AuthContext';
 
 export type SafetyModalStep = 'MENU' | 'REPORT' | 'BLOCK_CONFIRM' | 'UNMATCH_CONFIRM';
@@ -86,6 +89,9 @@ export function reconcileMessages(prev: Message[], incoming: Message | Message[]
         ...existing,
         ...item,
         id: item.id || existing.id,
+        media_url: item.media_url || existing.media_url,
+        media_asset_id: item.media_asset_id || existing.media_asset_id,
+        message_type: item.message_type || existing.message_type,
         delivered_at: item.delivered_at || existing.delivered_at || null,
         read_at: item.read_at || existing.read_at || null,
         status:
@@ -102,6 +108,14 @@ export function reconcileMessages(prev: Message[], incoming: Message | Message[]
   }
 
   return merged.sort(compareMessagesDesc);
+}
+
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 /**
@@ -188,15 +202,38 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [safetyModalStep, setSafetyModalStep] = useState<SafetyModalStep>('MENU');
   const [isDestructiveInProgress, setIsDestructiveInProgress] = useState(false);
 
-  // Android hardware back handling for Safety & Member Options Modal
-  // While modal is open, consumes the Back event to dismiss modal/sub-dialog without navigating away from chat
-  // When modal is closed, BackHandler listener is completely removed, preserving normal navigation
+  // Media Attachment States
+  const [pendingAttachment, setPendingAttachment] = useState<PickedMedia | null>(null);
+  const [isPickingMedia, setIsPickingMedia] = useState(false);
+  const [isAttachmentMenuVisible, setIsAttachmentMenuVisible] = useState(false);
+  const [uploadStepText, setUploadStepText] = useState<string>('');
+  const [viewingImage, setViewingImage] = useState<{ url: string } | null>(null);
+  const [viewingVideo, setViewingVideo] = useState<{ url: string; posterUrl?: string } | null>(null);
+  const [mediaAssetUrls, setMediaAssetUrls] = useState<Record<string, UploadedAsset>>({});
+  const [mediaAssetErrors, setMediaAssetErrors] = useState<Record<string, boolean>>({});
+  const [loadingAssetIds, setLoadingAssetIds] = useState<Record<string, boolean>>({});
+
+  // Android hardware back handling for Modals (Safety, Attachment Menu, Media Viewers)
+  // While any modal is open, consumes the Back event to dismiss modal without navigating away from chat
+  // When all modals are closed, BackHandler listener is completely removed, preserving normal navigation
   useEffect(() => {
-    if (!isSafetyModalVisible) return;
+    if (!isSafetyModalVisible && !viewingImage && !viewingVideo && !isAttachmentMenuVisible) return;
 
     const onHardwareBack = () => {
       if (isDestructiveInProgress) {
         return true; // Lock back during destructive in-flight network call
+      }
+      if (viewingImage) {
+        setViewingImage(null);
+        return true;
+      }
+      if (viewingVideo) {
+        setViewingVideo(null);
+        return true;
+      }
+      if (isAttachmentMenuVisible) {
+        setIsAttachmentMenuVisible(false);
+        return true;
       }
       if (safetyModalStep !== 'MENU') {
         setSafetyModalStep('MENU');
@@ -211,7 +248,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     return () => {
       backSub.remove();
     };
-  }, [isSafetyModalVisible, safetyModalStep, isDestructiveInProgress]);
+  }, [isSafetyModalVisible, safetyModalStep, isDestructiveInProgress, viewingImage, viewingVideo, isAttachmentMenuVisible]);
 
   const flatListRef = useRef<FlatList>(null);
   const scrollOffsetRef = useRef<number>(0);
@@ -531,6 +568,135 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     };
   }, [conversationId, recipientId, user?.id, loadMessages]);
 
+  const retryLoadMediaAsset = useCallback((assetId: string) => {
+    setMediaAssetErrors((prev) => {
+      const next = { ...prev };
+      delete next[assetId];
+      return next;
+    });
+    mediaUploader.clearChatAssetCache(assetId);
+    setLoadingAssetIds((prev) => ({ ...prev, [assetId]: true }));
+    mediaUploader
+      .getChatMediaAsset(assetId)
+      .then((asset) => {
+        if (asset) {
+          setMediaAssetUrls((prev) => ({ ...prev, [assetId]: asset }));
+        } else {
+          setMediaAssetErrors((prev) => ({ ...prev, [assetId]: true }));
+        }
+      })
+      .catch(() => {
+        setMediaAssetErrors((prev) => ({ ...prev, [assetId]: true }));
+      })
+      .finally(() => {
+        setLoadingAssetIds((prev) => ({ ...prev, [assetId]: false }));
+      });
+  }, []);
+
+  // Load media asset URLs for messages that have media_asset_id
+  useEffect(() => {
+    messages.forEach((msg) => {
+      const assetId = msg.media_asset_id;
+      if (assetId && !mediaAssetUrls[assetId] && !mediaAssetErrors[assetId] && !loadingAssetIds[assetId]) {
+        setLoadingAssetIds((prev) => ({ ...prev, [assetId]: true }));
+        mediaUploader
+          .getChatMediaAsset(assetId)
+          .then((asset) => {
+            if (asset) {
+              setMediaAssetUrls((prev) => ({ ...prev, [assetId]: asset }));
+            } else {
+              setMediaAssetErrors((prev) => ({ ...prev, [assetId]: true }));
+            }
+          })
+          .catch(() => {
+            setMediaAssetErrors((prev) => ({ ...prev, [assetId]: true }));
+          })
+          .finally(() => {
+            setLoadingAssetIds((prev) => ({ ...prev, [assetId]: false }));
+          });
+      }
+    });
+  }, [messages, mediaAssetUrls, mediaAssetErrors, loadingAssetIds]);
+
+  const handlePickPhoto = async () => {
+    setIsAttachmentMenuVisible(false);
+    setIsPickingMedia(true);
+    try {
+      const picked = await mediaUploader.pickChatPhoto();
+      if (picked) {
+        setPendingAttachment(picked);
+      }
+    } catch (err: any) {
+      if (err?.code === 'PERMISSION_DENIED') {
+        Alert.alert(
+          'Photo Library Access Required',
+          'Aura needs permission to access your photos so you can share them in chat.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Settings', onPress: () => Linking.openSettings() },
+          ]
+        );
+      } else if (err?.code === 'FILE_TOO_LARGE') {
+        Alert.alert('File Too Large', err.message || 'Photo exceeds the 15MB limit.');
+      } else {
+        Alert.alert('Selection Error', err?.message || 'Could not select photo.');
+      }
+    } finally {
+      setIsPickingMedia(false);
+    }
+  };
+
+  const handlePickVideo = async () => {
+    setIsAttachmentMenuVisible(false);
+    setIsPickingMedia(true);
+    try {
+      const picked = await mediaUploader.pickChatVideo();
+      if (picked) {
+        setPendingAttachment(picked);
+      }
+    } catch (err: any) {
+      if (err?.code === 'PERMISSION_DENIED') {
+        Alert.alert(
+          'Media Library Access Required',
+          'Aura needs permission to access your videos so you can share them in chat.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            { text: 'Settings', onPress: () => Linking.openSettings() },
+          ]
+        );
+      } else if (err?.code === 'VIDEO_TOO_LONG') {
+        Alert.alert('Video Too Long', err.message || 'Video duration exceeds maximum allowed length of 60 seconds.');
+      } else if (err?.code === 'FILE_TOO_LARGE') {
+        Alert.alert('File Too Large', err.message || 'Video exceeds the maximum 100MB limit.');
+      } else {
+        Alert.alert('Selection Error', err?.message || 'Could not select video.');
+      }
+    } finally {
+      setIsPickingMedia(false);
+    }
+  };
+
+  const handleCancelAttachment = () => {
+    setPendingAttachment(null);
+    setUploadStepText('');
+  };
+
+  const handleRetryMessage = (failedMsg: Message) => {
+    if (failedMsg.media_url) {
+      setPendingAttachment({
+        uri: failedMsg.media_url,
+        width: 720,
+        height: 1280,
+        mimeType: failedMsg.message_type === 'VIDEO' ? 'video/mp4' : 'image/jpeg',
+        mediaType: failedMsg.message_type === 'VIDEO' ? 'VIDEO' : 'IMAGE',
+      });
+    }
+    if (failedMsg.body) {
+      setInputText(failedMsg.body);
+    }
+    setMessages((prev) => prev.filter((m) => m.id !== failedMsg.id && m.client_message_id !== failedMsg.client_message_id));
+  };
+
   const handleInputChange = (text: string) => {
     setInputText(text);
 
@@ -544,21 +710,97 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   const handleSend = async () => {
     const text = inputText.trim();
-    if (!text || isSending) return;
+    if ((!text && !pendingAttachment) || isSending) return;
 
+    const attachmentToSend = pendingAttachment;
     setIsSending(true);
     setInputText('');
+    setPendingAttachment(null);
+    setUploadStepText('');
     chatWebSocket.sendTyping(conversationId, false);
 
-    try {
-      const sentMsg = await chatService.sendMessage(conversationId, text, user?.id || 'me');
-      setMessages((prev) => reconcileMessages(prev, sentMsg));
+    const clientMsgId = generateUUID();
+    const msgType = attachmentToSend ? (attachmentToSend.mediaType || 'IMAGE') : 'TEXT';
+
+    if (attachmentToSend) {
+      // Optimistic message with preview uri and PENDING status
+      const optimisticMsg: Message = {
+        id: clientMsgId,
+        client_message_id: clientMsgId,
+        conversation_id: conversationId,
+        sender_user_id: user?.id || 'me',
+        sender_id: user?.id || 'me',
+        body: text,
+        content: text,
+        message_type: msgType,
+        media_url: attachmentToSend.uri,
+        status: 'PENDING',
+        created_at: new Date().toISOString(),
+      };
+      setMessages((prev) => reconcileMessages(prev, optimisticMsg));
       flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-    } catch {
-      setInputText(text); // Preserve draft when sending fails
-      Alert.alert('Message Failed', 'Could not send message. Please check your connection.');
-    } finally {
-      setIsSending(false);
+
+      try {
+        setUploadStepText('Uploading...');
+        const uploaded = await mediaUploader.uploadChatAttachment(attachmentToSend, (step) => {
+          if (step === 'STRIPPING_EXIF') setUploadStepText('Optimizing photo...');
+          else if (step === 'UPLOADING') setUploadStepText('Uploading...');
+          else if (step === 'PROCESSING') setUploadStepText('Processing...');
+        });
+
+        // Send chat message with mediaAssetId
+        const sentMsg = await chatService.sendMessage(
+          conversationId,
+          text,
+          user?.id || 'me',
+          uploaded.media_id,
+          msgType,
+          clientMsgId
+        );
+
+        setMediaAssetUrls((prev) => ({
+          ...prev,
+          [uploaded.media_id]: {
+            ...uploaded,
+            card_url: uploaded.card_url || attachmentToSend.uri,
+            full_url: uploaded.full_url || attachmentToSend.uri,
+            poster_url: uploaded.poster_url || attachmentToSend.uri,
+          },
+        }));
+
+        setMessages((prev) => reconcileMessages(prev, {
+          ...sentMsg,
+          media_url: uploaded.card_url || uploaded.full_url || attachmentToSend.uri,
+        }));
+      } catch {
+        // Mark optimistic message as failed with retry action
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.client_message_id === clientMsgId
+              ? { ...m, status: 'FAILED' }
+              : m
+          )
+        );
+        Alert.alert(
+          'Upload Failed',
+          'Could not upload attachment. Tap the failed message to retry or check your connection.'
+        );
+      } finally {
+        setIsSending(false);
+        setUploadStepText('');
+      }
+    } else {
+      // Plain text message
+      try {
+        const sentMsg = await chatService.sendMessage(conversationId, text, user?.id || 'me');
+        setMessages((prev) => reconcileMessages(prev, sentMsg));
+        flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+      } catch {
+        setInputText(text); // Preserve draft when sending fails
+        Alert.alert('Message Failed', 'Could not send message. Please check your connection.');
+      } finally {
+        setIsSending(false);
+      }
     }
   };
 
@@ -648,6 +890,17 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const textContent = item.body || item.content || '';
     const isRead = Boolean(item.read_at) || item.status === 'READ';
     const isDelivered = Boolean(item.delivered_at) || item.status === 'DELIVERED';
+    const isFailed = item.status === 'FAILED';
+    const isPending = item.status === 'PENDING';
+
+    const isImage = item.message_type === 'IMAGE' || (Boolean(item.media_asset_id) && item.message_type !== 'VIDEO');
+    const isVideo = item.message_type === 'VIDEO';
+
+    const assetInfo = item.media_asset_id ? mediaAssetUrls[item.media_asset_id] : null;
+    const hasMediaError = Boolean(item.media_asset_id && mediaAssetErrors[item.media_asset_id]);
+    const mediaUrl = item.media_url || assetInfo?.card_url || assetInfo?.full_url || assetInfo?.thumb_url;
+    const posterUrl = assetInfo?.poster_url || item.media_url || assetInfo?.thumb_url;
+    const videoUrl = assetInfo?.video_url || item.media_url;
 
     return (
       <View style={[styles.msgRow, isMe ? styles.msgRowMe : styles.msgRowThem]}>
@@ -659,12 +912,123 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               : [styles.msgBubbleThem, { backgroundColor: colors.card, borderColor: colors.border }],
           ]}
         >
-          <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem, { color: colors.text }]}>{textContent}</Text>
+          {/* Photo Attachment Bubble */}
+          {isImage && (
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => {
+                if (hasMediaError && item.media_asset_id) {
+                  retryLoadMediaAsset(item.media_asset_id);
+                } else if (mediaUrl) {
+                  setViewingImage({ url: mediaUrl });
+                }
+              }}
+              accessibilityRole="button"
+              accessibilityLabel={hasMediaError ? 'Retry loading photo' : 'View full photo'}
+              testID="chat-photo-bubble"
+              style={styles.msgMediaThumbWrap}
+            >
+              {hasMediaError ? (
+                <View style={[styles.msgMediaImage, styles.mediaErrorBox]}>
+                  <Text style={styles.mediaErrorIcon}>⚠️</Text>
+                  <Text style={styles.mediaErrorText}>Could not load photo</Text>
+                  <TouchableOpacity
+                    style={styles.mediaRetryBtn}
+                    onPress={() => item.media_asset_id && retryLoadMediaAsset(item.media_asset_id)}
+                    testID="chat-photo-retry-btn"
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading photo"
+                  >
+                    <Text style={styles.mediaRetryLink}>Tap to retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : mediaUrl ? (
+                <Image
+                  source={{ uri: mediaUrl }}
+                  style={styles.msgMediaImage}
+                  resizeMode="cover"
+                  onError={() => {
+                    if (item.media_asset_id) {
+                      setMediaAssetErrors((prev) => ({ ...prev, [item.media_asset_id!]: true }));
+                    }
+                  }}
+                />
+              ) : (
+                <View style={[styles.msgMediaImage, styles.mediaPlaceholderBox]}>
+                  <ActivityIndicator color={colors.gold} size="small" />
+                </View>
+              )}
+              {isPending && (
+                <View style={styles.msgPendingOverlay}>
+                  <ActivityIndicator color="#ffffff" size="small" />
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {/* Video Attachment Bubble */}
+          {isVideo && (
+            <TouchableOpacity
+              activeOpacity={0.9}
+              onPress={() => videoUrl && setViewingVideo({ url: videoUrl, posterUrl })}
+              accessibilityRole="button"
+              accessibilityLabel="Play video"
+              testID="chat-video-bubble"
+              style={styles.msgMediaThumbWrap}
+            >
+              {posterUrl ? (
+                <Image
+                  source={{ uri: posterUrl }}
+                  style={styles.msgMediaVideoPoster}
+                  resizeMode="cover"
+                />
+              ) : (
+                <View style={[styles.msgMediaVideoPoster, styles.mediaPlaceholderBox]}>
+                  <Text style={{ fontSize: 32 }}>🎥</Text>
+                </View>
+              )}
+              <View style={styles.msgVideoPlayOverlay}>
+                <View style={styles.msgVideoPlayCircle}>
+                  <Text style={styles.msgVideoPlayTriangle}>▶</Text>
+                </View>
+              </View>
+              <View style={styles.msgVideoDurationPill}>
+                <Text style={styles.msgVideoDurationText}>▶ Video</Text>
+              </View>
+              {isPending && (
+                <View style={styles.msgPendingOverlay}>
+                  <ActivityIndicator color="#ffffff" size="small" />
+                </View>
+              )}
+            </TouchableOpacity>
+          )}
+
+          {/* Text / Caption */}
+          {Boolean(textContent) && (
+            <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem, { color: colors.text }]}>
+              {textContent}
+            </Text>
+          )}
+
+          {/* Failed / Retry row */}
+          {isFailed && (
+            <TouchableOpacity
+              style={styles.retryBubbleRow}
+              onPress={() => handleRetryMessage(item)}
+              accessibilityRole="button"
+              accessibilityLabel="Retry failed upload"
+              testID="retry-upload-btn"
+            >
+              <Text style={styles.retryBubbleText}>⚠️ Failed to send • Tap to retry</Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Metadata Row */}
           <View style={styles.msgMetaRow}>
             <Text style={[styles.msgTime, { color: colors.textSubtle }]}>{timeFormatted}</Text>
             {isMe && (
               <Text style={isRead ? [styles.readReceiptGold, { color: colors.gold }] : [styles.readReceipt, { color: colors.textSubtle }]}>
-                {isRead ? ' ✓✓' : isDelivered ? ' ✓✓' : ' ✓'}
+                {isFailed ? ' ⚠️' : isPending ? ' 🕒' : isRead ? ' ✓✓' : isDelivered ? ' ✓✓' : ' ✓'}
               </Text>
             )}
           </View>
@@ -793,6 +1157,53 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         </View>
       )}
 
+      {/* Pending attachment preview tray */}
+      {pendingAttachment && (
+        <View
+          style={[
+            styles.attachmentPreviewTray,
+            {
+              backgroundColor: colors.card,
+              borderTopColor: colors.border,
+            },
+          ]}
+          testID="chat-attachment-preview"
+        >
+          <View style={styles.attachPreviewThumbWrap}>
+            <Image
+              source={{ uri: pendingAttachment.uri }}
+              style={styles.attachPreviewThumb}
+              resizeMode="cover"
+            />
+            {pendingAttachment.mediaType === 'VIDEO' && (
+              <View style={styles.attachPreviewVideoBadge}>
+                <Text style={styles.attachPreviewVideoBadgeText}>▶</Text>
+              </View>
+            )}
+          </View>
+          <View style={styles.attachPreviewInfo}>
+            <Text style={[styles.attachPreviewTitle, { color: colors.text }]} numberOfLines={1}>
+              {pendingAttachment.mediaType === 'VIDEO' ? 'Video Attachment' : 'Photo Attachment'}
+            </Text>
+            <Text style={[styles.attachPreviewStatus, { color: uploadStepText ? colors.gold : colors.textMuted }]}>
+              {uploadStepText ||
+                (pendingAttachment.mediaType === 'VIDEO' && pendingAttachment.durationMs
+                  ? `${Math.round(pendingAttachment.durationMs / 1000)}s`
+                  : 'Ready to send')}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[styles.attachPreviewCloseBtn, { backgroundColor: colors.backgroundElevated }]}
+            onPress={handleCancelAttachment}
+            accessibilityRole="button"
+            accessibilityLabel="Cancel attachment"
+            testID="chat-cancel-attachment-btn"
+          >
+            <Text style={[styles.attachPreviewCloseText, { color: colors.textMuted }]}>✕</Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* Input bar */}
       <View
         ref={inputBarRef}
@@ -814,6 +1225,21 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           },
         ]}
       >
+        <TouchableOpacity
+          style={[styles.attachButton, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+          onPress={() => setIsAttachmentMenuVisible(true)}
+          accessibilityRole="button"
+          accessibilityLabel="Add attachment"
+          testID="chat-attach-btn"
+          disabled={isSending || isPickingMedia}
+        >
+          {isPickingMedia ? (
+            <ActivityIndicator color={colors.gold} size="small" />
+          ) : (
+            <Text style={[styles.attachButtonText, { color: colors.gold }]}>📎</Text>
+          )}
+        </TouchableOpacity>
+
         <TextInput
           style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
           value={inputText}
@@ -827,10 +1253,10 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           style={[
             styles.sendButton,
             { backgroundColor: colors.gold },
-            (!inputText.trim() || isSending) ? [styles.sendButtonDisabled, { backgroundColor: colors.cardMuted }] : null,
+            (!inputText.trim() && !pendingAttachment) || isSending ? [styles.sendButtonDisabled, { backgroundColor: colors.cardMuted }] : null,
           ]}
           onPress={handleSend}
-          disabled={!inputText.trim() || isSending}
+          disabled={(!inputText.trim() && !pendingAttachment) || isSending}
           activeOpacity={0.8}
           accessibilityRole="button"
           accessibilityLabel="Send Message"
@@ -1082,6 +1508,182 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               </View>
             )}
           </View>
+        </View>
+      </Modal>
+
+      {/* Attachment Options Modal */}
+      <Modal
+        visible={isAttachmentMenuVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setIsAttachmentMenuVisible(false)}
+        statusBarTranslucent
+        testID="chat-attachment-menu"
+      >
+        <View style={styles.safetyBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setIsAttachmentMenuVisible(false)}
+            accessibilityLabel="Dismiss attachment options"
+            accessibilityRole="button"
+          />
+          <View
+            style={[
+              styles.safetyCard,
+              {
+                backgroundColor: colors.card,
+                borderColor: colors.border,
+              },
+            ]}
+          >
+            <View style={[styles.safetyHeader, { borderBottomColor: colors.border }]}>
+              <View style={styles.safetyHeaderTitleCol}>
+                <Text style={[styles.safetyTitle, { color: colors.text }]}>Share Media</Text>
+                <Text style={[styles.safetySubtitle, { color: colors.textMuted }]}>
+                  Private attachment for {recipientName}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.safetyCloseBtn, { backgroundColor: colors.backgroundElevated }]}
+                onPress={() => setIsAttachmentMenuVisible(false)}
+                accessibilityLabel="Close media menu"
+                accessibilityRole="button"
+              >
+                <Text style={[styles.safetyCloseText, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.safetyBody}>
+              <TouchableOpacity
+                style={[styles.safetyOptionRow, { borderBottomColor: colors.border }]}
+                onPress={handlePickPhoto}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Share Photo"
+                testID="chat-attach-photo-btn"
+              >
+                <Text style={styles.safetyOptionIcon}>🖼️</Text>
+                <View style={styles.safetyOptionTextWrap}>
+                  <Text style={[styles.safetyOptionTitle, { color: colors.text }]}>Share Photo</Text>
+                  <Text style={[styles.safetyOptionDesc, { color: colors.textSubtle }]}>
+                    Select photo from device library (max 15MB)
+                  </Text>
+                </View>
+                <Text style={[styles.safetyOptionChevron, { color: colors.gold }]}>›</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.safetyOptionRow, { borderBottomColor: colors.border }]}
+                onPress={handlePickVideo}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Share Video"
+                testID="chat-attach-video-btn"
+              >
+                <Text style={styles.safetyOptionIcon}>🎥</Text>
+                <View style={styles.safetyOptionTextWrap}>
+                  <Text style={[styles.safetyOptionTitle, { color: colors.text }]}>Share Video</Text>
+                  <Text style={[styles.safetyOptionDesc, { color: colors.textSubtle }]}>
+                    Select video from device library (max 60s, 100MB)
+                  </Text>
+                </View>
+                <Text style={[styles.safetyOptionChevron, { color: colors.gold }]}>›</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.safetyCancelBtn,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                ]}
+                onPress={() => setIsAttachmentMenuVisible(false)}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.safetyCancelBtnText, { color: colors.text }]}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* Fullscreen Photo Viewer Modal */}
+      <Modal
+        visible={Boolean(viewingImage)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setViewingImage(null)}
+        statusBarTranslucent
+        testID="chat-image-viewer-modal"
+      >
+        <View style={styles.mediaViewerBackdrop}>
+          <TouchableOpacity
+            style={styles.mediaViewerCloseBtn}
+            onPress={() => setViewingImage(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Close image viewer"
+            testID="chat-image-viewer-close-btn"
+          >
+            <Text style={styles.mediaViewerCloseText}>✕</Text>
+          </TouchableOpacity>
+          {viewingImage && (
+            <Image
+              source={{ uri: viewingImage.url }}
+              style={styles.mediaViewerFullImage}
+              resizeMode="contain"
+            />
+          )}
+        </View>
+      </Modal>
+
+      {/* Video Player / Viewer Modal */}
+      <Modal
+        visible={Boolean(viewingVideo)}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setViewingVideo(null)}
+        statusBarTranslucent
+        testID="chat-video-viewer-modal"
+      >
+        <View style={styles.mediaViewerBackdrop}>
+          <TouchableOpacity
+            style={styles.mediaViewerCloseBtn}
+            onPress={() => setViewingVideo(null)}
+            accessibilityRole="button"
+            accessibilityLabel="Close video viewer"
+            testID="chat-video-viewer-close-btn"
+          >
+            <Text style={styles.mediaViewerCloseText}>✕</Text>
+          </TouchableOpacity>
+          {viewingVideo && (
+            <View style={styles.videoPlayerContainer}>
+              {viewingVideo.posterUrl ? (
+                <Image
+                  source={{ uri: viewingVideo.posterUrl }}
+                  style={styles.videoPlayerPoster}
+                  resizeMode="contain"
+                />
+              ) : null}
+              <View style={styles.videoPlayerControls}>
+                <TouchableOpacity
+                  style={[styles.videoPlayExternalBtn, { backgroundColor: colors.gold }]}
+                  onPress={() => {
+                    if (viewingVideo.url) {
+                      Linking.openURL(viewingVideo.url).catch(() => {
+                        Alert.alert('Unable to Play Video', 'Could not open video player.');
+                      });
+                    }
+                  }}
+                  accessibilityRole="button"
+                  accessibilityLabel="Play video externally"
+                  testID="chat-video-play-external-btn"
+                >
+                  <Text style={[styles.videoPlayExternalBtnText, { color: colors.textInverse }]}>
+                    ▶ Play Full Video
+                  </Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
         </View>
       </Modal>
     </KeyboardAvoidingView>
@@ -1385,6 +1987,252 @@ const styles = StyleSheet.create({
   safetyDestructiveBtnText: {
     ...typography.button,
     fontSize: 14,
+    fontWeight: '700',
+  },
+  attachButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+    borderWidth: 1,
+  },
+  attachButtonText: {
+    fontSize: 18,
+  },
+  attachmentPreviewTray: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    borderTopWidth: 1,
+  },
+  attachPreviewThumbWrap: {
+    position: 'relative',
+    width: 48,
+    height: 48,
+    borderRadius: borderRadius.sm,
+    overflow: 'hidden',
+    backgroundColor: colors.backgroundElevated,
+  },
+  attachPreviewThumb: {
+    width: 48,
+    height: 48,
+  },
+  attachPreviewVideoBadge: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    paddingVertical: 1,
+  },
+  attachPreviewVideoBadgeText: {
+    color: '#ffffff',
+    fontSize: 8,
+    fontWeight: '700',
+  },
+  attachPreviewInfo: {
+    flex: 1,
+    marginLeft: spacing.sm,
+    justifyContent: 'center',
+  },
+  attachPreviewTitle: {
+    ...typography.caption,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  attachPreviewStatus: {
+    ...typography.caption,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  attachPreviewCloseBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginLeft: spacing.sm,
+  },
+  attachPreviewCloseText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  msgMediaThumbWrap: {
+    position: 'relative',
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+    marginBottom: 4,
+    backgroundColor: colors.backgroundElevated,
+    minWidth: 160,
+    maxWidth: 240,
+    aspectRatio: 4 / 3,
+  },
+  msgMediaImage: {
+    width: '100%',
+    height: '100%',
+  },
+  msgMediaVideoPoster: {
+    width: '100%',
+    height: '100%',
+  },
+  mediaPlaceholderBox: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: colors.backgroundElevated,
+  },
+  mediaErrorBox: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(239, 68, 68, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(239, 68, 68, 0.3)',
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+  },
+  mediaErrorIcon: {
+    fontSize: 22,
+    marginBottom: 2,
+  },
+  mediaErrorText: {
+    ...typography.caption,
+    color: colors.ruby,
+    fontSize: 11,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  mediaRetryBtn: {
+    marginTop: 6,
+    paddingVertical: 3,
+    paddingHorizontal: 8,
+    borderRadius: 4,
+    backgroundColor: 'rgba(239, 68, 68, 0.2)',
+  },
+  mediaRetryLink: {
+    ...typography.caption,
+    color: colors.ruby,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  msgVideoPlayOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+  },
+  msgVideoPlayCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#ffffff',
+  },
+  msgVideoPlayTriangle: {
+    color: '#ffffff',
+    fontSize: 18,
+    marginLeft: 3,
+  },
+  msgVideoDurationPill: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+  },
+  msgVideoDurationText: {
+    color: '#ffffff',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  msgPendingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  retryBubbleRow: {
+    paddingVertical: 4,
+    paddingHorizontal: 2,
+  },
+  retryBubbleText: {
+    ...typography.caption,
+    color: colors.ruby,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  mediaViewerBackdrop: {
+    flex: 1,
+    backgroundColor: '#000000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  mediaViewerCloseBtn: {
+    position: 'absolute',
+    top: 44,
+    right: 20,
+    zIndex: 10,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 255, 255, 0.25)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  mediaViewerCloseText: {
+    color: '#ffffff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  mediaViewerFullImage: {
+    width: '100%',
+    height: '100%',
+  },
+  videoPlayerContainer: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  videoPlayerPoster: {
+    width: '100%',
+    height: '70%',
+  },
+  videoPlayerControls: {
+    position: 'absolute',
+    bottom: 60,
+    paddingHorizontal: spacing.xl,
+    width: '100%',
+  },
+  videoPlayExternalBtn: {
+    height: 48,
+    borderRadius: borderRadius.md,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 4,
+  },
+  videoPlayExternalBtnText: {
+    ...typography.button,
+    fontSize: 15,
     fontWeight: '700',
   },
 });

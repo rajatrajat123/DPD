@@ -207,7 +207,7 @@ export interface Message {
   recipient_id?: string;
   content?: string;
   media_url?: string;
-  status?: 'PENDING' | 'SENT' | 'DELIVERED' | 'READ';
+  status?: 'PENDING' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED';
 }
 
 export interface AuthSession {

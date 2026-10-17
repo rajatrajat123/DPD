@@ -69,6 +69,9 @@ func (s *Service) SendMessage(ctx context.Context, senderUserID string, conversa
 	if err != nil {
 		return nil, err
 	}
+	if req.MediaAssetID != nil && strings.TrimSpace(req.MessageType) == "" {
+		msgType = MessageTypeImage
+	}
 
 	// 2. Validate conversation membership & active match eligibility
 	conv, err := s.repo.GetConversation(ctx, conversationID)

@@ -290,7 +290,26 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		}
 		switch r.Method {
 		case http.MethodGet:
-			mediaHandler.GetAsset(w, r)
+			// Extract and attach authenticated user context when token is present
+			authHeader := r.Header.Get("Authorization")
+			var tokenStr string
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				tokenStr = strings.TrimPrefix(authHeader, "Bearer ")
+			} else if cookie, err := r.Cookie("aura_session"); err == nil && cookie.Value != "" {
+				tokenStr = cookie.Value
+			}
+			req := r
+			if tokenStr != "" {
+				if claims, err := identity.ParseAndVerifyAccessToken(cfg.JWTSigningSecret, tokenStr); err == nil && claims != nil {
+					authUser := &identity.AuthUser{
+						ID:    claims.Subject,
+						Email: claims.Email,
+						Role:  claims.Role,
+					}
+					req = r.WithContext(identity.ContextWithAuthUser(r.Context(), authUser))
+				}
+			}
+			mediaHandler.GetAsset(w, req)
 		case http.MethodDelete:
 			memberMw(http.HandlerFunc(mediaHandler.DeleteAsset)).ServeHTTP(w, r)
 		default:
@@ -371,6 +390,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	} else {
 		chatRepo = chat.NewMemoryRepository(identityRepo)
 	}
+	mediaSvc.SetAttachmentAccessChecker(chatRepo.CanAccessMediaAsset)
 	chatNotif := chat.NewNotificationDispatcher(chatRepo, logger)
 	chatSvc := chat.NewService(chatRepo, chatHub, chatNotif, identityRepo, cfg.JWTSigningSecret, logger)
 	chatHandler := chat.NewHandler(chatSvc, cfg.JWTSigningSecret)

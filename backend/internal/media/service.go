@@ -27,6 +27,7 @@ type PurgeSummary struct {
 }
 
 type ProfileStatusChecker func(ctx context.Context, userID string) (isActive bool, err error)
+type AttachmentAccessChecker func(ctx context.Context, assetID, userID string) (bool, error)
 
 type ServiceOption func(*Service)
 
@@ -48,6 +49,7 @@ type Service struct {
 	processor          *Processor
 	logger             *slog.Logger
 	profileChecker     ProfileStatusChecker
+	attachmentChecker  AttachmentAccessChecker
 	retentionInterval  time.Duration
 	retentionBatchSize int
 	retentionRunning   atomic.Bool
@@ -61,6 +63,10 @@ type Service struct {
 
 func (s *Service) SetProfileStatusChecker(checker ProfileStatusChecker) {
 	s.profileChecker = checker
+}
+
+func (s *Service) SetAttachmentAccessChecker(checker AttachmentAccessChecker) {
+	s.attachmentChecker = checker
 }
 
 func NewService(repo Repository, storage StorageEngine, processor *Processor, logger *slog.Logger, opts ...ServiceOption) *Service {
@@ -464,6 +470,18 @@ func (s *Service) GetAssetWithDerivatives(ctx context.Context, assetID, requeste
 	if asset.OwnerUserID != requesterUserID {
 		if asset.Status != StatusReady || asset.ModerationVerdict == nil || *asset.ModerationVerdict != VerdictApproved {
 			return nil, ErrUnauthorizedMedia
+		}
+		// If asset is a private chat attachment, enforce conversation participant authorization
+		if asset.Purpose == PurposeChatAttachment {
+			if requesterUserID == "" {
+				return nil, ErrUnauthorizedMedia
+			}
+			if s.attachmentChecker != nil {
+				allowed, err := s.attachmentChecker(ctx, asset.ID, requesterUserID)
+				if err != nil || !allowed {
+					return nil, ErrUnauthorizedMedia
+				}
+			}
 		}
 	}
 

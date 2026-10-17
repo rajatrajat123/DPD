@@ -61,7 +61,7 @@ export function normalizeMessage(raw: any): Message {
     client_message_id: raw.client_message_id,
     body: textBody,
     content: textBody,
-    message_type: raw.message_type || 'TEXT',
+    message_type: raw.message_type || (raw.media_asset_id ? 'IMAGE' : 'TEXT'),
     media_asset_id: raw.media_asset_id,
     media_url: raw.media_url,
     delivered_at: raw.delivered_at || null,
@@ -204,17 +204,24 @@ class ChatWebSocketClient {
     this.setStatus('DISCONNECTED');
   }
 
-  public sendMessage(conversationId: string, content: string, clientMessageId?: string, mediaAssetId?: string): boolean {
+  public sendMessage(
+    conversationId: string,
+    content: string,
+    clientMessageId?: string,
+    mediaAssetId?: string,
+    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO'
+  ): boolean {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return false; // Fall back to REST
     }
 
+    const resolvedType = messageType || (mediaAssetId ? 'IMAGE' : 'TEXT');
     const frame = {
       action: 'message.send',
       conversation_id: conversationId,
       client_message_id: clientMessageId || generateUUID(),
       body: content,
-      message_type: 'TEXT',
+      message_type: resolvedType,
       media_asset_id: mediaAssetId,
     };
 
@@ -386,9 +393,17 @@ export const chatService = {
   /**
    * Sends a message via WebSocket, with automatic transparent REST fallback
    */
-  async sendMessage(conversationId: string, content: string, currentUserId = 'me', mediaAssetId?: string): Promise<Message> {
-    const clientMessageId = generateUUID();
-    const wsSent = chatWebSocket.sendMessage(conversationId, content, clientMessageId, mediaAssetId);
+  async sendMessage(
+    conversationId: string,
+    content: string,
+    currentUserId = 'me',
+    mediaAssetId?: string,
+    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO',
+    customClientMessageId?: string
+  ): Promise<Message> {
+    const clientMessageId = customClientMessageId || generateUUID();
+    const resolvedType = messageType || (mediaAssetId ? 'IMAGE' : 'TEXT');
+    const wsSent = chatWebSocket.sendMessage(conversationId, content, clientMessageId, mediaAssetId, resolvedType);
 
     const optimistic: Message = {
       id: clientMessageId,
@@ -398,7 +413,7 @@ export const chatService = {
       sender_id: currentUserId,
       body: content,
       content,
-      message_type: 'TEXT',
+      message_type: resolvedType,
       media_asset_id: mediaAssetId,
       status: 'SENT',
       created_at: new Date().toISOString(),
@@ -412,6 +427,7 @@ export const chatService = {
     const res = await api.post<any>(`/api/v1/conversations/${conversationId}/messages`, {
       client_message_id: clientMessageId,
       body: content,
+      message_type: resolvedType,
       media_asset_id: mediaAssetId,
     });
     return normalizeMessage(res);

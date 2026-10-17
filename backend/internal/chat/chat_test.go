@@ -7,12 +7,15 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"bytes"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/auradating/platform/backend/internal/discovery"
 	"github.com/auradating/platform/backend/internal/identity"
+	"github.com/auradating/platform/backend/internal/media"
 	"github.com/gorilla/websocket"
 )
 
@@ -629,3 +632,164 @@ func TestChat_EqualTimestampsAndDeterministicOrdering(t *testing.T) {
 		t.Errorf("expected olderPage message to be msg1, got %v", olderPage.Messages)
 	}
 }
+
+func TestChat_PhotoAndVideoAttachmentSharingAndAuthorization(t *testing.T) {
+	ctx := context.Background()
+	svc, chatRepo, identRepo, _ := setupTestChatSystem(t)
+
+	// Set up isolated media service
+	tempDir := t.TempDir()
+	storage, err := media.NewFileStorageEngine(tempDir, "test-media-signing-secret-key-32b-long")
+	if err != nil {
+		t.Fatalf("failed to create storage engine: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	processor := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	mediaRepo := media.NewMemoryRepository()
+	mediaSvc := media.NewService(mediaRepo, storage, processor, logger)
+	t.Cleanup(func() {
+		mediaSvc.Stop()
+	})
+	// Connect attachment authorization checker
+	mediaSvc.SetAttachmentAccessChecker(chatRepo.CanAccessMediaAsset)
+
+	userA := "usr_photo_sender"
+	userB := "usr_photo_recipient"
+	userC := "usr_unrelated_third_party"
+	createTestUser(t, identRepo, userA, "sender@example.com", "Sender A")
+	createTestUser(t, identRepo, userB, "recipient@example.com", "Recipient B")
+	createTestUser(t, identRepo, userC, "intruder@example.com", "Intruder C")
+
+	match := &discovery.Match{
+		ID:         "match_media_sharing",
+		UserLowID:  userA,
+		UserHighID: userB,
+		Status:     discovery.MatchActive,
+		MatchedAt:  time.Now().UTC(),
+	}
+	chatRepo.SeedMatch(match)
+	conv, err := chatRepo.GetOrCreateConversationForMatch(ctx, match.ID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+
+	// 1. UserA uploads a photo attachment
+	testJPEG := media.GenerateTestJPEG(640, 800)
+	photoAsset, err := mediaSvc.UploadDirect(
+		ctx,
+		userA,
+		string(media.PurposeChatAttachment),
+		string(media.MediaTypeImage),
+		"beach.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idemp_photo_001",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload chat photo: %v", err)
+	}
+	if photoAsset.Status != media.StatusReady {
+		t.Fatalf("expected photo asset status READY, got %s", photoAsset.Status)
+	}
+
+	// 2. UserA uploads an MP4 video attachment
+	dummyMP4 := make([]byte, 1024)
+	copy(dummyMP4[0:4], []byte{0x00, 0x00, 0x04, 0x00})
+	copy(dummyMP4[4:8], []byte("ftyp"))
+	copy(dummyMP4[8:12], []byte("mp42"))
+	videoAsset, err := mediaSvc.UploadDirect(
+		ctx,
+		userA,
+		string(media.PurposeChatAttachment),
+		string(media.MediaTypeVideo),
+		"sunset.mp4",
+		bytes.NewReader(dummyMP4),
+		int64(len(dummyMP4)),
+		"idemp_video_001",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload chat video: %v", err)
+	}
+	if videoAsset.Status != media.StatusReady {
+		t.Fatalf("expected video asset status READY, got %s", videoAsset.Status)
+	}
+
+	// 3. UserA sends photo message
+	photoMsg, err := svc.SendMessage(ctx, userA, conv.ID, SendMessageRequest{
+		ClientMessageID: "client_photo_001",
+		Body:            "Here is the photo!",
+		MessageType:     string(MessageTypeImage),
+		MediaAssetID:    &photoAsset.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to send photo message: %v", err)
+	}
+	if photoMsg.MessageType != MessageTypeImage {
+		t.Errorf("expected MessageTypeImage, got %s", photoMsg.MessageType)
+	}
+	if photoMsg.MediaAssetID == nil || *photoMsg.MediaAssetID != photoAsset.ID {
+		t.Errorf("expected MediaAssetID %s, got %v", photoAsset.ID, photoMsg.MediaAssetID)
+	}
+
+	// 4. UserA sends video message (without text body, only video attachment)
+	videoMsg, err := svc.SendMessage(ctx, userA, conv.ID, SendMessageRequest{
+		ClientMessageID: "client_video_002",
+		Body:            "",
+		MessageType:     string(MessageTypeVideo),
+		MediaAssetID:    &videoAsset.ID,
+	})
+	if err != nil {
+		t.Fatalf("failed to send video message: %v", err)
+	}
+	if videoMsg.MessageType != MessageTypeVideo {
+		t.Errorf("expected MessageTypeVideo, got %s", videoMsg.MessageType)
+	}
+
+	// 5. Authorization verification:
+	// A) Sender (UserA) can access asset with derivatives
+	senderPhotoView, err := mediaSvc.GetAssetWithDerivatives(ctx, photoAsset.ID, userA)
+	if err != nil {
+		t.Fatalf("sender should be authorized to access their photo asset: %v", err)
+	}
+	if len(senderPhotoView.Derivatives) == 0 {
+		t.Errorf("expected photo derivatives for sender")
+	}
+
+	// B) Recipient (UserB) can access asset with derivatives
+	recipientPhotoView, err := mediaSvc.GetAssetWithDerivatives(ctx, photoAsset.ID, userB)
+	if err != nil {
+		t.Fatalf("recipient should be authorized to access conversation photo attachment: %v", err)
+	}
+	if len(recipientPhotoView.Derivatives) == 0 {
+		t.Errorf("expected photo derivatives for recipient")
+	}
+
+	recipientVideoView, err := mediaSvc.GetAssetWithDerivatives(ctx, videoAsset.ID, userB)
+	if err != nil {
+		t.Fatalf("recipient should be authorized to access conversation video attachment: %v", err)
+	}
+	if len(recipientVideoView.Derivatives) == 0 {
+		t.Errorf("expected video derivatives for recipient")
+	}
+
+	// C) Unauthorized UserC must be REJECTED with ErrUnauthorizedMedia
+	_, err = mediaSvc.GetAssetWithDerivatives(ctx, photoAsset.ID, userC)
+	if err == nil {
+		t.Errorf("expected unauthorized UserC to be rejected with error, got nil")
+	}
+	if !errors.Is(err, media.ErrUnauthorizedMedia) {
+		t.Errorf("expected ErrUnauthorizedMedia for UserC, got: %v", err)
+	}
+
+	_, err = mediaSvc.GetAssetWithDerivatives(ctx, videoAsset.ID, userC)
+	if !errors.Is(err, media.ErrUnauthorizedMedia) {
+		t.Errorf("expected ErrUnauthorizedMedia for video attachment access by UserC, got: %v", err)
+	}
+
+	// D) Unauthenticated caller ("") must also be rejected
+	_, err = mediaSvc.GetAssetWithDerivatives(ctx, photoAsset.ID, "")
+	if !errors.Is(err, media.ErrUnauthorizedMedia) {
+		t.Errorf("expected ErrUnauthorizedMedia for unauthenticated request, got: %v", err)
+	}
+}
+

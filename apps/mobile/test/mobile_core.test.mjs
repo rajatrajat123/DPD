@@ -4916,3 +4916,422 @@ test('Chat Keyboard Avoidance on Curved / Edge-to-Edge Android: calculates exact
   );
 });
 
+// --- Test 82: Chat Photo Attachment Workflow & Validation ---
+test('Chat Photo Attachment: enforces 15MB limit, handles permissions, and manages preview lifecycle', async () => {
+  const MAX_IMAGE_BYTES = 15 * 1024 * 1024; // 15 MiB
+
+  // 1. Permission denial handling
+  function pickPhotoMock(hasPermission, mockAsset) {
+    if (!hasPermission) {
+      const err = new Error('Media library access is required to select photos.');
+      err.code = 'PERMISSION_DENIED';
+      throw err;
+    }
+    if (!mockAsset) return null;
+    if (mockAsset.fileSize && mockAsset.fileSize > MAX_IMAGE_BYTES) {
+      const err = new Error('Photo exceeds the 15MB limit.');
+      err.code = 'FILE_TOO_LARGE';
+      throw err;
+    }
+    return {
+      uri: mockAsset.uri,
+      width: mockAsset.width,
+      height: mockAsset.height,
+      fileSize: mockAsset.fileSize,
+      mimeType: mockAsset.mimeType || 'image/jpeg',
+      mediaType: 'IMAGE',
+      fileName: mockAsset.fileName || 'chat_photo.jpg',
+    };
+  }
+
+  // Permission denied should throw PERMISSION_DENIED
+  assert.throws(
+    () => pickPhotoMock(false, null),
+    (err) => err.code === 'PERMISSION_DENIED'
+  );
+
+  // Exceeding 15MB limit should throw FILE_TOO_LARGE
+  assert.throws(
+    () => pickPhotoMock(true, { uri: 'file://too-large.jpg', fileSize: 16 * 1024 * 1024 }),
+    (err) => err.code === 'FILE_TOO_LARGE'
+  );
+
+  // Valid photo selection
+  const validPhoto = pickPhotoMock(true, {
+    uri: 'file://camera_roll/photo1.jpg',
+    width: 1080,
+    height: 1440,
+    fileSize: 3.2 * 1024 * 1024,
+    mimeType: 'image/jpeg',
+    fileName: 'photo1.jpg',
+  });
+  assert.equal(validPhoto.mediaType, 'IMAGE');
+  assert.equal(validPhoto.uri, 'file://camera_roll/photo1.jpg');
+  assert.equal(validPhoto.mimeType, 'image/jpeg');
+
+  // Preview tray lifecycle
+  let pendingAttachment = null;
+  function onPhotoSelected(photo) {
+    pendingAttachment = photo;
+  }
+  function onCancelAttachment() {
+    pendingAttachment = null;
+  }
+
+  onPhotoSelected(validPhoto);
+  assert.ok(pendingAttachment !== null);
+  assert.equal(pendingAttachment.mediaType, 'IMAGE');
+
+  onCancelAttachment();
+  assert.equal(pendingAttachment, null, 'Attachment tray must clear when cancelled');
+});
+
+// --- Test 83: Chat Video Attachment Workflow, Duration & Size Validation ---
+test('Chat Video Attachment: enforces 60s duration limit, 100MB size limit, and preserves video metadata', async () => {
+  const MAX_VIDEO_BYTES = 100 * 1024 * 1024; // 100 MiB
+  const MAX_DURATION_MS = 60 * 1000; // 60 seconds
+
+  function pickVideoMock(hasPermission, mockAsset) {
+    if (!hasPermission) {
+      const err = new Error('Media library access is required to select videos.');
+      err.code = 'PERMISSION_DENIED';
+      throw err;
+    }
+    if (!mockAsset) return null;
+    if (mockAsset.fileSize && mockAsset.fileSize > MAX_VIDEO_BYTES) {
+      const err = new Error('Video exceeds the maximum 100MB limit.');
+      err.code = 'FILE_TOO_LARGE';
+      throw err;
+    }
+    if (mockAsset.duration && mockAsset.duration > MAX_DURATION_MS) {
+      const err = new Error('Video duration exceeds maximum allowed length of 60 seconds.');
+      err.code = 'VIDEO_TOO_LONG';
+      throw err;
+    }
+    return {
+      uri: mockAsset.uri,
+      width: mockAsset.width,
+      height: mockAsset.height,
+      fileSize: mockAsset.fileSize,
+      mimeType: mockAsset.mimeType || 'video/mp4',
+      mediaType: 'VIDEO',
+      durationMs: mockAsset.duration != null ? mockAsset.duration : undefined,
+      fileName: mockAsset.fileName || 'chat_video.mp4',
+    };
+  }
+
+  // 1. Duration > 60s should be rejected
+  assert.throws(
+    () => pickVideoMock(true, { uri: 'file://vid.mp4', duration: 65000, fileSize: 20 * 1024 * 1024 }),
+    (err) => err.code === 'VIDEO_TOO_LONG'
+  );
+
+  // 2. File size > 100MB should be rejected
+  assert.throws(
+    () => pickVideoMock(true, { uri: 'file://vid.mp4', duration: 45000, fileSize: 105 * 1024 * 1024 }),
+    (err) => err.code === 'FILE_TOO_LARGE'
+  );
+
+  // 3. Exactly 60s and 90MB should be accepted
+  const validVideo = pickVideoMock(true, {
+    uri: 'file://camera_roll/vid_valid.mp4',
+    width: 720,
+    height: 1280,
+    duration: 60000,
+    fileSize: 90 * 1024 * 1024,
+    mimeType: 'video/mp4',
+  });
+  assert.equal(validVideo.mediaType, 'VIDEO');
+  assert.equal(validVideo.durationMs, 60000);
+  assert.equal(validVideo.fileName, 'chat_video.mp4');
+
+  // Preview tray state with video badge
+  let pendingAttachment = validVideo;
+  assert.equal(pendingAttachment.mediaType, 'VIDEO');
+  const durationLabel = pendingAttachment.durationMs
+    ? `${Math.round(pendingAttachment.durationMs / 1000)}s`
+    : 'Ready to send';
+  assert.equal(durationLabel, '60s');
+});
+
+// --- Test 84: ChatRoom Media Bubbles, Modals & Hardware Back Modal Priority ---
+test('ChatRoom Media Elements: verifies photo/video testIDs, modal bindings, and hardware back precedence', async () => {
+  const fs = await import('node:fs/promises');
+  const chatFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Verify required testIDs and accessibility hooks exist
+  const expectedTestIDs = [
+    'chat-attach-btn',
+    'chat-attachment-preview',
+    'chat-cancel-attachment-btn',
+    'chat-attachment-menu',
+    'chat-attach-photo-btn',
+    'chat-attach-video-btn',
+    'chat-photo-bubble',
+    'chat-video-bubble',
+    'chat-image-viewer-modal',
+    'chat-image-viewer-close-btn',
+    'chat-video-viewer-modal',
+    'chat-video-viewer-close-btn',
+    'retry-upload-btn',
+  ];
+
+  for (const tid of expectedTestIDs) {
+    assert.ok(
+      chatFile.includes(`testID="${tid}"`),
+      `ChatRoom.tsx must include testID="${tid}"`
+    );
+  }
+
+  // 2. Hardware back event handling hierarchy
+  let state = {
+    viewingImage: null,
+    viewingVideo: null,
+    isAttachmentMenuVisible: false,
+    isSafetyModalVisible: false,
+    safetyModalStep: 'MENU',
+    isDestructiveInProgress: false,
+    navigatedAway: false,
+  };
+
+  function simulateHardwareBack() {
+    if (state.isDestructiveInProgress) {
+      return true; // Locked
+    }
+    if (state.viewingImage) {
+      state.viewingImage = null;
+      return true; // Consumed
+    }
+    if (state.viewingVideo) {
+      state.viewingVideo = null;
+      return true; // Consumed
+    }
+    if (state.isAttachmentMenuVisible) {
+      state.isAttachmentMenuVisible = false;
+      return true; // Consumed
+    }
+    if (state.isSafetyModalVisible) {
+      if (state.safetyModalStep !== 'MENU') {
+        state.safetyModalStep = 'MENU';
+        return true;
+      }
+      state.isSafetyModalVisible = false;
+      return true;
+    }
+    // When no modal is open, normal navigation proceeds
+    state.navigatedAway = true;
+    return false;
+  }
+
+  // Step A: Fullscreen photo viewer open -> Back dismisses photo viewer first
+  state.viewingImage = { url: 'https://example.com/photo.jpg' };
+  let consumed = simulateHardwareBack();
+  assert.equal(consumed, true);
+  assert.equal(state.viewingImage, null);
+  assert.equal(state.navigatedAway, false);
+
+  // Step B: Video viewer modal open -> Back dismisses video viewer
+  state.viewingVideo = { url: 'https://example.com/video.mp4' };
+  consumed = simulateHardwareBack();
+  assert.equal(consumed, true);
+  assert.equal(state.viewingVideo, null);
+  assert.equal(state.navigatedAway, false);
+
+  // Step C: Attachment action sheet open -> Back dismisses sheet
+  state.isAttachmentMenuVisible = true;
+  consumed = simulateHardwareBack();
+  assert.equal(consumed, true);
+  assert.equal(state.isAttachmentMenuVisible, false);
+  assert.equal(state.navigatedAway, false);
+
+  // Step D: When all modals closed -> Back triggers navigation
+  consumed = simulateHardwareBack();
+  assert.equal(consumed, false);
+  assert.equal(state.navigatedAway, true);
+});
+
+// --- Test 85: Chat Media Privacy & Authorization Gate ---
+test('Chat Media Privacy: private chat attachments require conversation participant authorization', async () => {
+  // Mock conversation and assets
+  const conversation = {
+    id: 'conv_abc_123',
+    user1_id: 'user_alice',
+    user2_id: 'user_bob',
+  };
+
+  const asset = {
+    id: 'media_chat_789',
+    owner_user_id: 'user_alice',
+    purpose: 'CHAT_ATTACHMENT',
+    media_type: 'IMAGE',
+    status: 'READY',
+  };
+
+  // Mock CanAccessMediaAsset logic mirroring Go backend repository
+  function canAccessMediaAsset(requesterId, assetId) {
+    if (assetId !== asset.id) return false;
+    if (asset.owner_user_id === requesterId) return true;
+    // For CHAT_ATTACHMENT, must be a participant of the conversation
+    if (requesterId === conversation.user1_id || requesterId === conversation.user2_id) {
+      return true;
+    }
+    return false;
+  }
+
+  // Owner (Alice) has access
+  assert.equal(canAccessMediaAsset('user_alice', 'media_chat_789'), true);
+
+  // Recipient (Bob) has access
+  assert.equal(canAccessMediaAsset('user_bob', 'media_chat_789'), true);
+
+  // Unauthorized third party (Charlie) is strictly denied access
+  assert.equal(canAccessMediaAsset('user_charlie', 'media_chat_789'), false);
+
+  // Unauthenticated / empty caller is denied
+  assert.equal(canAccessMediaAsset('', 'media_chat_789'), false);
+  assert.equal(canAccessMediaAsset(null, 'media_chat_789'), false);
+});
+
+// --- Test 86: Chat Photo Attachment Loading, Error State, and Retry Flow ---
+test('Chat Photo Attachment: handles loading state, error state on failure, and tap-to-retry recovery', async () => {
+  // Test message reconciliation preserves media fields
+  function compareMessagesDesc(a, b) {
+    const timeA = new Date(a.created_at).getTime();
+    const timeB = new Date(b.created_at).getTime();
+    if (timeA !== timeB) return timeB - timeA;
+    return (b.id || '').localeCompare(a.id || '');
+  }
+
+  function reconcileMessages(existingList, incoming) {
+    const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+    const merged = [...existingList];
+
+    for (const item of incomingList) {
+      const existingIndex = merged.findIndex((m) => {
+        if (item.id && m.id === item.id) return true;
+        if (item.client_message_id && m.client_message_id === item.client_message_id) return true;
+        return false;
+      });
+
+      if (existingIndex !== -1) {
+        const existing = merged[existingIndex];
+        merged[existingIndex] = {
+          ...existing,
+          ...item,
+          id: item.id || existing.id,
+          media_url: item.media_url || existing.media_url,
+          media_asset_id: item.media_asset_id || existing.media_asset_id,
+          message_type: item.message_type || existing.message_type,
+          delivered_at: item.delivered_at || existing.delivered_at || null,
+          read_at: item.read_at || existing.read_at || null,
+          status: item.read_at || existing.read_at ? 'READ' : item.delivered_at || existing.delivered_at ? 'DELIVERED' : item.status || existing.status,
+          created_at: item.created_at || existing.created_at,
+        };
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged.sort(compareMessagesDesc);
+  }
+
+  // Verify reconcileMessages preserves media_url and media_asset_id when server update arrives without them
+  const initialOptimistic = {
+    id: 'msg_temp_1',
+    client_message_id: 'client_uuid_1',
+    body: 'Look at this photo',
+    message_type: 'IMAGE',
+    media_asset_id: 'asset_uuid_99',
+    media_url: 'file:///local/cache/photo.jpg',
+    status: 'PENDING',
+    created_at: '2026-10-17T20:00:00Z',
+  };
+
+  let list = reconcileMessages([], initialOptimistic);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].media_url, 'file:///local/cache/photo.jpg');
+  assert.equal(list[0].media_asset_id, 'asset_uuid_99');
+
+  // Server delivery receipt or status update arrives without media_url
+  const serverReceipt = {
+    id: 'msg_server_1',
+    client_message_id: 'client_uuid_1',
+    delivered_at: '2026-10-17T20:00:05Z',
+    status: 'DELIVERED',
+  };
+  list = reconcileMessages(list, serverReceipt);
+  assert.equal(list.length, 1);
+  assert.equal(list[0].id, 'msg_server_1');
+  assert.equal(list[0].status, 'DELIVERED');
+  // media_url and media_asset_id MUST be preserved!
+  assert.equal(list[0].media_url, 'file:///local/cache/photo.jpg');
+  assert.equal(list[0].media_asset_id, 'asset_uuid_99');
+  assert.equal(list[0].message_type, 'IMAGE');
+
+  // Test Error State & Retry Flow simulation
+  const mediaAssetUrls = {};
+  const mediaAssetErrors = {};
+  const loadingAssetIds = {};
+  let fetchAttempts = 0;
+  let simulateNetworkError = true;
+
+  async function mockGetChatMediaAsset(assetId) {
+    fetchAttempts++;
+    if (simulateNetworkError) {
+      throw new Error('Network error or 403 Forbidden');
+    }
+    return {
+      media_id: assetId,
+      status: 'READY',
+      card_url: `https://api.example.com/stream/${assetId}/card.webp?token=xyz`,
+    };
+  }
+
+  async function resolveAsset(assetId) {
+    if (assetId && !mediaAssetUrls[assetId] && !mediaAssetErrors[assetId] && !loadingAssetIds[assetId]) {
+      loadingAssetIds[assetId] = true;
+      try {
+        const asset = await mockGetChatMediaAsset(assetId);
+        if (asset) {
+          mediaAssetUrls[assetId] = asset;
+        } else {
+          mediaAssetErrors[assetId] = true;
+        }
+      } catch {
+        mediaAssetErrors[assetId] = true;
+      } finally {
+        loadingAssetIds[assetId] = false;
+      }
+    }
+  }
+
+  function retryLoadMediaAsset(assetId) {
+    delete mediaAssetErrors[assetId];
+    return resolveAsset(assetId);
+  }
+
+  // Pass 1: Resolution fails due to network/auth error
+  await resolveAsset('asset_uuid_99');
+  assert.equal(fetchAttempts, 1);
+  assert.equal(loadingAssetIds['asset_uuid_99'], false);
+  assert.equal(mediaAssetErrors['asset_uuid_99'], true);
+  assert.equal(mediaAssetUrls['asset_uuid_99'], undefined);
+
+  // Subsequent render pass does NOT trigger infinite fetch loop because mediaAssetErrors is set
+  await resolveAsset('asset_uuid_99');
+  assert.equal(fetchAttempts, 1); // Not called again! Infinite spinner prevented!
+
+  // Pass 2: User taps "⚠️ Could not load photo • Tap to retry"
+  simulateNetworkError = false;
+  await retryLoadMediaAsset('asset_uuid_99');
+  assert.equal(fetchAttempts, 2);
+  assert.equal(mediaAssetErrors['asset_uuid_99'], undefined);
+  assert.ok(mediaAssetUrls['asset_uuid_99']);
+  assert.equal(
+    mediaAssetUrls['asset_uuid_99'].card_url,
+    'https://api.example.com/stream/asset_uuid_99/card.webp?token=xyz'
+  );
+});
+

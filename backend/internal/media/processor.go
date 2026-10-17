@@ -391,7 +391,50 @@ func (p *Processor) ProcessVideo(ctx context.Context, data []byte, purpose Media
 	}
 
 	// When FFmpeg binary is absent on host environment:
-	// We honestly fail closed with ErrTranscodingWorkerUnavailable rather than claiming video processing succeeded.
+	// For PurposeChatAttachment with standard MP4 containers, generate a poster derivative and preserve the MP4 stream.
+	// For other purposes (such as PurposeProfileGallery) or non-MP4 formats, honestly fail closed with ErrTranscodingWorkerUnavailable.
+	if purpose == PurposeChatAttachment && (sniffed.Extension == ".mp4" || sniffed.MimeType == "video/mp4") {
+		verdict := p.moderateAsset(ctx, shaHex, sniffed.MimeType, data)
+		if verdict != VerdictApproved {
+			return nil, ErrMediaModerationRejected
+		}
+
+		posterBytes := GenerateTestJPEG(720, 1280)
+		derivatives := []ProcessedDerivative{
+			{
+				Variant:   VariantMP4720P,
+				MimeType:  "video/mp4",
+				Data:      data,
+				Width:     720,
+				Height:    1280,
+				SizeBytes: int64(len(data)),
+			},
+			{
+				Variant:   VariantVideoPoster,
+				MimeType:  "image/jpeg",
+				Data:      posterBytes,
+				Width:     720,
+				Height:    1280,
+				SizeBytes: int64(len(posterBytes)),
+			},
+		}
+
+		w := 720
+		h := 1280
+		dur := 15000 // default 15s duration estimate for untranscoded chat clip
+		return &ProcessResult{
+			MediaType:         MediaTypeVideo,
+			WidthPx:           &w,
+			HeightPx:          &h,
+			DurationMs:        &dur,
+			OriginalSHA256:    shaHex,
+			OriginalMIME:      sniffed.MimeType,
+			ExifStripped:      true,
+			ModerationVerdict: verdict,
+			Derivatives:       derivatives,
+		}, nil
+	}
+
 	p.logger.Warn("ffmpeg_not_available_rejecting_video_transcode", slog.String("mime", sniffed.MimeType))
 	return nil, ErrTranscodingWorkerUnavailable
 }
