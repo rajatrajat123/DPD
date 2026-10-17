@@ -3977,3 +3977,122 @@ test('Discovery Quick Message: validates keyboard avoidance, card height adaptat
   assert.ok(indexFile.includes('deckContainerKeyboard'), 'Must provide deckContainerKeyboard flex styles');
   assert.ok(indexFile.includes('TouchableWithoutFeedback'), 'Must support dismissing keyboard when tapping outside');
 });
+
+// --- Test 73: Dynamic App-Wide Theme Propagation, Storage Persistence & In-Place Mutability ---
+test('Theme Architecture: validates 5 theme palettes, ThemeContext race-condition guards, storage persistence, and in-place sync', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify colors.ts exports all 5 themes with complete, valid color tokens
+  const colorsFile = await fs.readFile(
+    new URL('../src/theme/colors.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(colorsFile.includes('midnightGoldTheme'), 'Must export midnightGoldTheme');
+  assert.ok(colorsFile.includes('prideSpectrumTheme'), 'Must export prideSpectrumTheme');
+  assert.ok(colorsFile.includes('youthPopTheme'), 'Must export youthPopTheme');
+  assert.ok(colorsFile.includes('lavenderTheme'), 'Must export lavenderTheme');
+  assert.ok(colorsFile.includes('oceanTheme'), 'Must export oceanTheme');
+  assert.ok(colorsFile.includes('THEME_REGISTRY'), 'Must export THEME_REGISTRY');
+  assert.ok(colorsFile.includes('THEME_METAS'), 'Must export THEME_METAS');
+
+  // 2. Verify ThemeContext.tsx implementation details
+  const contextFile = await fs.readFile(
+    new URL('../src/theme/ThemeContext.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(contextFile.includes('userSelectedRef'), 'ThemeContext must have userSelectedRef to guard against storage race conditions');
+  assert.ok(contextFile.includes('Object.assign(colors, currentColors)'), 'ThemeContext must update static colors object in-place for live synchronization');
+  assert.ok(contextFile.includes('useThemeColors'), 'ThemeContext must export useThemeColors hook');
+  assert.ok(contextFile.includes('throw err'), 'setTheme must propagate errors if persistence fails');
+
+  // 3. Simulate Theme State & Persistence Logic
+  const store = new Map();
+  const mockStorage = {
+    async getItem(k) { return store.get(k) ?? null; },
+    async setItem(k, v) { store.set(k, v); },
+  };
+
+  let activeTheme = 'midnight-gold';
+  let userSelected = false;
+
+  const setTheme = async (id) => {
+    userSelected = true;
+    activeTheme = id;
+    await mockStorage.setItem('aura_active_theme', id);
+  };
+
+  const loadTheme = async () => {
+    const saved = await mockStorage.getItem('aura_active_theme');
+    if (saved && !userSelected) {
+      activeTheme = saved;
+    }
+  };
+
+  // User selects 'ocean'
+  await setTheme('ocean');
+  assert.equal(activeTheme, 'ocean');
+  assert.equal(await mockStorage.getItem('aura_active_theme'), 'ocean');
+
+  // Delayed storage load resolves but does NOT overwrite user selection
+  await loadTheme();
+  assert.equal(activeTheme, 'ocean');
+
+  // App reloads: fresh userSelected is false, so saved theme is restored cleanly
+  userSelected = false;
+  await loadTheme();
+  assert.equal(activeTheme, 'ocean');
+});
+
+// --- Test 74: App-Wide Themed Screen & Component Adoption ---
+test('Theme Adoption: validates all app tabs, root navigation, and shared components dynamically consume active theme', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Root Layout & App Guard
+  const rootLayout = await fs.readFile(
+    new URL('../app/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(rootLayout.includes('ThemeProvider'), 'Root layout must mount ThemeProvider');
+  assert.ok(rootLayout.includes('ThemedApp'), 'Root layout must define ThemedApp');
+  assert.ok(rootLayout.includes('contentStyle: { backgroundColor: colors.background }'), 'Stack navigator contentStyle must bind to colors.background');
+
+  // 2. Tab Layout
+  const tabLayout = await fs.readFile(
+    new URL('../app/(tabs)/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(tabLayout.includes('useTheme'), 'Tab layout must call useTheme');
+  assert.ok(tabLayout.includes('tabBarStyle'), 'Tab layout must configure tabBarStyle');
+  assert.ok(tabLayout.includes('tabBarActiveTintColor: colors.gold'), 'Tab layout must bind active tint to colors.gold');
+
+  // 3. Main screens
+  const screens = [
+    { file: '../app/(tabs)/index.tsx', name: 'Discovery' },
+    { file: '../app/(tabs)/profile.tsx', name: 'Profile' },
+    { file: '../app/(tabs)/chat.tsx', name: 'Chat' },
+    { file: '../app/(tabs)/likes.tsx', name: 'Likes' },
+    { file: '../app/(tabs)/membership.tsx', name: 'Membership' },
+    { file: '../app/(tabs)/settings.tsx', name: 'Settings' },
+  ];
+
+  for (const screen of screens) {
+    const content = await fs.readFile(new URL(screen.file, import.meta.url), 'utf-8');
+    assert.ok(content.includes('useTheme'), `${screen.name} screen must import and call useTheme`);
+    assert.ok(content.includes('colors.background') || content.includes('colors.card'), `${screen.name} must dynamically style with theme colors`);
+  }
+
+  // 4. Shared components
+  const components = [
+    { file: '../src/components/DiscoveryCard.tsx', name: 'DiscoveryCard' },
+    { file: '../src/components/QuickMessageComposer.tsx', name: 'QuickMessageComposer' },
+    { file: '../src/components/ChatRoom.tsx', name: 'ChatRoom' },
+    { file: '../src/components/DiscoveryFilterModal.tsx', name: 'DiscoveryFilterModal' },
+    { file: '../src/components/RangeSlider.tsx', name: 'RangeSlider' },
+    { file: '../src/components/SingleSlider.tsx', name: 'SingleSlider' },
+  ];
+
+  for (const comp of components) {
+    const content = await fs.readFile(new URL(comp.file, import.meta.url), 'utf-8');
+    assert.ok(content.includes('useTheme'), `${comp.name} component must import and call useTheme`);
+  }
+});

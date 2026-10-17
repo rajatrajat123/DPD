@@ -11,12 +11,13 @@ import {
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import Constants from 'expo-constants';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { BillingPlan, EntitlementsResponse, Subscription } from '../../src/types';
 
 export default function MembershipScreen() {
+  const { colors } = useTheme();
   const [plans, setPlans] = useState<BillingPlan[]>([]);
   const [entitlements, setEntitlements] = useState<EntitlementsResponse | null>(null);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
@@ -214,10 +215,10 @@ export default function MembershipScreen() {
   const hasTravelMode = entitlementList.includes('TRAVEL_MODE');
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Aura VIP</Text>
-        <Text style={styles.subtitle}>Premium Membership & Entitlements</Text>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+      <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
+        <Text style={[styles.title, { color: colors.text }]}>Aura VIP</Text>
+        <Text style={[styles.subtitle, { color: colors.gold }]}>Premium Membership & Entitlements</Text>
       </View>
 
       {isLoading ? (
@@ -238,16 +239,16 @@ export default function MembershipScreen() {
           }
         >
           {/* Current Status Card */}
-          <View style={styles.statusCard}>
+          <View style={[styles.statusCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
             <View style={styles.statusHeader}>
               <View>
                 <Text style={styles.statusLabel}>CURRENT STATUS</Text>
-                <Text style={styles.tierName}>
+                <Text style={[styles.tierName, { color: colors.text }]}>
                   {activeTier === 'BLACK' ? 'Aura Black VIP' : activeTier === 'PLUS' ? 'Aura Plus' : 'Aura Member'}
                 </Text>
               </View>
-              <View style={styles.tierBadge}>
-                <Text style={styles.tierBadgeText}>{activeTier}</Text>
+              <View style={[styles.tierBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                <Text style={[styles.tierBadgeText, { color: colors.gold }]}>{activeTier}</Text>
               </View>
             </View>
 
@@ -281,51 +282,52 @@ export default function MembershipScreen() {
             )}
 
             {/* Boost Credits Row */}
-            <View style={styles.boostRow}>
+            <View style={[styles.boostRow, { borderTopColor: colors.borderSubtle }]}>
               <View>
                 <Text style={styles.boostLabel}>Profile Boost Credits</Text>
-                <Text style={styles.boostCount}>
+                <Text style={[styles.boostCount, { color: colors.gold }]}>
                   {entitlements?.boost_credits_remaining ?? 0} Credits Available
                 </Text>
               </View>
               <TouchableOpacity
                 style={[
                   styles.boostBtn,
-                  (!entitlements || entitlements.boost_credits_remaining <= 0) ? styles.boostBtnDisabled : null,
+                  { backgroundColor: colors.gold },
+                  (!entitlements || entitlements.boost_credits_remaining <= 0) ? [styles.boostBtnDisabled, { backgroundColor: colors.cardElevated }] : null,
                 ]}
                 onPress={handleActivateBoost}
                 disabled={isBoosting || !entitlements || entitlements.boost_credits_remaining <= 0}
                 activeOpacity={0.8}
               >
-                <Text style={styles.boostBtnText}>Boost 30m</Text>
+                <Text style={[styles.boostBtnText, { color: colors.textInverse }]}>Boost 30m</Text>
               </TouchableOpacity>
             </View>
           </View>
 
           {/* Active Entitlements Matrix */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Included Benefits</Text>
-            <View style={styles.matrixCard}>
-              <View style={styles.matrixRow}>
-                <Text style={styles.matrixLabel}>Unlimited Daily Swipes</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Included Benefits</Text>
+            <View style={[styles.matrixCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+              <View style={[styles.matrixRow, { borderBottomColor: colors.borderSubtle }]}>
+                <Text style={[styles.matrixLabel, { color: colors.text }]}>Unlimited Daily Swipes</Text>
                 <Text style={hasUnlimitedSwipes ? styles.activeCheck : styles.inactiveDash}>
                   {hasUnlimitedSwipes ? '✓ Included' : '— Locked'}
                 </Text>
               </View>
-              <View style={styles.matrixRow}>
-                <Text style={styles.matrixLabel}>Rewind Last Pass</Text>
+              <View style={[styles.matrixRow, { borderBottomColor: colors.borderSubtle }]}>
+                <Text style={[styles.matrixLabel, { color: colors.text }]}>Rewind Last Pass</Text>
                 <Text style={hasRewind ? styles.activeCheck : styles.inactiveDash}>
                   {hasRewind ? '✓ Included' : '— Locked'}
                 </Text>
               </View>
-              <View style={styles.matrixRow}>
-                <Text style={styles.matrixLabel}>See Who Liked You</Text>
+              <View style={[styles.matrixRow, { borderBottomColor: colors.borderSubtle }]}>
+                <Text style={[styles.matrixLabel, { color: colors.text }]}>See Who Liked You</Text>
                 <Text style={hasSeeWhoLiked ? styles.activeCheck : styles.inactiveDash}>
                   {hasSeeWhoLiked ? '✓ Included' : '— Locked'}
                 </Text>
               </View>
-              <View style={styles.matrixRow}>
-                <Text style={styles.matrixLabel}>Travel Mode (Global Discovery)</Text>
+              <View style={[styles.matrixRow, { borderBottomColor: colors.borderSubtle }]}>
+                <Text style={[styles.matrixLabel, { color: colors.text }]}>Travel Mode (Global Discovery)</Text>
                 <Text style={hasTravelMode ? styles.activeCheck : styles.inactiveDash}>
                   {hasTravelMode ? '✓ Included' : '— Locked'}
                 </Text>
@@ -335,7 +337,7 @@ export default function MembershipScreen() {
 
           {/* Available Plans */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Membership Tiers</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Membership Tiers</Text>
 
             {!Array.isArray(plans) || plans.length === 0 ? (
               <View style={styles.emptyPlansCard}>
@@ -350,14 +352,14 @@ export default function MembershipScreen() {
               plans.map((p) => {
                 const isCurrent = activeTier === p.tier;
                 return (
-                  <View key={p.id} style={[styles.planCard, isCurrent ? styles.planCardActive : null]}>
+                  <View key={p.id} style={[styles.planCard, { backgroundColor: colors.card, borderColor: colors.border }, isCurrent ? [styles.planCardActive, { borderColor: colors.gold }] : null]}>
                     <View style={styles.planHeader}>
                       <View style={styles.planInfo}>
-                        <Text style={styles.planName}>{p.name}</Text>
+                        <Text style={[styles.planName, { color: colors.text }]}>{p.name}</Text>
                         <Text style={styles.planDesc}>{p.description}</Text>
                       </View>
                       <View style={styles.planPriceContainer}>
-                        <Text style={styles.planPrice}>
+                        <Text style={[styles.planPrice, { color: colors.gold }]}>
                           {p.currency} {(p.price_cents / 100).toFixed(2)}
                         </Text>
                         <Text style={styles.planPeriod}>/{p.billing_period.toLowerCase()}</Text>
@@ -365,12 +367,16 @@ export default function MembershipScreen() {
                     </View>
 
                     <TouchableOpacity
-                      style={[styles.upgradeBtn, isCurrent ? styles.upgradeBtnCurrent : null]}
+                      style={[
+                        styles.upgradeBtn,
+                        { backgroundColor: colors.gold },
+                        isCurrent ? [styles.upgradeBtnCurrent, { backgroundColor: colors.cardElevated, borderColor: colors.border }] : null,
+                      ]}
                       onPress={() => handlePurchasePlan(p)}
                       disabled={isCurrent || isUpgrading}
                       activeOpacity={0.85}
                     >
-                      <Text style={[styles.upgradeBtnText, isCurrent ? styles.upgradeBtnTextCurrent : null]}>
+                      <Text style={[styles.upgradeBtnText, { color: colors.textInverse }, isCurrent ? [styles.upgradeBtnTextCurrent, { color: colors.textMuted }] : null]}>
                         {isCurrent ? 'Current Tier' : `Select ${p.name}`}
                       </Text>
                     </TouchableOpacity>
@@ -381,7 +387,7 @@ export default function MembershipScreen() {
           </View>
 
           {/* Storefront Disclosure */}
-          <View style={styles.disclosureBox}>
+          <View style={[styles.disclosureBox, { borderColor: colors.borderSubtle }]}>
             <Text style={styles.disclosureText}>
               ℹ️ Transactions are validated by the authoritative Go backend verification service.
               Live in-app purchases are billed via Google Play / Apple App Store.

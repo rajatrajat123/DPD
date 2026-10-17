@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
@@ -26,6 +26,7 @@ const GRID_CARD_WIDTH = (SCREEN_WIDTH - spacing.lg * 2 - spacing.md) / 2;
 export default function LikesScreen() {
   const router = useRouter();
   const { isAgeVerified } = useAuth();
+  const { colors } = useTheme();
 
   const [hasVipAccess, setHasVipAccess] = useState(false);
   const [nearbyCount, setNearbyCount] = useState<string>('');
@@ -85,15 +86,15 @@ export default function LikesScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+      <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
         <View>
-          <Text style={styles.title}>Likes</Text>
-          <Text style={styles.subtitle}>Interested In Your Profile</Text>
+          <Text style={[styles.title, { color: colors.text }]}>Likes</Text>
+          <Text style={[styles.subtitle, { color: colors.gold }]}>Interested In Your Profile</Text>
         </View>
         {nearbyCount ? (
-          <View style={styles.counterBadge}>
-            <Text style={styles.counterText}>📍 {nearbyCount}</Text>
+          <View style={[styles.counterBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+            <Text style={[styles.counterText, { color: colors.gold }]}>📍 {nearbyCount}</Text>
           </View>
         ) : null}
       </View>
@@ -122,16 +123,16 @@ export default function LikesScreen() {
           {/* Locked Free Tier View */}
           {!hasVipAccess ? (
             <View style={styles.lockedContainer}>
-              <View style={styles.vipBanner}>
-                <View style={styles.vipIconWrap}>
+              <View style={[styles.vipBanner, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                <View style={[styles.vipIconWrap, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
                   <Text style={styles.vipIcon}>👑</Text>
                 </View>
-                <Text style={styles.vipBannerTitle}>See Who Liked You</Text>
-                <Text style={styles.vipBannerBody}>
+                <Text style={[styles.vipBannerTitle, { color: colors.text }]}>See Who Liked You</Text>
+                <Text style={[styles.vipBannerBody, { color: colors.textMuted }]}>
                   Reveal everyone who has sent you a Like and match with them instantly without waiting in the deck.
                 </Text>
-                <TouchableOpacity style={styles.upgradeBtn} onPress={handleUpgrade} activeOpacity={0.85}>
-                  <Text style={styles.upgradeBtnText}>Upgrade to Aura VIP</Text>
+                <TouchableOpacity style={[styles.upgradeBtn, { backgroundColor: colors.gold }]} onPress={handleUpgrade} activeOpacity={0.85}>
+                  <Text style={[styles.upgradeBtnText, { color: colors.textInverse }]}>Upgrade to Aura VIP</Text>
                 </TouchableOpacity>
               </View>
 
@@ -140,15 +141,15 @@ export default function LikesScreen() {
               {/* Privacy-preserving blurred placeholder cards */}
               <View style={styles.grid}>
                 {[1, 2, 3, 4].map((item) => (
-                  <View key={item} style={styles.lockedCard}>
+                  <View key={item} style={[styles.lockedCard, { backgroundColor: colors.card, borderColor: colors.borderSubtle }]}>
                     <View style={styles.silhouetteWrap}>
                       <Text style={styles.silhouetteIcon}>👤</Text>
                     </View>
                     <View style={styles.lockOverlay}>
-                      <View style={styles.padlockCircle}>
+                      <View style={[styles.padlockCircle, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
                         <Text style={styles.padlockText}>🔒</Text>
                       </View>
-                      <Text style={styles.lockedCardText}>Liked your profile</Text>
+                      <Text style={[styles.lockedCardText, { color: colors.gold }]}>Liked your profile</Text>
                     </View>
                   </View>
                 ))}
@@ -158,23 +159,23 @@ export default function LikesScreen() {
             /* Entitled VIP View */
             <View style={styles.unlockedContainer}>
               <View style={styles.unlockedHeader}>
-                <Text style={styles.unlockedTitle}>Your Incoming Sparks</Text>
-                <Text style={styles.unlockedSubtitle}>
+                <Text style={[styles.unlockedTitle, { color: colors.text }]}>Your Incoming Sparks</Text>
+                <Text style={[styles.unlockedSubtitle, { color: colors.textMuted }]}>
                   You hold active Aura VIP access. Tap any member to connect.
                 </Text>
               </View>
 
               {matches.length === 0 ? (
                 <View style={styles.emptyContainer}>
-                  <View style={styles.emptyIconCircle}>
+                  <View style={[styles.emptyIconCircle, { backgroundColor: colors.cardElevated }]}>
                     <Text style={styles.emptyIconText}>♥</Text>
                   </View>
-                  <Text style={styles.emptyTitle}>No New Likes Right Now</Text>
-                  <Text style={styles.emptyBody}>
+                  <Text style={[styles.emptyTitle, { color: colors.text }]}>No New Likes Right Now</Text>
+                  <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
                     As soon as members in your area swipe right on your profile, their cards will appear here.
                   </Text>
-                  <TouchableOpacity style={styles.emptyRefreshBtn} onPress={onRefresh} activeOpacity={0.8}>
-                    <Text style={styles.emptyRefreshBtnText}>Check Again</Text>
+                  <TouchableOpacity style={[styles.emptyRefreshBtn, { backgroundColor: colors.gold }]} onPress={onRefresh} activeOpacity={0.8}>
+                    <Text style={[styles.emptyRefreshBtnText, { color: colors.textInverse }]}>Check Again</Text>
                   </TouchableOpacity>
                 </View>
               ) : (
@@ -182,7 +183,7 @@ export default function LikesScreen() {
                   {matches.map((m) => (
                     <TouchableOpacity
                       key={m.id}
-                      style={styles.matchCard}
+                      style={[styles.matchCard, { backgroundColor: colors.card, borderColor: colors.border }]}
                       onPress={() =>
                         router.push({
                           pathname: '/chat/[id]',
@@ -198,8 +199,8 @@ export default function LikesScreen() {
                       {m.target_profile.avatar_url ? (
                         <Image source={{ uri: m.target_profile.avatar_url }} style={styles.cardImage} />
                       ) : (
-                        <View style={[styles.cardImage, styles.cardImageFallback]}>
-                          <Text style={styles.cardMonogram}>
+                        <View style={[styles.cardImage, styles.cardImageFallback, { backgroundColor: colors.cardElevated }]}>
+                          <Text style={[styles.cardMonogram, { color: colors.gold }]}>
                             {m.target_profile.display_name.charAt(0)}
                           </Text>
                         </View>
@@ -207,7 +208,7 @@ export default function LikesScreen() {
 
                       <View style={styles.cardGradientOverlay}>
                         <View style={styles.cardNameRow}>
-                          <Text style={styles.cardName} numberOfLines={1}>
+                          <Text style={[styles.cardName, { color: colors.text }]} numberOfLines={1}>
                             {m.target_profile.display_name}
                           </Text>
                           {m.target_profile.is_verified && (

@@ -58,7 +58,7 @@ function buildFinalList(selected: string[], customText: string): string[] {
 export default function ProfileScreen() {
   const router = useRouter();
   const { profile, refreshProfile } = useAuth();
-  const { themeId, setTheme, themes } = useTheme();
+  const { themeId, setTheme, themes, colors } = useTheme();
 
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [bio, setBio] = useState(profile?.bio || '');
@@ -398,6 +398,13 @@ export default function ProfileScreen() {
         },
       });
 
+      // 3. Re-affirm active theme persistence
+      try {
+        await setTheme(themeId);
+      } catch {
+        // Handled
+      }
+
       await refreshProfile();
       Alert.alert('Profile Saved', 'Your profile and discovery preferences have been updated.');
     } catch (err: unknown) {
@@ -415,15 +422,15 @@ export default function ProfileScreen() {
   const primaryPhoto = displayPhotos[0]?.url;
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
         <View>
-          <Text style={styles.title}>Profile</Text>
-          <Text style={styles.subtitle}>Identity & Preferences</Text>
+          <Text style={[styles.title, { color: colors.text }]}>Profile</Text>
+          <Text style={[styles.subtitle, { color: colors.gold }]}>Identity & Preferences</Text>
         </View>
         <TouchableOpacity
-          style={styles.saveHeaderBtn}
+          style={[styles.saveHeaderBtn, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}
           onPress={handleSaveChanges}
           disabled={isSaving}
           activeOpacity={0.8}
@@ -431,20 +438,20 @@ export default function ProfileScreen() {
           {isSaving ? (
             <ActivityIndicator color={colors.gold} size="small" />
           ) : (
-            <Text style={styles.saveHeaderBtnText}>Save</Text>
+            <Text style={[styles.saveHeaderBtnText, { color: colors.gold }]}>Save</Text>
           )}
         </TouchableOpacity>
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Luxury Profile Header Card */}
-        <View style={styles.profileHeaderCard}>
-          <View style={styles.avatarWrap}>
+        <View style={[styles.profileHeaderCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <View style={[styles.avatarWrap, { borderColor: colors.gold }]}>
             {primaryPhoto ? (
               <Image source={{ uri: primaryPhoto }} style={styles.avatarImage} />
             ) : (
-              <View style={[styles.avatarImage, styles.avatarPlaceholder]}>
-                <Text style={styles.avatarMonogram}>
+              <View style={[styles.avatarImage, styles.avatarPlaceholder, { backgroundColor: colors.cardElevated }]}>
+                <Text style={[styles.avatarMonogram, { color: colors.gold }]}>
                   {profile?.display_name ? profile.display_name.charAt(0) : 'A'}
                 </Text>
               </View>
@@ -458,8 +465,8 @@ export default function ProfileScreen() {
 
           <View style={styles.headerInfo}>
             <View style={styles.headerNameRow}>
-              <Text style={styles.headerName}>{profile?.display_name || 'Member'}</Text>
-              {profile?.age ? <Text style={styles.headerAge}>, {profile.age}</Text> : null}
+              <Text style={[styles.headerName, { color: colors.text }]}>{profile?.display_name || 'Member'}</Text>
+              {profile?.age ? <Text style={[styles.headerAge, { color: colors.gold }]}>, {profile.age}</Text> : null}
             </View>
             <View style={styles.badgesRow}>
               {profile?.is_age_verified ? (
@@ -484,8 +491,8 @@ export default function ProfileScreen() {
                   <Text style={styles.photoPendingBadgeText}>Photo Unverified</Text>
                 </View>
               )}
-              <View style={styles.locationBadge}>
-                <Text style={styles.locationBadgeText}>
+              <View style={[styles.locationBadge, { backgroundColor: colors.cardElevated, borderColor: colors.borderSubtle }]}>
+                <Text style={[styles.locationBadgeText, { color: colors.textMuted }]}>
                   📍 {profile?.city || 'Local Member'}
                 </Text>
               </View>
@@ -516,10 +523,10 @@ export default function ProfileScreen() {
         )}
 
         {/* Photo Gallery Grid */}
-        <View style={styles.sectionCard}>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.sectionTitleRow}>
-            <Text style={styles.sectionTitle}>Profile Gallery</Text>
-            <Text style={styles.photoCountText}>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Profile Gallery</Text>
+            <Text style={[styles.photoCountText, { color: colors.gold }]}>
               {displayPhotos.length}/6 Photos
             </Text>
           </View>
@@ -535,18 +542,18 @@ export default function ProfileScreen() {
           ) : galleryError && displayPhotos.length === 0 ? (
             <View style={styles.galleryStatusBox}>
               <Text style={styles.galleryErrorText}>{galleryError}</Text>
-              <TouchableOpacity style={styles.retryGalleryBtn} onPress={loadGallery} activeOpacity={0.8}>
-                <Text style={styles.retryGalleryBtnText}>Retry Loading Photos</Text>
+              <TouchableOpacity style={[styles.retryGalleryBtn, { backgroundColor: colors.card, borderColor: colors.gold }]} onPress={loadGallery} activeOpacity={0.8}>
+                <Text style={[styles.retryGalleryBtnText, { color: colors.gold }]}>Retry Loading Photos</Text>
               </TouchableOpacity>
             </View>
           ) : (
             <View style={styles.photosGrid}>
               {displayPhotos.map((photo, index) => (
-                <View key={photo.id || index} style={styles.photoWrap}>
+                <View key={photo.id || index} style={[styles.photoWrap, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
                   <Image source={{ uri: photo.url }} style={styles.gridPhoto} />
                   {photo.is_primary && (
-                    <View style={styles.primaryBadge}>
-                      <Text style={styles.primaryBadgeText}>Primary</Text>
+                    <View style={[styles.primaryBadge, { backgroundColor: colors.gold }]}>
+                      <Text style={[styles.primaryBadgeText, { color: colors.textInverse }]}>Primary</Text>
                     </View>
                   )}
 
@@ -569,7 +576,7 @@ export default function ProfileScreen() {
                         hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
                         activeOpacity={0.7}
                       >
-                        <Text style={styles.moveBtnText}>◀</Text>
+                        <Text style={[styles.moveBtnText, { color: colors.gold }]}>◀</Text>
                       </TouchableOpacity>
                     )}
                     {index < displayPhotos.length - 1 && (
@@ -579,7 +586,7 @@ export default function ProfileScreen() {
                         hitSlop={{ top: 4, bottom: 4, left: 4, right: 4 }}
                         activeOpacity={0.7}
                       >
-                        <Text style={styles.moveBtnText}>▶</Text>
+                        <Text style={[styles.moveBtnText, { color: colors.gold }]}>▶</Text>
                       </TouchableOpacity>
                     )}
                   </View>
@@ -589,7 +596,7 @@ export default function ProfileScreen() {
               {/* Add Photo Button Slot */}
               {displayPhotos.length < 6 && (
                 <TouchableOpacity
-                  style={styles.addPhotoBtn}
+                  style={[styles.addPhotoBtn, { borderColor: colors.gold, backgroundColor: colors.goldMuted }]}
                   onPress={handleAddPhoto}
                   disabled={isUploadingPhoto}
                   activeOpacity={0.8}
@@ -597,14 +604,14 @@ export default function ProfileScreen() {
                   {isUploadingPhoto ? (
                     <View style={styles.uploadingBox}>
                       <ActivityIndicator color={colors.gold} size="small" />
-                      <Text style={styles.uploadingText}>{uploadProgressText}</Text>
+                      <Text style={[styles.uploadingText, { color: colors.gold }]}>{uploadProgressText}</Text>
                     </View>
                   ) : (
                     <>
-                      <View style={styles.addIconCircle}>
-                        <Text style={styles.addPhotoIcon}>+</Text>
+                      <View style={[styles.addIconCircle, { backgroundColor: colors.goldMuted }]}>
+                        <Text style={[styles.addPhotoIcon, { color: colors.gold }]}>+</Text>
                       </View>
-                      <Text style={styles.addPhotoLabel}>Add Photo</Text>
+                      <Text style={[styles.addPhotoLabel, { color: colors.gold }]}>Add Photo</Text>
                     </>
                   )}
                 </TouchableOpacity>
@@ -614,13 +621,13 @@ export default function ProfileScreen() {
         </View>
 
         {/* Basic Details Section */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>About You</Text>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>About You</Text>
 
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Display Name</Text>
             <TextInput
-              style={styles.input}
+              style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
               value={displayName}
               onChangeText={setDisplayName}
               placeholder="Your display name"
@@ -631,7 +638,7 @@ export default function ProfileScreen() {
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Bio</Text>
             <TextInput
-              style={[styles.input, styles.bioInput]}
+              style={[styles.input, styles.bioInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
               value={bio}
               onChangeText={setBio}
               placeholder="Tell other members what you are passionate about..."
@@ -643,9 +650,9 @@ export default function ProfileScreen() {
         </View>
 
         {/* Physical Attributes Section (Required for Discovery) */}
-        <View style={styles.sectionCard}>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.sectionTitleRow}>
-            <Text style={styles.sectionTitle}>Physical Attributes</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Physical Attributes</Text>
             <View style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadge : styles.incompleteBadge}>
               <Text style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadgeText : styles.incompleteBadgeText}>
                 {Boolean(profile?.height_cm && profile?.weight_kg) ? '✓ Completed' : 'Required'}
@@ -660,9 +667,9 @@ export default function ProfileScreen() {
           <View style={styles.inputGroup}>
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.inputLabel}>Height (90–250 cm)</Text>
-              <View style={styles.unitToggleGroup}>
+              <View style={[styles.unitToggleGroup, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
                 <TouchableOpacity
-                  style={[styles.unitToggleBtn, heightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  style={[styles.unitToggleBtn, heightUnit === 'metric' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
                   onPress={() => {
                     setHeightUnit('metric');
                     if (!heightCmInput && heightFtInput) {
@@ -672,10 +679,10 @@ export default function ProfileScreen() {
                     }
                   }}
                 >
-                  <Text style={[styles.unitToggleText, heightUnit === 'metric' && styles.unitToggleTextActive]}>cm</Text>
+                  <Text style={[styles.unitToggleText, heightUnit === 'metric' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>cm</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.unitToggleBtn, heightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  style={[styles.unitToggleBtn, heightUnit === 'imperial' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
                   onPress={() => {
                     setHeightUnit('imperial');
                     if (!heightFtInput && heightCmInput) {
@@ -686,7 +693,7 @@ export default function ProfileScreen() {
                     }
                   }}
                 >
-                  <Text style={[styles.unitToggleText, heightUnit === 'imperial' && styles.unitToggleTextActive]}>ft / in</Text>
+                  <Text style={[styles.unitToggleText, heightUnit === 'imperial' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>ft / in</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -694,7 +701,7 @@ export default function ProfileScreen() {
             {heightUnit === 'metric' ? (
               <View style={styles.numericInputWrapper}>
                 <TextInput
-                  style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
                   value={heightCmInput}
                   onChangeText={(val) => {
                     setHeightCmInput(val);
@@ -717,7 +724,7 @@ export default function ProfileScreen() {
               <View style={styles.dualInputRow}>
                 <View style={[styles.numericInputWrapper, { flex: 1 }]}>
                   <TextInput
-                    style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                    style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
                     value={heightFtInput}
                     onChangeText={(val) => {
                       setHeightFtInput(val);
@@ -735,7 +742,7 @@ export default function ProfileScreen() {
                 </View>
                 <View style={[styles.numericInputWrapper, { flex: 1 }]}>
                   <TextInput
-                    style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                    style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
                     value={heightInInput}
                     onChangeText={(val) => {
                       setHeightInInput(val);
@@ -755,23 +762,33 @@ export default function ProfileScreen() {
             )}
 
             {heightCmInput ? (
-              <Text style={styles.conversionHelper}>
+              <Text style={[styles.conversionHelper, { color: colors.gold }]}>
                 ≈ {heightCmInput} cm ({heightFtInput || '0'}'{heightInInput || '0'}")
               </Text>
             ) : null}
 
             {heightError ? <Text style={styles.errorText}>{heightError}</Text> : null}
 
-            <View style={styles.visibilityRow}>
+            <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
               <Text style={styles.visibilityLabel}>Card Visibility:</Text>
               <View style={styles.visibilityPills}>
                 {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
                   <TouchableOpacity
                     key={vis}
-                    style={[styles.visPill, heightVisibility === vis && styles.visPillActive]}
+                    style={[
+                      styles.visPill,
+                      { backgroundColor: colors.card, borderColor: colors.border },
+                      heightVisibility === vis && [styles.visPillActive, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => setHeightVisibility(vis)}
                   >
-                    <Text style={[styles.visPillText, heightVisibility === vis && styles.visPillTextActive]}>
+                    <Text
+                      style={[
+                        styles.visPillText,
+                        { color: colors.textMuted },
+                        heightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
+                      ]}
+                    >
                       {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
                     </Text>
                   </TouchableOpacity>
@@ -784,9 +801,9 @@ export default function ProfileScreen() {
           <View style={styles.inputGroup}>
             <View style={styles.sectionHeaderRow}>
               <Text style={styles.inputLabel}>Weight (30–300 kg)</Text>
-              <View style={styles.unitToggleGroup}>
+              <View style={[styles.unitToggleGroup, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
                 <TouchableOpacity
-                  style={[styles.unitToggleBtn, weightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  style={[styles.unitToggleBtn, weightUnit === 'metric' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
                   onPress={() => {
                     setWeightUnit('metric');
                     if (!weightKgInput && weightLbInput) {
@@ -795,10 +812,10 @@ export default function ProfileScreen() {
                     }
                   }}
                 >
-                  <Text style={[styles.unitToggleText, weightUnit === 'metric' && styles.unitToggleTextActive]}>kg</Text>
+                  <Text style={[styles.unitToggleText, weightUnit === 'metric' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>kg</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={[styles.unitToggleBtn, weightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  style={[styles.unitToggleBtn, weightUnit === 'imperial' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
                   onPress={() => {
                     setWeightUnit('imperial');
                     if (!weightLbInput && weightKgInput) {
@@ -807,7 +824,7 @@ export default function ProfileScreen() {
                     }
                   }}
                 >
-                  <Text style={[styles.unitToggleText, weightUnit === 'imperial' && styles.unitToggleTextActive]}>lb</Text>
+                  <Text style={[styles.unitToggleText, weightUnit === 'imperial' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>lb</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -815,7 +832,7 @@ export default function ProfileScreen() {
             {weightUnit === 'metric' ? (
               <View style={styles.numericInputWrapper}>
                 <TextInput
-                  style={[styles.input, styles.numericInput, weightError ? styles.inputError : null]}
+                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, weightError ? styles.inputError : null]}
                   value={weightKgInput}
                   onChangeText={(val) => {
                     setWeightKgInput(val);
@@ -835,7 +852,7 @@ export default function ProfileScreen() {
             ) : (
               <View style={styles.numericInputWrapper}>
                 <TextInput
-                  style={[styles.input, styles.numericInput, weightError ? styles.inputError : null]}
+                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, weightError ? styles.inputError : null]}
                   value={weightLbInput}
                   onChangeText={(val) => {
                     setWeightLbInput(val);
@@ -855,23 +872,33 @@ export default function ProfileScreen() {
             )}
 
             {weightKgInput ? (
-              <Text style={styles.conversionHelper}>
+              <Text style={[styles.conversionHelper, { color: colors.gold }]}>
                 ≈ {weightKgInput} kg (~{weightLbInput || '0'} lb)
               </Text>
             ) : null}
 
             {weightError ? <Text style={styles.errorText}>{weightError}</Text> : null}
 
-            <View style={styles.visibilityRow}>
+            <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
               <Text style={styles.visibilityLabel}>Card Visibility:</Text>
               <View style={styles.visibilityPills}>
                 {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
                   <TouchableOpacity
                     key={vis}
-                    style={[styles.visPill, weightVisibility === vis && styles.visPillActive]}
+                    style={[
+                      styles.visPill,
+                      { backgroundColor: colors.card, borderColor: colors.border },
+                      weightVisibility === vis && [styles.visPillActive, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => setWeightVisibility(vis)}
                   >
-                    <Text style={[styles.visPillText, weightVisibility === vis && styles.visPillTextActive]}>
+                    <Text
+                      style={[
+                        styles.visPillText,
+                        { color: colors.textMuted },
+                        weightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
+                      ]}
+                    >
                       {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
                     </Text>
                   </TouchableOpacity>
@@ -882,27 +909,37 @@ export default function ProfileScreen() {
         </View>
 
         {/* Identity & Dating Preferences Section */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Identity & Dating Preferences</Text>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Identity & Dating Preferences</Text>
           <Text style={styles.sectionDesc}>
             Customizable identity and preference settings used for discovery and matching.
           </Text>
 
           {/* SECTION 1: I am a — Gender identity */}
           <View style={styles.inputGroup}>
-            <Text style={styles.sectionHeaderLabel}>1. I am a — Gender identity</Text>
-            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>1. I am a — Gender identity</Text>
+            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
             <View style={styles.chipsRow}>
               {GENDER_IDENTITY_OPTIONS.map((g) => {
                 const selected = selectedGenders.includes(g.value);
                 return (
                   <TouchableOpacity
                     key={g.value}
-                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    style={[
+                      styles.chip,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => toggleGender(g.value)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: colors.textMuted },
+                        selected && [styles.chipTextSelected, { color: colors.gold }],
+                      ]}
+                    >
                       {g.label}
                     </Text>
                   </TouchableOpacity>
@@ -911,7 +948,7 @@ export default function ProfileScreen() {
             </View>
             {selectedGenders.includes('custom') && (
               <TextInput
-                style={[styles.input, styles.customInput]}
+                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
                 value={customGenderText}
                 onChangeText={setCustomGenderText}
                 placeholder="Enter your gender identity..."
@@ -923,19 +960,29 @@ export default function ProfileScreen() {
 
           {/* SECTION 2: Looking for — Gender preferences */}
           <View style={styles.inputGroup}>
-            <Text style={styles.sectionHeaderLabel}>2. Looking for — Gender preferences</Text>
-            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>2. Looking for — Gender preferences</Text>
+            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
             <View style={styles.chipsRow}>
               {LOOKING_FOR_OPTIONS.map((item) => {
                 const selected = selectedLookingFor.includes(item.value);
                 return (
                   <TouchableOpacity
                     key={item.value}
-                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    style={[
+                      styles.chip,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => toggleLookingFor(item.value)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: colors.textMuted },
+                        selected && [styles.chipTextSelected, { color: colors.gold }],
+                      ]}
+                    >
                       {item.label}
                     </Text>
                   </TouchableOpacity>
@@ -944,7 +991,7 @@ export default function ProfileScreen() {
             </View>
             {selectedLookingFor.includes('custom') && (
               <TextInput
-                style={[styles.input, styles.customInput]}
+                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
                 value={customLookingForText}
                 onChangeText={setCustomLookingForText}
                 placeholder="Enter gender preference..."
@@ -956,19 +1003,29 @@ export default function ProfileScreen() {
 
           {/* SECTION 3: Sexual orientation */}
           <View style={styles.inputGroup}>
-            <Text style={styles.sectionHeaderLabel}>3. Sexual orientation</Text>
-            <Text style={styles.sectionSubLabel}>Select all that apply</Text>
+            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>3. Sexual orientation</Text>
+            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
             <View style={styles.chipsRow}>
               {SEXUAL_ORIENTATION_OPTIONS.map((o) => {
                 const selected = selectedOrientations.includes(o.value);
                 return (
                   <TouchableOpacity
                     key={o.value}
-                    style={[styles.chip, selected ? styles.chipSelected : null]}
+                    style={[
+                      styles.chip,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => toggleOrientation(o.value)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: colors.textMuted },
+                        selected && [styles.chipTextSelected, { color: colors.gold }],
+                      ]}
+                    >
                       {o.label}
                     </Text>
                   </TouchableOpacity>
@@ -977,7 +1034,7 @@ export default function ProfileScreen() {
             </View>
             {selectedOrientations.includes('custom') && (
               <TextInput
-                style={[styles.input, styles.customInput]}
+                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
                 value={customOrientationText}
                 onChangeText={setCustomOrientationText}
                 placeholder="Enter your sexual orientation..."
@@ -989,8 +1046,8 @@ export default function ProfileScreen() {
         </View>
 
         {/* Lifestyle & Dealbreakers Section */}
-        <View style={styles.sectionCard}>
-          <Text style={styles.sectionTitle}>Lifestyle & Dealbreakers</Text>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Lifestyle & Dealbreakers</Text>
 
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Smoking Habit</Text>
@@ -1002,11 +1059,21 @@ export default function ProfileScreen() {
                 return (
                   <TouchableOpacity
                     key={pref}
-                    style={[styles.chip, isSelected ? styles.chipSelected : null]}
+                    style={[
+                      styles.chip,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                      isSelected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                    ]}
                     onPress={() => setSmokingPref(pref)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.chipText, isSelected ? styles.chipTextSelected : null]}>
+                    <Text
+                      style={[
+                        styles.chipText,
+                        { color: colors.textMuted },
+                        isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                      ]}
+                    >
                       {label}
                     </Text>
                   </TouchableOpacity>
@@ -1016,9 +1083,9 @@ export default function ProfileScreen() {
           </View>
 
           {/* Dealbreaker Switch */}
-          <View style={styles.switchRow}>
+          <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
             <View style={styles.switchTextContainer}>
-              <Text style={styles.switchTitle}>Non-Smoker Dealbreaker</Text>
+              <Text style={[styles.switchTitle, { color: colors.text }]}>Non-Smoker Dealbreaker</Text>
               <Text style={styles.switchDesc}>
                 Strictly exclude smokers from your discovery deck. Aura never compromises this rule.
               </Text>
@@ -1033,10 +1100,10 @@ export default function ProfileScreen() {
         </View>
 
         {/* App Appearance & Themes Section */}
-        <View style={styles.sectionCard}>
+        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.sectionTitleRow}>
-            <Text style={styles.sectionTitle}>App Appearance & Theme</Text>
-            <Text style={styles.sectionSubtitle}>5 Custom Palettes</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>App Appearance & Theme</Text>
+            <Text style={[styles.sectionSubtitle, { color: colors.gold }]}>5 Custom Palettes</Text>
           </View>
           <Text style={styles.themeSectionDesc}>
             Choose your signature Aura aesthetic. Themes switch reactively and persist across restarts.
@@ -1050,8 +1117,8 @@ export default function ProfileScreen() {
                   key={t.id}
                   style={[
                     styles.themeCard,
-                    { borderColor: isActive ? t.primaryColor : colors.border },
-                    isActive && styles.themeCardActive,
+                    { backgroundColor: colors.backgroundElevated, borderColor: isActive ? t.primaryColor : colors.border },
+                    isActive && [styles.themeCardActive, { backgroundColor: colors.cardElevated }],
                   ]}
                   onPress={() => setTheme(t.id)}
                   activeOpacity={0.8}
@@ -1070,7 +1137,7 @@ export default function ProfileScreen() {
                   {/* Theme Info */}
                   <View style={styles.themeDetails}>
                     <View style={styles.themeNameRow}>
-                      <Text style={[styles.themeName, isActive && { color: t.primaryColor }]}>
+                      <Text style={[styles.themeName, { color: colors.text }, isActive && { color: t.primaryColor }]}>
                         {t.name}
                       </Text>
                       {isActive && (
@@ -1089,26 +1156,26 @@ export default function ProfileScreen() {
 
         {/* Security & Privacy Shortcut */}
         <TouchableOpacity
-          style={styles.securityCard}
+          style={[styles.securityCard, { backgroundColor: colors.card, borderColor: colors.border }]}
           onPress={() => router.push('/(tabs)/settings')}
           activeOpacity={0.8}
         >
-          <View style={styles.securityIconWrap}>
+          <View style={[styles.securityIconWrap, { backgroundColor: colors.cardElevated }]}>
             <Text style={styles.securityIcon}>🛡️</Text>
           </View>
           <View style={styles.securityInfo}>
-            <Text style={styles.securityTitle}>Privacy & Security Settings</Text>
+            <Text style={[styles.securityTitle, { color: colors.text }]}>Privacy & Security Settings</Text>
             <Text style={styles.securityDesc}>
               Biometric lock, app switcher veil, notifications, and telemetry.
             </Text>
           </View>
-          <Text style={styles.securityChevron}>➔</Text>
+          <Text style={[styles.securityChevron, { color: colors.gold }]}>➔</Text>
         </TouchableOpacity>
 
         {/* Mandatory Age Assurance Status */}
-        <View style={styles.verificationCard}>
+        <View style={[styles.verificationCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.verificationHeader}>
-            <Text style={styles.verificationTitle}>18+ Age Assurance (Mandatory)</Text>
+            <Text style={[styles.verificationTitle, { color: colors.text }]}>18+ Age Assurance (Mandatory)</Text>
             <View
               style={[
                 styles.verBadge,
@@ -1132,19 +1199,19 @@ export default function ProfileScreen() {
           </Text>
           {!profile?.is_age_verified && (
             <TouchableOpacity
-              style={styles.verifyActionBtn}
+              style={[styles.verifyActionBtn, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}
               onPress={() => router.push('/(auth)/verify-age')}
               activeOpacity={0.8}
             >
-              <Text style={styles.verifyActionBtnText}>Complete Age Verification</Text>
+              <Text style={[styles.verifyActionBtnText, { color: colors.gold }]}>Complete Age Verification</Text>
             </TouchableOpacity>
           )}
         </View>
 
         {/* Photo Verification (Selfie) */}
-        <View style={[styles.verificationCard, { marginTop: spacing.md }]}>
+        <View style={[styles.verificationCard, { marginTop: spacing.md, backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.verificationHeader}>
-            <Text style={styles.verificationTitle}>Photo Verification (Selfie)</Text>
+            <Text style={[styles.verificationTitle, { color: colors.text }]}>Photo Verification (Selfie)</Text>
             <View
               style={[
                 styles.verBadge,
@@ -1168,7 +1235,7 @@ export default function ProfileScreen() {
           </Text>
           {!profile?.is_photo_verified && (
             <TouchableOpacity
-              style={styles.verifyActionBtn}
+              style={[styles.verifyActionBtn, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}
               onPress={
                 profile?.verification_status === 'PENDING'
                   ? handleCheckVerificationStatus
@@ -1176,7 +1243,7 @@ export default function ProfileScreen() {
               }
               activeOpacity={0.8}
             >
-              <Text style={styles.verifyActionBtnText}>
+              <Text style={[styles.verifyActionBtnText, { color: colors.gold }]}>
                 {profile?.verification_status === 'PENDING' ? 'Check Verification Status' : 'Take Verification Selfie'}
               </Text>
             </TouchableOpacity>

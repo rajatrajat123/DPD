@@ -355,5 +355,5 @@ export const THEME_METAS: ThemeMeta[] = [
   },
 ];
 
-// Default export maintains compatibility with existing static imports
-export const colors: ColorTheme = midnightGoldTheme;
+// Default export maintains compatibility with existing static imports and stays synced at runtime
+export const colors: ColorTheme = { ...midnightGoldTheme };

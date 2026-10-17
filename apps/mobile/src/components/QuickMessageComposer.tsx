@@ -9,7 +9,7 @@ import {
   Platform,
   Keyboard,
 } from 'react-native';
-import { colors, typography, spacing, borderRadius } from '../theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
 
 interface QuickMessageComposerProps {
   recipientId?: string;
@@ -28,6 +28,7 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
   onFocus,
   onBlur,
 }) => {
+  const { colors } = useTheme();
   const [text, setText] = useState('');
   const [isSending, setIsSending] = useState(false);
 
@@ -59,9 +60,9 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
 
   return (
     <View style={styles.container}>
-      <View style={styles.inputWrapper}>
+      <View style={[styles.inputWrapper, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
         <TextInput
-          style={styles.input}
+          style={[styles.input, { color: colors.text }]}
           value={text}
           onChangeText={setText}
           onFocus={onFocus}
@@ -76,14 +77,19 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
           testID="quick-message-input"
         />
         {text.length > 0 && (
-          <Text style={styles.charCount}>
+          <Text style={[styles.charCount, { color: colors.textSubtle }]}>
             {text.length}/{charLimit}
           </Text>
         )}
       </View>
 
       <TouchableOpacity
-        style={[styles.sendButton, canSend ? styles.sendButtonActive : styles.sendButtonDisabled]}
+        style={[
+          styles.sendButton,
+          canSend
+            ? [styles.sendButtonActive, { backgroundColor: colors.gold, shadowColor: colors.gold }]
+            : [styles.sendButtonDisabled, { backgroundColor: colors.cardElevated, borderColor: colors.borderSubtle }],
+        ]}
         onPress={handleSend}
         disabled={!canSend}
         activeOpacity={0.8}
@@ -92,9 +98,14 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
         accessibilityLabel="Send Intro Note"
       >
         {isSending ? (
-          <ActivityIndicator size="small" color="#FFFFFF" />
+          <ActivityIndicator size="small" color={colors.textInverse || "#FFFFFF"} />
         ) : (
-          <Text style={[styles.sendIcon, canSend ? styles.sendIconActive : styles.sendIconDisabled]}>
+          <Text
+            style={[
+              styles.sendIcon,
+              canSend ? styles.sendIconActive : [styles.sendIconDisabled, { color: colors.textSubtle }],
+            ]}
+          >
             ➤
           </Text>
         )}

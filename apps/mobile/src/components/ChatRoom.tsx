@@ -13,7 +13,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, typography, spacing, borderRadius } from '../theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
 import { Message, Conversation } from '../types';
 import { chatService, chatWebSocket, ConnectionStatus } from '../services/chat/chatService';
 import { discoveryService } from '../services/discovery/discoveryService';
@@ -35,6 +35,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   onBack,
   onUnmatched,
 }) => {
+  const { colors } = useTheme();
   const { user } = useAuth();
   const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -319,12 +320,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
     return (
       <View style={[styles.msgRow, isMe ? styles.msgRowMe : styles.msgRowThem]}>
-        <View style={[styles.msgBubble, isMe ? styles.msgBubbleMe : styles.msgBubbleThem]}>
-          <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem]}>{textContent}</Text>
+        <View
+          style={[
+            styles.msgBubble,
+            isMe
+              ? [styles.msgBubbleMe, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]
+              : [styles.msgBubbleThem, { backgroundColor: colors.card, borderColor: colors.border }],
+          ]}
+        >
+          <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem, { color: colors.text }]}>{textContent}</Text>
           <View style={styles.msgMetaRow}>
-            <Text style={styles.msgTime}>{timeFormatted}</Text>
+            <Text style={[styles.msgTime, { color: colors.textSubtle }]}>{timeFormatted}</Text>
             {isMe && (
-              <Text style={isRead ? styles.readReceiptGold : styles.readReceipt}>
+              <Text style={isRead ? [styles.readReceiptGold, { color: colors.gold }] : [styles.readReceipt, { color: colors.textSubtle }]}>
                 {isRead ? ' ✓✓' : isDelivered ? ' ✓✓' : ' ✓'}
               </Text>
             )}
@@ -336,18 +344,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   return (
     <KeyboardAvoidingView
-      style={styles.container}
+      style={[styles.container, { backgroundColor: colors.background }]}
       behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
     >
       {/* Header */}
-      <View style={styles.header}>
+      <View style={[styles.header, { backgroundColor: colors.card, borderBottomColor: colors.border }]}>
         <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
-          <Text style={styles.backButtonText}>←</Text>
+          <Text style={[styles.backButtonText, { color: colors.gold }]}>←</Text>
         </TouchableOpacity>
 
         <View style={styles.headerTitleContainer}>
-          <Text style={styles.headerTitle}>{recipientName}</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>{recipientName}</Text>
           <View style={styles.statusPill}>
             <View
               style={[
@@ -355,7 +363,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
                 connectionStatus === 'CONNECTED' ? styles.statusDotOnline : styles.statusDotOffline,
               ]}
             />
-            <Text style={styles.statusPillText}>
+            <Text style={[styles.statusPillText, { color: colors.textMuted }]}>
               {connectionStatus === 'CONNECTED'
                 ? 'Encrypted (In-Transit)'
                 : connectionStatus === 'CONNECTING'
@@ -389,14 +397,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       {/* Typing indicator */}
       {isRecipientTyping && (
         <View style={styles.typingContainer}>
-          <Text style={styles.typingText}>{recipientName} is typing...</Text>
+          <Text style={[styles.typingText, { color: colors.gold }]}>{recipientName} is typing...</Text>
         </View>
       )}
 
       {/* Input bar */}
-      <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
+      <View style={[styles.inputBar, { backgroundColor: colors.card, borderTopColor: colors.border, paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
         <TextInput
-          style={styles.input}
+          style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
           value={inputText}
           onChangeText={handleInputChange}
           placeholder="Send a private message..."
@@ -405,7 +413,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           maxLength={1000}
         />
         <TouchableOpacity
-          style={[styles.sendButton, (!inputText.trim() || isSending) ? styles.sendButtonDisabled : null]}
+          style={[
+            styles.sendButton,
+            { backgroundColor: colors.gold },
+            (!inputText.trim() || isSending) ? [styles.sendButtonDisabled, { backgroundColor: colors.cardMuted }] : null,
+          ]}
           onPress={handleSend}
           disabled={!inputText.trim() || isSending}
           activeOpacity={0.8}
@@ -416,7 +428,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {isSending ? (
             <ActivityIndicator color={colors.textInverse} size="small" />
           ) : (
-            <Text style={styles.sendButtonText}>↑</Text>
+            <Text style={[styles.sendButtonText, { color: colors.textInverse }]}>↑</Text>
           )}
         </TouchableOpacity>
       </View>

@@ -7,7 +7,7 @@ import {
   LayoutChangeEvent,
   GestureResponderEvent,
 } from 'react-native';
-import { colors, spacing } from '../theme';
+import { colors, spacing, useTheme } from '../theme';
 
 interface SingleSliderProps {
   min: number;
@@ -32,6 +32,7 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
   maxLabel,
   testID,
 }) => {
+  const { colors } = useTheme();
   const [trackWidth, setTrackWidth] = useState(300);
 
   const currentValueRef = useRef(value);
@@ -105,6 +106,7 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
           style={[
             styles.activeTrack,
             {
+              backgroundColor: colors.gold,
               width: Math.max(0, Math.min(trackWidth, pos)),
             },
           ]}
@@ -115,6 +117,8 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
           style={[
             styles.thumb,
             {
+              borderColor: colors.gold,
+              backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, pos - THUMB_SIZE / 2)),
             },
           ]}
@@ -122,15 +126,15 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
           hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
           testID={`${testID}-thumb`}
         >
-          <View style={styles.thumbCenterDot} />
+          <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
         </View>
       </View>
 
       {/* Endpoint Labels */}
       {(minLabel || maxLabel) && (
         <View style={styles.labelsRow}>
-          <Text style={styles.boundLabel}>{minLabel ?? min}</Text>
-          <Text style={styles.boundLabel}>{maxLabel ?? max}</Text>
+          <Text style={[styles.boundLabel, { color: colors.textSubtle }]}>{minLabel ?? min}</Text>
+          <Text style={[styles.boundLabel, { color: colors.textSubtle }]}>{maxLabel ?? max}</Text>
         </View>
       )}
     </View>

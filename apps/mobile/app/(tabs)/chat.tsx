@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { Match, Conversation, MessageRequest } from '../../src/types';
 import { chatService } from '../../src/services/chat/chatService';
 import { useAuth } from '../../src/context/AuthContext';
@@ -23,6 +23,7 @@ import { Alert } from 'react-native';
 export default function ChatScreen() {
   const router = useRouter();
   const { isAgeVerified } = useAuth();
+  const { colors } = useTheme();
 
   const [matches, setMatches] = useState<Match[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -126,10 +127,10 @@ export default function ChatScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Chat</Text>
-        <Text style={styles.subtitle}>Confidential & Encrypted</Text>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+      <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
+        <Text style={[styles.title, { color: colors.text }]}>Chat</Text>
+        <Text style={[styles.subtitle, { color: colors.gold }]}>Confidential & Encrypted</Text>
       </View>
 
       <SponsoredBannerAd testID="inbox-sponsored-banner" />
@@ -158,10 +159,10 @@ export default function ChatScreen() {
           {/* New Mutual Matches Section */}
           <View style={styles.section}>
             <View style={styles.sectionHeaderRow}>
-              <Text style={styles.sectionTitle}>Mutual Sparks</Text>
+              <Text style={[styles.sectionTitle, { color: colors.text }]}>Mutual Sparks</Text>
               {matches.length > 0 && (
-                <View style={styles.countPill}>
-                  <Text style={styles.countPillText}>{matches.length}</Text>
+                <View style={[styles.countPill, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                  <Text style={[styles.countPillText, { color: colors.gold }]}>{matches.length}</Text>
                 </View>
               )}
             </View>
@@ -183,12 +184,12 @@ export default function ChatScreen() {
                     onPress={() => openConversation(m.id, m.target_profile?.display_name || 'Member', m.target_profile?.user_id || m.target_user_id)}
                     activeOpacity={0.8}
                   >
-                    <View style={styles.matchAvatarWrap}>
+                    <View style={[styles.matchAvatarWrap, { borderColor: colors.gold }]}>
                       {m.target_profile?.avatar_url ? (
                         <Image source={{ uri: m.target_profile.avatar_url }} style={styles.matchAvatar} />
                       ) : (
-                        <View style={[styles.matchAvatar, styles.avatarPlaceholder]}>
-                          <Text style={styles.monogramText}>{m.target_profile?.display_name ? m.target_profile.display_name.charAt(0) : 'M'}</Text>
+                        <View style={[styles.matchAvatar, styles.avatarPlaceholder, { backgroundColor: colors.card }]}>
+                          <Text style={[styles.monogramText, { color: colors.gold }]}>{m.target_profile?.display_name ? m.target_profile.display_name.charAt(0) : 'M'}</Text>
                         </View>
                       )}
                       {m.target_profile?.is_verified && (
@@ -210,21 +211,21 @@ export default function ChatScreen() {
           {messageRequests.length > 0 && (
             <View style={styles.section}>
               <View style={styles.sectionHeaderRow}>
-                <Text style={styles.sectionTitle}>Message Requests</Text>
-                <View style={styles.countPillGold}>
-                  <Text style={styles.countPillGoldText}>{messageRequests.length}</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Message Requests</Text>
+                <View style={[styles.countPillGold, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                  <Text style={[styles.countPillGoldText, { color: colors.gold }]}>{messageRequests.length}</Text>
                 </View>
               </View>
 
               {messageRequests.map((req) => (
-                <View key={req.id} style={styles.requestCard}>
+                <View key={req.id} style={[styles.requestCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
                   <View style={styles.requestHeader}>
                     <View style={styles.requestAvatarWrap}>
                       {req.sender_avatar ? (
                         <Image source={{ uri: req.sender_avatar }} style={styles.requestAvatar} />
                       ) : (
-                        <View style={[styles.requestAvatar, styles.avatarPlaceholder]}>
-                          <Text style={styles.monogramText}>
+                        <View style={[styles.requestAvatar, styles.avatarPlaceholder, { backgroundColor: colors.card }]}>
+                          <Text style={[styles.monogramText, { color: colors.gold }]}>
                             {req.sender_name ? req.sender_name.charAt(0) : 'M'}
                           </Text>
                         </View>
@@ -237,7 +238,7 @@ export default function ChatScreen() {
                     </View>
 
                     <View style={styles.requestInfo}>
-                      <Text style={styles.requestName}>
+                      <Text style={[styles.requestName, { color: colors.text }]}>
                         {req.sender_name || 'Member'}{req.sender_age ? `, ${req.sender_age}` : ''}
                       </Text>
                       <Text style={styles.requestTimestamp}>
@@ -249,13 +250,13 @@ export default function ChatScreen() {
                     </View>
                   </View>
 
-                  <View style={styles.requestBubble}>
-                    <Text style={styles.requestBodyText}>{req.body}</Text>
+                  <View style={[styles.requestBubble, { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle }]}>
+                    <Text style={[styles.requestBodyText, { color: colors.text }]}>{req.body}</Text>
                   </View>
 
                   <View style={styles.requestActions}>
                     <TouchableOpacity
-                      style={[styles.requestActionBtn, styles.acceptBtn]}
+                      style={[styles.requestActionBtn, styles.acceptBtn, { backgroundColor: colors.gold }]}
                       onPress={() => handleAcceptRequest(req)}
                       disabled={processingRequestId === req.id}
                       activeOpacity={0.8}
@@ -263,17 +264,17 @@ export default function ChatScreen() {
                       {processingRequestId === req.id ? (
                         <ActivityIndicator color={colors.textInverse} size="small" />
                       ) : (
-                        <Text style={styles.acceptBtnText}>Accept</Text>
+                        <Text style={[styles.acceptBtnText, { color: colors.textInverse }]}>Accept</Text>
                       )}
                     </TouchableOpacity>
 
                     <TouchableOpacity
-                      style={[styles.requestActionBtn, styles.declineBtn]}
+                      style={[styles.requestActionBtn, styles.declineBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
                       onPress={() => handleDeclineRequest(req)}
                       disabled={processingRequestId === req.id}
                       activeOpacity={0.8}
                     >
-                      <Text style={styles.declineBtnText}>Decline</Text>
+                      <Text style={[styles.declineBtnText, { color: colors.textMuted }]}>Decline</Text>
                     </TouchableOpacity>
 
                     <TouchableOpacity
@@ -292,30 +293,30 @@ export default function ChatScreen() {
 
           {/* Conversations Inbox */}
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Messages</Text>
+            <Text style={[styles.sectionTitle, { color: colors.text }]}>Messages</Text>
 
             {conversations.length === 0 ? (
-              <View style={styles.emptyInboxCard}>
-                <View style={styles.emptyInboxIconCircle}>
+              <View style={[styles.emptyInboxCard, { backgroundColor: colors.card, borderColor: colors.borderSubtle }]}>
+                <View style={[styles.emptyInboxIconCircle, { backgroundColor: colors.cardElevated }]}>
                   <Text style={styles.emptyInboxIcon}>💬</Text>
                 </View>
-                <Text style={styles.emptyInboxTitle}>Your Inbox is Quiet</Text>
-                <Text style={styles.emptyInboxBody}>
+                <Text style={[styles.emptyInboxTitle, { color: colors.text }]}>Your Inbox is Quiet</Text>
+                <Text style={[styles.emptyInboxBody, { color: colors.textMuted }]}>
                   Conversations become available when both members like each other. Swipe right in Discover to find your match!
                 </Text>
                 <TouchableOpacity
-                  style={styles.discoverBtn}
+                  style={[styles.discoverBtn, { backgroundColor: colors.gold }]}
                   onPress={() => router.push('/(tabs)')}
                   activeOpacity={0.85}
                 >
-                  <Text style={styles.discoverBtnText}>Explore Discover</Text>
+                  <Text style={[styles.discoverBtnText, { color: colors.textInverse }]}>Explore Discover</Text>
                 </TouchableOpacity>
               </View>
             ) : (
               conversations.map((c) => (
                 <TouchableOpacity
                   key={c.id}
-                  style={styles.conversationItem}
+                  style={[styles.conversationItem, { borderBottomColor: colors.borderSubtle }]}
                   onPress={() => openConversation(c.id, c.participant_name, c.participant_id)}
                   activeOpacity={0.7}
                 >
@@ -323,15 +324,15 @@ export default function ChatScreen() {
                     {c.participant_avatar ? (
                       <Image source={{ uri: c.participant_avatar }} style={styles.convAvatar} />
                     ) : (
-                      <View style={[styles.convAvatar, styles.avatarPlaceholder]}>
-                        <Text style={styles.monogramText}>{c.participant_name.charAt(0)}</Text>
+                      <View style={[styles.convAvatar, styles.avatarPlaceholder, { backgroundColor: colors.card }]}>
+                        <Text style={[styles.monogramText, { color: colors.gold }]}>{c.participant_name.charAt(0)}</Text>
                       </View>
                     )}
                   </View>
 
                   <View style={styles.convInfo}>
                     <View style={styles.convHeaderRow}>
-                      <Text style={styles.convName}>{c.participant_name}</Text>
+                      <Text style={[styles.convName, { color: colors.text }]}>{c.participant_name}</Text>
                       {c.last_message && (
                         <Text style={styles.convTime}>
                           {new Date(c.last_message.created_at).toLocaleDateString([], {
@@ -341,14 +342,14 @@ export default function ChatScreen() {
                         </Text>
                       )}
                     </View>
-                    <Text style={styles.convLastMessage} numberOfLines={1}>
+                    <Text style={[styles.convLastMessage, { color: colors.textMuted }]} numberOfLines={1}>
                       {c.last_message ? c.last_message.content : 'Matched! Say hello.'}
                     </Text>
                   </View>
 
                   {c.unread_count > 0 && (
-                    <View style={styles.unreadBadge}>
-                      <Text style={styles.unreadBadgeText}>{c.unread_count}</Text>
+                    <View style={[styles.unreadBadge, { backgroundColor: colors.gold }]}>
+                      <Text style={[styles.unreadBadgeText, { color: colors.textInverse }]}>{c.unread_count}</Text>
                     </View>
                   )}
                 </TouchableOpacity>

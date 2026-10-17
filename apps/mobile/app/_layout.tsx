@@ -5,12 +5,9 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { AuthProvider, useAuth } from '../src/context/AuthContext';
 import { PrivacyVeil } from '../src/components/PrivacyVeil';
-import { colors, ThemeProvider } from '../src/theme';
+import { colors, ThemeProvider, useTheme } from '../src/theme';
 
 // Global safeguard for React Native Hermes engine: Error.prototype.name has only a getter without a setter.
-// Direct assignments like `this.name = '...'` (e.g. whatwg-fetch DOMException polyfill) throw:
-// "TypeError: Cannot assign to property 'name' which has only a getter".
-// Providing a setter on Error.prototype allows direct assignment to safely define an own property.
 (() => {
   try {
     const errorNameDesc = Object.getOwnPropertyDescriptor(Error.prototype, 'name');
@@ -33,8 +30,9 @@ import { colors, ThemeProvider } from '../src/theme';
   }
 })();
 
-function NavigationGuard({ children }: { children: React.ReactNode }) {
+function ThemedNavigationGuard({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading, isAgeVerified } = useAuth();
+  const { colors } = useTheme();
   const segments = useSegments();
   const pathname = usePathname();
   const router = useRouter();
@@ -63,7 +61,7 @@ function NavigationGuard({ children }: { children: React.ReactNode }) {
 
   if (isLoading) {
     return (
-      <View style={styles.loadingContainer}>
+      <View style={[styles.loadingContainer, { backgroundColor: colors.background }]}>
         <ActivityIndicator size="large" color={colors.gold} />
       </View>
     );
@@ -72,34 +70,42 @@ function NavigationGuard({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+function ThemedApp() {
+  const { colors } = useTheme();
+
+  return (
+    <AuthProvider>
+      <StatusBar style="light" />
+      <ThemedNavigationGuard>
+        <Stack
+          screenOptions={{
+            headerShown: false,
+            contentStyle: { backgroundColor: colors.background },
+            animation: 'slide_from_right',
+          }}
+        >
+          <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/login" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/register" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/forgot-password" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/reset-password" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/verify-age" options={{ headerShown: false, presentation: 'modal' }} />
+          <Stack.Screen name="chat/[id]" options={{ headerShown: false }} />
+          <Stack.Screen name="search" options={{ headerShown: false }} />
+          <Stack.Screen name="profile/[id]" options={{ headerShown: false }} />
+        </Stack>
+      </ThemedNavigationGuard>
+      {/* Global privacy veil shielding sensitive content in app switcher and biometric lock */}
+      <PrivacyVeil />
+    </AuthProvider>
+  );
+}
+
 export default function RootLayout() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
-        <AuthProvider>
-          <StatusBar style="light" />
-          <NavigationGuard>
-            <Stack
-              screenOptions={{
-                headerShown: false,
-                contentStyle: { backgroundColor: colors.background },
-                animation: 'slide_from_right',
-              }}
-            >
-              <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
-              <Stack.Screen name="(auth)/login" options={{ headerShown: false }} />
-              <Stack.Screen name="(auth)/register" options={{ headerShown: false }} />
-              <Stack.Screen name="(auth)/forgot-password" options={{ headerShown: false }} />
-              <Stack.Screen name="(auth)/reset-password" options={{ headerShown: false }} />
-              <Stack.Screen name="(auth)/verify-age" options={{ headerShown: false, presentation: 'modal' }} />
-              <Stack.Screen name="chat/[id]" options={{ headerShown: false }} />
-              <Stack.Screen name="search" options={{ headerShown: false }} />
-              <Stack.Screen name="profile/[id]" options={{ headerShown: false }} />
-            </Stack>
-          </NavigationGuard>
-          {/* Global privacy veil shielding sensitive content in app switcher and biometric lock */}
-          <PrivacyVeil />
-        </AuthProvider>
+        <ThemedApp />
       </ThemeProvider>
     </SafeAreaProvider>
   );

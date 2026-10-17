@@ -12,7 +12,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { colors, typography, spacing, borderRadius } from '../theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
 import { DiscoveryPreferences } from '../types';
 import { discoveryService } from '../services/discovery/discoveryService';
 import { RangeSlider } from './RangeSlider';
@@ -74,6 +74,7 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
   onApply,
   currentPreferences,
 }) => {
+  const { colors } = useTheme();
   // Age Range (18 - 99)
   const [minAge, setMinAge] = useState(18);
   const [maxAge, setMaxAge] = useState(99);
@@ -301,15 +302,15 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
 
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet" onRequestClose={onClose}>
-      <SafeAreaView style={styles.safeArea}>
+      <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
         {/* Header Bar */}
-        <View style={styles.header}>
+        <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
           <TouchableOpacity onPress={onClose} style={styles.closeBtn} activeOpacity={0.7} testID="filter-close-button">
-            <Text style={styles.closeBtnText}>✕</Text>
+            <Text style={[styles.closeBtnText, { color: colors.textSubtle }]}>✕</Text>
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Discovery Filters</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]}>Discovery Filters</Text>
           <TouchableOpacity onPress={handleReset} style={styles.resetBtn} activeOpacity={0.7} testID="filter-reset-button">
-            <Text style={styles.resetBtnText}>Reset</Text>
+            <Text style={[styles.resetBtnText, { color: colors.gold }]}>Reset</Text>
           </TouchableOpacity>
         </View>
 
@@ -1038,23 +1039,23 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
             <Text style={styles.sectionTitle}>Mandatory Dealbreakers</Text>
             <Text style={styles.sectionDesc}>Hard exclusions applied strictly regardless of scarcity.</Text>
 
-            <View style={styles.switchRow}>
+            <View style={[styles.switchRow, { borderBottomColor: colors.borderSubtle }]}>
               <View style={styles.switchTextCol}>
-                <Text style={styles.switchLabel}>🚭 Non-Smoker Only</Text>
-                <Text style={styles.switchSubLabel}>Strictly hide candidates who smoke.</Text>
+                <Text style={[styles.switchLabel, { color: colors.text }]}>🚭 Non-Smoker Only</Text>
+                <Text style={[styles.switchSubLabel, { color: colors.textSubtle }]}>Strictly hide candidates who smoke.</Text>
               </View>
               <Switch
                 value={nonSmokerOnly}
                 onValueChange={setNonSmokerOnly}
-                trackColor={{ false: '#3A3F48', true: colors.primaryRed }}
-                thumbColor="#FFFFFF"
+                trackColor={{ false: colors.border, true: colors.ruby }}
+                thumbColor={colors.text}
               />
             </View>
 
-            <View style={styles.switchRow}>
+            <View style={[styles.switchRow, { borderBottomColor: colors.borderSubtle }]}>
               <View style={styles.switchTextCol}>
-                <Text style={styles.switchLabel}>📸 Photo Verified Only</Text>
-                <Text style={styles.switchSubLabel}>Only show profiles with verified selfie badge.</Text>
+                <Text style={[styles.switchLabel, { color: colors.text }]}>📸 Photo Verified Only</Text>
+                <Text style={[styles.switchSubLabel, { color: colors.textSubtle }]}>Only show profiles with verified selfie badge.</Text>
               </View>
               <Switch
                 value={verifiedOnly || requireVerifiedDealbreaker}
@@ -1062,21 +1063,21 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
                   setVerifiedOnly(val);
                   setRequireVerifiedDealbreaker(val);
                 }}
-                trackColor={{ false: '#3A3F48', true: colors.gold }}
-                thumbColor="#FFFFFF"
+                trackColor={{ false: colors.border, true: colors.gold }}
+                thumbColor={colors.text}
               />
             </View>
 
-            <View style={styles.switchRow}>
+            <View style={[styles.switchRow, { borderBottomColor: colors.borderSubtle }]}>
               <View style={styles.switchTextCol}>
-                <Text style={styles.switchLabel}>💍 Monogamous Only</Text>
-                <Text style={styles.switchSubLabel}>Exclude non-monogamous and ENM relationship structures.</Text>
+                <Text style={[styles.switchLabel, { color: colors.text }]}>💍 Monogamous Only</Text>
+                <Text style={[styles.switchSubLabel, { color: colors.textSubtle }]}>Exclude non-monogamous and ENM relationship structures.</Text>
               </View>
               <Switch
                 value={requireMonogamous}
                 onValueChange={setRequireMonogamous}
-                trackColor={{ false: '#3A3F48', true: colors.gold }}
-                thumbColor="#FFFFFF"
+                trackColor={{ false: colors.border, true: colors.gold }}
+                thumbColor={colors.text}
               />
             </View>
           </View>
@@ -1085,16 +1086,16 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
         </ScrollView>
 
         {/* Footer Apply Button */}
-        <View style={styles.footer}>
+        <View style={[styles.footer, { backgroundColor: colors.background, borderTopColor: colors.borderSubtle }]}>
           <TouchableOpacity
-            style={styles.applyBtn}
+            style={[styles.applyBtn, { backgroundColor: colors.gold }]}
             onPress={handleApply}
             disabled={isSaving}
             activeOpacity={0.8}
             testID="apply-filters-button"
           >
             {isSaving ? (
-              <ActivityIndicator color="#090A0E" size="small" />
+              <ActivityIndicator color={colors.background} size="small" />
             ) : (
               <Text style={styles.applyBtnText}>Apply Discovery Filters</Text>
             )}
@@ -1108,7 +1109,7 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
 const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
-    backgroundColor: '#090A0E',
+    backgroundColor: colors.background,
   },
   header: {
     flexDirection: 'row',
@@ -1117,7 +1118,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.md,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.08)',
+    borderBottomColor: colors.borderSubtle,
   },
   headerTitle: {
     fontSize: 18,
@@ -1144,11 +1145,11 @@ const styles = StyleSheet.create({
     gap: spacing.lg,
   },
   sectionCard: {
-    backgroundColor: '#161922',
+    backgroundColor: colors.card,
     borderRadius: borderRadius.lg,
     padding: spacing.md,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: colors.borderSubtle,
   },
   sectionTitleRow: {
     flexDirection: 'row',
@@ -1189,10 +1190,10 @@ const styles = StyleSheet.create({
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#13151D',
+    backgroundColor: colors.cardElevated,
     borderRadius: borderRadius.md,
     borderWidth: 1,
-    borderColor: '#242835',
+    borderColor: colors.border,
     paddingHorizontal: spacing.sm,
     height: 42,
   },
@@ -1242,9 +1243,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 6,
     borderRadius: borderRadius.sm,
-    backgroundColor: '#1E222F',
+    backgroundColor: colors.cardElevated,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.06)',
+    borderColor: colors.borderSubtle,
   },
   compactChipSelected: {
     backgroundColor: colors.goldMuted,
@@ -1265,11 +1266,11 @@ const styles = StyleSheet.create({
   },
   unitToggleRow: {
     flexDirection: 'row',
-    backgroundColor: '#1E222F',
+    backgroundColor: colors.cardElevated,
     borderRadius: borderRadius.sm,
     padding: 2,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: colors.borderSubtle,
   },
   unitPill: {
     paddingHorizontal: spacing.sm,
@@ -1285,7 +1286,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   unitPillTextActive: {
-    color: '#090A0E',
+    color: colors.background,
     fontWeight: '700',
   },
   chipsRow: {
@@ -1297,9 +1298,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.sm + 2,
     paddingVertical: spacing.xs + 2,
     borderRadius: borderRadius.full,
-    backgroundColor: '#1E222F',
+    backgroundColor: colors.cardElevated,
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.08)',
+    borderColor: colors.borderSubtle,
   },
   chipSelected: {
     backgroundColor: colors.goldMuted,
@@ -1320,7 +1321,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     paddingVertical: spacing.sm,
     borderBottomWidth: 1,
-    borderBottomColor: 'rgba(255,255,255,0.04)',
+    borderBottomColor: colors.borderSubtle,
   },
   switchTextCol: {
     flex: 1,
@@ -1339,8 +1340,8 @@ const styles = StyleSheet.create({
   footer: {
     padding: spacing.lg,
     borderTopWidth: 1,
-    borderTopColor: 'rgba(255,255,255,0.08)',
-    backgroundColor: '#090A0E',
+    borderTopColor: colors.borderSubtle,
+    backgroundColor: colors.background,
   },
   applyBtn: {
     backgroundColor: colors.gold,

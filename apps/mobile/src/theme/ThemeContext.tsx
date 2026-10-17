@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import {
   ThemeId,
   ThemeMeta,
@@ -6,6 +6,7 @@ import {
   THEME_REGISTRY,
   THEME_METAS,
   midnightGoldTheme,
+  colors,
 } from './colors';
 import { secureStorage } from '../services/storage/secureStore';
 
@@ -32,17 +33,23 @@ const ThemeContext = createContext<ThemeContextValue>({
 export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [themeId, setThemeIdState] = useState<ThemeId>('midnight-gold');
   const [isLoaded, setIsLoaded] = useState(false);
+  const userSelectedRef = useRef(false);
 
   useEffect(() => {
     let mounted = true;
     (async () => {
       try {
         const saved = await secureStorage.getItem(THEME_STORAGE_KEY);
-        if (mounted && saved && THEME_REGISTRY[saved as ThemeId]) {
-          setThemeIdState(saved as ThemeId);
+        // An older async storage read must never overwrite a newer user selection in this session
+        if (mounted && !userSelectedRef.current && saved && THEME_REGISTRY[saved as ThemeId]) {
+          const validSaved = saved as ThemeId;
+          setThemeIdState(validSaved);
+          Object.assign(colors, THEME_REGISTRY[validSaved]);
         }
-      } catch {
-        // Fallback to default theme
+      } catch (err) {
+        if (__DEV__) {
+          console.warn('[ThemeContext] Failed to load saved theme from storage:', err);
+        }
       } finally {
         if (mounted) {
           setIsLoaded(true);
@@ -56,16 +63,24 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const setTheme = useCallback(async (newThemeId: ThemeId) => {
     if (!THEME_REGISTRY[newThemeId]) return;
+    userSelectedRef.current = true;
     setThemeIdState(newThemeId);
+    Object.assign(colors, THEME_REGISTRY[newThemeId]);
     try {
       await secureStorage.setItem(THEME_STORAGE_KEY, newThemeId);
-    } catch {
-      // Retain in memory
+    } catch (err) {
+      if (__DEV__) {
+        console.warn('[ThemeContext] Failed to persist theme to storage:', err);
+      }
+      throw err;
     }
   }, []);
 
   const currentColors = THEME_REGISTRY[themeId] || midnightGoldTheme;
   const currentMeta = THEME_METAS.find((m) => m.id === themeId) || THEME_METAS[0];
+
+  // Guarantee the static colors object is always synchronized with the active theme
+  Object.assign(colors, currentColors);
 
   return (
     <ThemeContext.Provider
@@ -89,4 +104,9 @@ export function useTheme(): ThemeContextValue {
     throw new Error('useTheme must be used within a ThemeProvider');
   }
   return context;
+}
+
+export function useThemeColors(): ColorTheme {
+  const { colors: activeColors } = useTheme();
+  return activeColors;
 }

@@ -10,7 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { privacyManager, BiometricStatus } from '../../src/services/security/privacyManager';
 import { notificationManager } from '../../src/services/notifications/notificationManager';
@@ -19,6 +19,7 @@ import { config } from '../../src/config/env';
 export default function SettingsScreen() {
   const router = useRouter();
   const { logout, setBiometricLock } = useAuth();
+  const { colors } = useTheme();
 
   const [biometricStatus, setBiometricStatus] = useState<BiometricStatus>({
     isAvailable: false,
@@ -136,24 +137,24 @@ export default function SettingsScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Privacy & Security</Text>
-        <Text style={styles.subtitle}>Confidentiality by Design</Text>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
+      <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
+        <Text style={[styles.title, { color: colors.text }]}>Privacy & Security</Text>
+        <Text style={[styles.subtitle, { color: colors.gold }]}>Confidentiality by Design</Text>
       </View>
 
       <ScrollView contentContainerStyle={styles.scrollContent}>
         {/* Device Privacy Controls */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>App Protection</Text>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>App Protection</Text>
 
           {/* Biometric Lock */}
-          <View style={styles.settingRow}>
+          <View style={[styles.settingRow, { borderBottomColor: colors.borderSubtle }]}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingTitle}>
+              <Text style={[styles.settingTitle, { color: colors.text }]}>
                 Biometric App Lock ({biometricStatus.biometricType === 'FACE_ID' ? 'Face ID' : 'Fingerprint'})
               </Text>
-              <Text style={styles.settingDesc}>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
                 Require biometric unlock whenever returning to the Aura app.
               </Text>
             </View>
@@ -166,10 +167,10 @@ export default function SettingsScreen() {
           </View>
 
           {/* App Switcher Blur Info */}
-          <View style={styles.settingRow}>
+          <View style={[styles.settingRow, { borderBottomColor: colors.borderSubtle }]}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingTitle}>App Switcher Privacy Veil</Text>
-              <Text style={styles.settingDesc}>
+              <Text style={[styles.settingTitle, { color: colors.text }]}>App Switcher Privacy Veil</Text>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
                 Active by default. Automatically veils profile cards and messages when multitasking.
               </Text>
             </View>
@@ -179,10 +180,10 @@ export default function SettingsScreen() {
           </View>
 
           {/* Screenshot Prevention */}
-          <View style={styles.settingRow}>
+          <View style={[styles.settingRow, { borderBottomColor: colors.borderSubtle }]}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingTitle}>Block Screen Captures (Android)</Text>
-              <Text style={styles.settingDesc}>
+              <Text style={[styles.settingTitle, { color: colors.text }]}>Block Screen Captures (Android)</Text>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
                 Blocks screenshots and screen recording on private chat and member screens.
               </Text>
             </View>
@@ -197,12 +198,12 @@ export default function SettingsScreen() {
 
         {/* Notifications & Lock Screen Privacy */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Notification Privacy</Text>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Notification Privacy</Text>
 
-          <View style={styles.settingRow}>
+          <View style={[styles.settingRow, { borderBottomColor: colors.borderSubtle }]}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingTitle}>Push Notifications</Text>
-              <Text style={styles.settingDesc}>
+              <Text style={[styles.settingTitle, { color: colors.text }]}>Push Notifications</Text>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
                 {!notificationManager.isRemotePushSupported()
                   ? 'Account preference saved. (Remote APNs/FCM delivery requires a native development build, unsupported in Expo Go)'
                   : 'Receive real-time alerts for matches and messages.'}
@@ -216,10 +217,10 @@ export default function SettingsScreen() {
             />
           </View>
 
-          <View style={styles.settingRow}>
+          <View style={[styles.settingRow, { borderBottomColor: colors.borderSubtle }]}>
             <View style={styles.settingInfo}>
-              <Text style={styles.settingTitle}>Mask Lock Screen Previews</Text>
-              <Text style={styles.settingDesc}>
+              <Text style={[styles.settingTitle, { color: colors.text }]}>Mask Lock Screen Previews</Text>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
                 Hide sender names and message snippets on the lock screen to protect discretion.
               </Text>
             </View>
@@ -234,28 +235,32 @@ export default function SettingsScreen() {
 
         {/* System & Telemetry */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Backend Connection</Text>
-          <View style={styles.infoCard}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Backend Connection</Text>
+          <View style={[styles.infoCard, { backgroundColor: colors.card, borderColor: colors.borderSubtle }]}>
             <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>API Base URL</Text>
-              <Text style={styles.infoValue} numberOfLines={1}>
+              <Text style={[styles.infoLabel, { color: colors.textMuted }]}>API Base URL</Text>
+              <Text style={[styles.infoValue, { color: colors.gold }]} numberOfLines={1}>
                 {config.apiUrl}
               </Text>
             </View>
             <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>App Version</Text>
-              <Text style={styles.infoValue}>{config.appVersion}</Text>
+              <Text style={[styles.infoLabel, { color: colors.textMuted }]}>App Version</Text>
+              <Text style={[styles.infoValue, { color: colors.gold }]}>{config.appVersion}</Text>
             </View>
             <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Environment</Text>
-              <Text style={styles.infoValue}>{config.environment.toUpperCase()}</Text>
+              <Text style={[styles.infoLabel, { color: colors.textMuted }]}>Environment</Text>
+              <Text style={[styles.infoValue, { color: colors.gold }]}>{config.environment.toUpperCase()}</Text>
             </View>
           </View>
         </View>
 
         {/* Logout */}
-        <TouchableOpacity style={styles.logoutBtn} onPress={handleLogout} activeOpacity={0.8}>
-          <Text style={styles.logoutBtnText}>Sign Out of Aura</Text>
+        <TouchableOpacity
+          style={[styles.logoutBtn, { backgroundColor: colors.card, borderColor: colors.ruby }]}
+          onPress={handleLogout}
+          activeOpacity={0.8}
+        >
+          <Text style={[styles.logoutBtnText, { color: colors.ruby }]}>Sign Out of Aura</Text>
         </TouchableOpacity>
       </ScrollView>
     </SafeAreaView>

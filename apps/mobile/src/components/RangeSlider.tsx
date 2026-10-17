@@ -7,7 +7,7 @@ import {
   LayoutChangeEvent,
   GestureResponderEvent,
 } from 'react-native';
-import { colors, spacing, borderRadius } from '../theme';
+import { colors, spacing, borderRadius, useTheme } from '../theme';
 
 interface RangeSliderProps {
   min: number;
@@ -34,6 +34,7 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
   maxLabel,
   testID,
 }) => {
+  const { colors } = useTheme();
   const [trackWidth, setTrackWidth] = useState(300);
 
   // Keep references to latest values for pan responders
@@ -153,6 +154,7 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
           style={[
             styles.activeTrack,
             {
+              backgroundColor: colors.gold,
               left: Math.max(0, minPos),
               width: Math.max(0, maxPos - minPos),
             },
@@ -164,6 +166,8 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
           style={[
             styles.thumb,
             {
+              borderColor: colors.gold,
+              backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, minPos - THUMB_SIZE / 2)),
             },
           ]}
@@ -171,7 +175,7 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
           hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
           testID={`${testID}-min-thumb`}
         >
-          <View style={styles.thumbCenterDot} />
+          <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
         </View>
 
         {/* Max Thumb Handle */}
@@ -179,6 +183,8 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
           style={[
             styles.thumb,
             {
+              borderColor: colors.gold,
+              backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, maxPos - THUMB_SIZE / 2)),
             },
           ]}
@@ -186,15 +192,15 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
           hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
           testID={`${testID}-max-thumb`}
         >
-          <View style={styles.thumbCenterDot} />
+          <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
         </View>
       </View>
 
       {/* Endpoint Labels */}
       {(minLabel || maxLabel) && (
         <View style={styles.labelsRow}>
-          <Text style={styles.boundLabel}>{minLabel ?? min}</Text>
-          <Text style={styles.boundLabel}>{maxLabel ?? max}</Text>
+          <Text style={[styles.boundLabel, { color: colors.textSubtle }]}>{minLabel ?? min}</Text>
+          <Text style={[styles.boundLabel, { color: colors.textSubtle }]}>{maxLabel ?? max}</Text>
         </View>
       )}
     </View>

@@ -13,7 +13,7 @@ import {
   useWindowDimensions,
   Keyboard,
 } from 'react-native';
-import { colors, typography, spacing, borderRadius } from '../theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
 import { DiscoveryCandidate } from '../types';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
@@ -40,6 +40,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   isKeyboardOpen = false,
   maxCardHeight = 0,
 }) => {
+  const { colors } = useTheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const cardWidth = Math.min(windowWidth - spacing.md * 2, 420);
 
@@ -173,7 +174,15 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
   return (
     <View style={[styles.cardContainer, isKeyboardOpen && styles.cardContainerKeyboard]}>
-      <Animated.View style={[styles.card, { width: cardWidth }, isKeyboardOpen && styles.cardCompact, animatedCardStyle]} {...panResponder.panHandlers}>
+      <Animated.View
+        style={[
+          styles.card,
+          { width: cardWidth, backgroundColor: colors.card, borderColor: colors.border },
+          isKeyboardOpen && styles.cardCompact,
+          animatedCardStyle,
+        ]}
+        {...panResponder.panHandlers}
+      >
         {/* Swipe Stamp: LIKE (Red stamp matching new red Like action) */}
         <Animated.View style={[styles.stampContainer, styles.likeStamp, { opacity: likeOpacity }]} pointerEvents="none">
           <Text style={styles.likeStampText}>LIKE</Text>
@@ -185,7 +194,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         </Animated.View>
 
         {/* Main Photo Container */}
-        <View style={[styles.photoContainer, { height: photoHeight }]}>
+        <View style={[styles.photoContainer, { height: photoHeight, backgroundColor: colors.backgroundElevated }]}>
           {currentPhoto.url && !imageError ? (
             <Image
               source={{ uri: currentPhoto.url }}
@@ -194,8 +203,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               onError={() => setImageError(true)}
             />
           ) : (
-            <View style={styles.placeholderPhoto}>
-              <Text style={styles.placeholderMonogram}>{candidate.display_name.charAt(0)}</Text>
+            <View style={[styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
+              <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>{candidate.display_name.charAt(0)}</Text>
             </View>
           )}
 
@@ -205,7 +214,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               {photos.map((_, idx) => (
                 <View
                   key={idx}
-                  style={[styles.paginationDot, idx === photoIndex ? styles.paginationDotActive : null]}
+                  style={[styles.paginationDot, idx === photoIndex ? [styles.paginationDotActive, { backgroundColor: colors.gold }] : null]}
                 />
               ))}
             </View>
@@ -214,7 +223,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           {/* Top Info Badges */}
           <View style={styles.topBadgesRow} pointerEvents="box-none">
             {candidate.distance_bucket_km > 0 ? (
-              <View style={styles.badgePill}>
+              <View style={[styles.badgePill, { borderColor: colors.border }]}>
                 <Text style={styles.badgePillText}>📍 {candidate.distance_bucket_km} km away</Text>
               </View>
             ) : <View />}
@@ -231,18 +240,18 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           <TouchableOpacity style={styles.rightTapZone} onPress={handleNextPhoto} activeOpacity={1} />
 
           {/* Bottom Card Info Overlay */}
-          <View style={[styles.infoOverlay, isKeyboardOpen && styles.infoOverlayCompact]}>
+          <View style={[styles.infoOverlay, { borderTopColor: colors.borderSubtle }, isKeyboardOpen && styles.infoOverlayCompact]}>
             <View style={styles.nameHeaderRow}>
               <View style={styles.nameAndAge}>
-                <Text style={[styles.name, isKeyboardOpen && styles.nameCompact]} numberOfLines={1}>
+                <Text style={[styles.name, { color: colors.text }, isKeyboardOpen && styles.nameCompact]} numberOfLines={1}>
                   {candidate.display_name}
                 </Text>
-                <Text style={[styles.age, isKeyboardOpen && styles.ageCompact]}> {candidate.age}</Text>
+                <Text style={[styles.age, { color: colors.gold }, isKeyboardOpen && styles.ageCompact]}> {candidate.age}</Text>
               </View>
 
               {/* Info Button to Open Details Modal */}
               <TouchableOpacity
-                style={styles.infoBtn}
+                style={[styles.infoBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
                 onPress={() => {
                   Keyboard.dismiss();
                   setShowDetailsModal(true);
@@ -250,42 +259,44 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
                 activeOpacity={0.8}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
-                <Text style={styles.infoBtnText}>ⓘ</Text>
+                <Text style={[styles.infoBtnText, { color: colors.gold }]}>ⓘ</Text>
               </TouchableOpacity>
             </View>
 
             {/* Tags & Lifestyle Pills */}
             <View style={styles.tagsRow}>
               {candidate.compatibility_score > 0 && (
-                <View style={styles.scoreTag}>
-                  <Text style={styles.scoreTagText}>★ {candidate.compatibility_score}% Compatibility</Text>
+                <View style={[styles.scoreTag, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                  <Text style={[styles.scoreTagText, { color: colors.gold }]}>★ {candidate.compatibility_score}% Compatibility</Text>
                 </View>
               )}
               {Boolean(candidate.height_cm) && (
-                <View style={styles.tag}>
-                  <Text style={styles.tagText}>📏 {candidate.height_cm} cm</Text>
+                <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                  <Text style={[styles.tagText, { color: colors.textMuted }]}>📏 {candidate.height_cm} cm</Text>
                 </View>
               )}
               {Boolean(candidate.weight_kg) && (
-                <View style={styles.tag}>
-                  <Text style={styles.tagText}>⚖️ {candidate.weight_kg} kg</Text>
+                <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                  <Text style={[styles.tagText, { color: colors.textMuted }]}>⚖️ {candidate.weight_kg} kg</Text>
                 </View>
               )}
               {candidate.pronouns && candidate.pronouns.length > 0 && (
-                <View style={styles.tag}>
-                  <Text style={styles.tagText}>{candidate.pronouns.join('/')}</Text>
+                <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                  <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.pronouns.join('/')}</Text>
                 </View>
               )}
               {candidate.smoking_preference && (
                 <View
                   style={[
                     styles.tag,
+                    { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
                     candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
                   ]}
                 >
                   <Text
                     style={[
                       styles.tagText,
+                      { color: colors.textMuted },
                       candidate.smoking_preference === 'NON_SMOKER' ? styles.tagTextNonSmoker : null,
                     ]}
                   >
@@ -297,7 +308,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
             {/* Bio Snippet */}
             {candidate.bio ? (
-              <Text style={styles.bio} numberOfLines={isKeyboardOpen ? 1 : 2}>
+              <Text style={[styles.bio, { color: colors.textMuted }]} numberOfLines={isKeyboardOpen ? 1 : 2}>
                 {candidate.bio}
               </Text>
             ) : null}
@@ -305,48 +316,72 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         </View>
 
         {/* Premium Rounded Action Buttons */}
-        <View style={[styles.actionsBar, isKeyboardOpen && styles.actionsBarCompact]}>
+        <View style={[styles.actionsBar, { backgroundColor: colors.card }, isKeyboardOpen && styles.actionsBarCompact]}>
           {canRewind && onRewind && (
             <TouchableOpacity
-              style={[styles.actionBtn, styles.rewindBtn, isKeyboardOpen && styles.rewindBtnCompact]}
+              style={[
+                styles.actionBtn,
+                styles.rewindBtn,
+                { backgroundColor: colors.card, borderColor: colors.gold },
+                isKeyboardOpen && styles.rewindBtnCompact,
+              ]}
               onPress={() => {
                 Keyboard.dismiss();
                 onRewind();
               }}
               activeOpacity={0.8}
             >
-              <Text style={[styles.rewindIcon, isKeyboardOpen && styles.rewindIconCompact]}>↺</Text>
+              <Text style={[styles.rewindIcon, { color: colors.gold }, isKeyboardOpen && styles.rewindIconCompact]}>↺</Text>
             </TouchableOpacity>
           )}
 
           {/* Pass Button: Charcoal round button with clear cross */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.passBtn, isKeyboardOpen && styles.passBtnCompact]}
+            style={[
+              styles.actionBtn,
+              styles.passBtn,
+              { backgroundColor: colors.cardElevated, borderColor: colors.border },
+              isKeyboardOpen && styles.passBtnCompact,
+            ]}
             onPress={handlePassBtn}
             activeOpacity={0.8}
           >
-            <Text style={[styles.passIcon, isKeyboardOpen && styles.passIconCompact]}>✕</Text>
+            <Text style={[styles.passIcon, { color: colors.textMuted }, isKeyboardOpen && styles.passIconCompact]}>✕</Text>
           </TouchableOpacity>
 
           {/* Super Spark Button: Charcoal with gold star */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.superSparkBtn, isKeyboardOpen && styles.superSparkBtnCompact]}
+            style={[
+              styles.actionBtn,
+              styles.superSparkBtn,
+              { backgroundColor: colors.cardElevated, borderColor: colors.gold },
+              isKeyboardOpen && styles.superSparkBtnCompact,
+            ]}
             onPress={() => {
               Keyboard.dismiss();
               onSuperSpark();
             }}
             activeOpacity={0.8}
           >
-            <Text style={[styles.superSparkIcon, isKeyboardOpen && styles.superSparkIconCompact]}>★</Text>
+            <Text style={[styles.superSparkIcon, { color: colors.gold }, isKeyboardOpen && styles.superSparkIconCompact]}>★</Text>
           </TouchableOpacity>
 
           {/* Like Button: Red Like Button with heart */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.likeBtn, isKeyboardOpen && styles.likeBtnCompact]}
+            style={[
+              styles.actionBtn,
+              styles.likeBtn,
+              {
+                backgroundColor: colors.cardElevated,
+                borderColor: colors.like || colors.gold,
+                shadowColor: colors.like || colors.gold,
+              },
+              isKeyboardOpen && styles.likeBtnCompact,
+            ]}
             onPress={handleLikeBtn}
             activeOpacity={0.8}
           >
-            <Text style={[styles.likeIcon, isKeyboardOpen && styles.likeIconCompact]}>♥</Text>
+            <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }, isKeyboardOpen && styles.likeIconCompact]}>♥</Text>
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -358,34 +393,34 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         presentationStyle="pageSheet"
         onRequestClose={() => setShowDetailsModal(false)}
       >
-        <SafeAreaView style={styles.modalContainer}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Profile Details</Text>
+        <SafeAreaView style={[styles.modalContainer, { backgroundColor: colors.background }]}>
+          <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
             <TouchableOpacity
-              style={styles.modalCloseBtn}
+              style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
               onPress={() => setShowDetailsModal(false)}
               activeOpacity={0.7}
             >
-              <Text style={styles.modalCloseText}>✕</Text>
+              <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
             </TouchableOpacity>
           </View>
 
           <ScrollView contentContainerStyle={styles.modalScroll}>
             {/* Main Modal Image */}
-            <View style={styles.modalImageContainer}>
+            <View style={[styles.modalImageContainer, { backgroundColor: colors.card }]}>
               {photos[0]?.url ? (
                 <Image source={{ uri: photos[0].url }} style={styles.modalImage} resizeMode="cover" />
               ) : (
-                <View style={[styles.modalImage, styles.placeholderPhoto]}>
-                  <Text style={styles.placeholderMonogram}>{candidate.display_name.charAt(0)}</Text>
+                <View style={[styles.modalImage, styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
+                  <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>{candidate.display_name.charAt(0)}</Text>
                 </View>
               )}
             </View>
 
             <View style={styles.modalBody}>
               <View style={styles.modalNameRow}>
-                <Text style={styles.modalName}>{candidate.display_name},</Text>
-                <Text style={styles.modalAge}> {candidate.age}</Text>
+                <Text style={[styles.modalName, { color: colors.text }]}>{candidate.display_name},</Text>
+                <Text style={[styles.modalAge, { color: colors.gold }]}> {candidate.age}</Text>
                 {candidate.is_verified && (
                   <View style={styles.modalVerifiedBadge}>
                     <Text style={styles.modalVerifiedText}>✓ 18+ Verified</Text>
@@ -398,9 +433,9 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               )}
 
               {/* Bio Section */}
-              <View style={styles.modalSection}>
-                <Text style={styles.modalSectionTitle}>About</Text>
-                <Text style={styles.modalBioText}>
+              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>About</Text>
+                <Text style={[styles.modalBioText, { color: colors.text }]}>
                   {candidate.bio || 'This member has not written a bio yet.'}
                 </Text>
               </View>
@@ -408,17 +443,17 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               {/* Identities & Orientations */}
               {((candidate.gender_identities && candidate.gender_identities.length > 0) ||
                 (candidate.sexual_orientations && candidate.sexual_orientations.length > 0)) && (
-                <View style={styles.modalSection}>
-                  <Text style={styles.modalSectionTitle}>Identity & Orientation</Text>
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Identity & Orientation</Text>
                   <View style={styles.tagsRow}>
                     {candidate.gender_identities?.map((g, i) => (
-                      <View key={`g-${i}`} style={styles.modalPill}>
-                        <Text style={styles.modalPillText}>{g}</Text>
+                      <View key={`g-${i}`} style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.modalPillText, { color: colors.text }]}>{g}</Text>
                       </View>
                     ))}
                     {candidate.sexual_orientations?.map((o, i) => (
-                      <View key={`o-${i}`} style={styles.modalPill}>
-                        <Text style={styles.modalPillText}>{o}</Text>
+                      <View key={`o-${i}`} style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.modalPillText, { color: colors.text }]}>{o}</Text>
                       </View>
                     ))}
                   </View>
@@ -426,12 +461,13 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               )}
 
               {/* Lifestyle & Dealbreakers */}
-              <View style={styles.modalSection}>
-                <Text style={styles.modalSectionTitle}>Lifestyle</Text>
+              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Lifestyle</Text>
                 <View style={styles.tagsRow}>
                   <View
                     style={[
                       styles.modalPill,
+                      { backgroundColor: colors.cardElevated, borderColor: colors.border },
                       candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
                     ]}
                   >
@@ -446,8 +482,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
                   </View>
 
                   {candidate.relationship_structure ? (
-                    <View style={styles.modalPill}>
-                      <Text style={styles.modalPillText}>
+                    <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.modalPillText, { color: colors.text }]}>
                         🔗 {candidate.relationship_structure}
                       </Text>
                     </View>
@@ -457,17 +493,17 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
               {/* Physical Attributes if visible */}
               {(Boolean(candidate.height_cm) || Boolean(candidate.weight_kg)) && (
-                <View style={styles.modalSection}>
-                  <Text style={styles.modalSectionTitle}>Physical</Text>
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Physical</Text>
                   <View style={styles.tagsRow}>
                     {Boolean(candidate.height_cm) && (
-                      <View style={styles.modalPill}>
-                        <Text style={styles.modalPillText}>📏 {candidate.height_cm} cm</Text>
+                      <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.modalPillText, { color: colors.text }]}>📏 {candidate.height_cm} cm</Text>
                       </View>
                     )}
                     {Boolean(candidate.weight_kg) && (
-                      <View style={styles.modalPill}>
-                        <Text style={styles.modalPillText}>⚖️ {candidate.weight_kg} kg</Text>
+                      <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.modalPillText, { color: colors.text }]}>⚖️ {candidate.weight_kg} kg</Text>
                       </View>
                     )}
                   </View>
@@ -476,8 +512,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
               {/* Additional Photos Grid if present */}
               {photos.length > 1 && (
-                <View style={styles.modalSection}>
-                  <Text style={styles.modalSectionTitle}>More Photos</Text>
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>More Photos</Text>
                   <View style={styles.modalPhotosGrid}>
                     {photos.slice(1).map((p, idx) => (
                       <Image key={p.id || idx} source={{ uri: p.url }} style={styles.modalGridPhoto} />
@@ -489,38 +525,42 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           </ScrollView>
 
           {/* Modal Action Controls */}
-          <View style={styles.modalActions}>
+          <View style={[styles.modalActions, { backgroundColor: colors.card, borderTopColor: colors.borderSubtle }]}>
             <TouchableOpacity
-              style={[styles.actionBtn, styles.passBtn]}
+              style={[styles.actionBtn, styles.passBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
               onPress={() => {
                 setShowDetailsModal(false);
                 handlePassBtn();
               }}
               activeOpacity={0.8}
             >
-              <Text style={styles.passIcon}>✕</Text>
+              <Text style={[styles.passIcon, { color: colors.textMuted }]}>✕</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.actionBtn, styles.superSparkBtn]}
+              style={[styles.actionBtn, styles.superSparkBtn, { backgroundColor: colors.cardElevated, borderColor: colors.gold }]}
               onPress={() => {
                 setShowDetailsModal(false);
                 onSuperSpark();
               }}
               activeOpacity={0.8}
             >
-              <Text style={styles.superSparkIcon}>★</Text>
+              <Text style={[styles.superSparkIcon, { color: colors.gold }]}>★</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={[styles.actionBtn, styles.likeBtn]}
+              style={[
+                styles.actionBtn,
+                styles.likeBtn,
+                { backgroundColor: colors.cardElevated, borderColor: colors.like || colors.gold, shadowColor: colors.like || colors.gold },
+              ]}
               onPress={() => {
                 setShowDetailsModal(false);
                 handleLikeBtn();
               }}
               activeOpacity={0.8}
             >
-              <Text style={styles.likeIcon}>♥</Text>
+              <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
             </TouchableOpacity>
           </View>
         </SafeAreaView>

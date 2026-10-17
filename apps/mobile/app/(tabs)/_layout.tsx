@@ -2,10 +2,11 @@ import React from 'react';
 import { Tabs } from 'expo-router';
 import { Text, Platform, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { colors, typography, spacing } from '../../src/theme';
+import { colors, typography, spacing, useTheme } from '../../src/theme';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
+  const { colors } = useTheme();
 
   // Dynamic bottom inset: on Android adapt to 3-button nav, gesture nav, or curved screens
   const bottomInset = Platform.OS === 'android'
@@ -27,6 +28,8 @@ export default function TabLayout() {
         tabBarStyle: [
           styles.tabBar,
           {
+            backgroundColor: colors.card,
+            borderTopColor: colors.borderSubtle,
             height: tabBarHeight,
             paddingBottom: bottomInset + 4,
             paddingHorizontal: horizontalInset,

@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { DiscoveryCandidate, SwipeResponse, DiscoveryPreferences } from '../../src/types';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
@@ -33,6 +33,7 @@ export default function DiscoveryScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { isAgeVerified, profile, refreshProfile } = useAuth();
+  const { colors } = useTheme();
 
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [showFilterModal, setShowFilterModal] = useState(false);
@@ -321,22 +322,22 @@ export default function DiscoveryScreen() {
   const activeCandidate = candidates[currentIndex];
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <KeyboardAvoidingView
         style={styles.keyboardAvoidContainer}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
         {/* Top Header */}
-        <View style={styles.header}>
+        <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
           <View style={styles.brandGroup}>
-            <Text style={styles.brandTitle}>AURA</Text>
-            <Text style={styles.brandSubtitle}>Exclusive Discovery</Text>
+            <Text style={[styles.brandTitle, { color: colors.text }]}>AURA</Text>
+            <Text style={[styles.brandSubtitle, { color: colors.gold }]}>Exclusive Discovery</Text>
           </View>
 
           <View style={styles.headerRight}>
             <TouchableOpacity
-              style={styles.searchButton}
+              style={[styles.searchButton, { backgroundColor: colors.card, borderColor: colors.border }]}
               onPress={() => router.push('/search')}
               activeOpacity={0.7}
               testID="discovery-search-button"
@@ -345,19 +346,19 @@ export default function DiscoveryScreen() {
             </TouchableOpacity>
 
             <TouchableOpacity
-              style={styles.filterButton}
+              style={[styles.filterButton, { backgroundColor: colors.card, borderColor: colors.border }]}
               onPress={() => setShowFilterModal(true)}
               activeOpacity={0.7}
               testID="discovery-filter-button"
             >
               <Text style={styles.filterIcon}>🎛️</Text>
-              {hasActiveFilters && <View style={styles.filterActiveDot} />}
+              {hasActiveFilters && <View style={[styles.filterActiveDot, { backgroundColor: colors.gold }]} />}
             </TouchableOpacity>
 
             <View style={styles.headerBadges}>
               {allowance ? (
-                <View style={styles.allowancePill} testID="allowance-badge">
-                  <Text style={styles.allowanceText}>
+                <View style={[styles.allowancePill, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]} testID="allowance-badge">
+                  <Text style={[styles.allowanceText, { color: colors.gold }]}>
                     {allowance.isIntroductory
                       ? '✨ 30-Day Free Intro'
                       : allowance.isUnlimited
@@ -368,8 +369,8 @@ export default function DiscoveryScreen() {
               ) : null}
 
               {nearbySummary ? (
-                <View style={styles.summaryPill}>
-                  <Text style={styles.summaryText}>📍 {nearbySummary} nearby</Text>
+                <View style={[styles.summaryPill, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                  <Text style={[styles.summaryText, { color: colors.textMuted }]}>📍 {nearbySummary} nearby</Text>
                 </View>
               ) : null}
             </View>
@@ -461,58 +462,58 @@ export default function DiscoveryScreen() {
             </View>
             ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
           <View style={styles.lockContainer} testID="photo-minimum-feed-state">
-            <View style={styles.lockIconCircle}>
+            <View style={[styles.lockIconCircle, { backgroundColor: colors.card, borderColor: colors.gold }]}>
               <Text style={styles.lockIcon}>📸</Text>
             </View>
-            <Text style={styles.lockTitle}>3 Photos Minimum Required</Text>
-            <Text style={styles.lockSubtitle}>AUTHENTICITY STANDARD</Text>
-            <Text style={styles.lockDescription}>
+            <Text style={[styles.lockTitle, { color: colors.text }]}>3 Photos Minimum Required</Text>
+            <Text style={[styles.lockSubtitle, { color: colors.gold }]}>AUTHENTICITY STANDARD</Text>
+            <Text style={[styles.lockDescription, { color: colors.textMuted }]}>
               To maintain high authenticity and prevent empty accounts, you must upload at least 3 approved profile
               photos before you can browse and match with other members.
             </Text>
             <View style={styles.lockButtonsContainer}>
               <TouchableOpacity
-                style={styles.lockPrimaryButton}
+                style={[styles.lockPrimaryButton, { backgroundColor: colors.gold }]}
                 onPress={() => router.push('/(tabs)/profile')}
                 activeOpacity={0.8}
               >
-                <Text style={styles.lockPrimaryButtonText}>Upload Profile Photos</Text>
+                <Text style={[styles.lockPrimaryButtonText, { color: colors.textInverse }]}>Upload Profile Photos</Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.lockSecondaryButton}
+                style={[styles.lockSecondaryButton, { borderColor: colors.border }]}
                 onPress={loadFeed}
                 activeOpacity={0.8}
               >
-                <Text style={styles.lockSecondaryButtonText}>Refresh Deck</Text>
+                <Text style={[styles.lockSecondaryButtonText, { color: colors.text }]}>Refresh Deck</Text>
               </TouchableOpacity>
             </View>
           </View>
         ) : !isAgeVerified ? (
           emptyStateReason === 'AGE_VERIFICATION_REQUIRED' ? (
             <View style={styles.lockContainer} testID="age-locked-feed-state">
-              <View style={styles.lockIconCircle}>
+              <View style={[styles.lockIconCircle, { backgroundColor: colors.card, borderColor: colors.gold }]}>
                 <Text style={styles.lockIcon}>🛡️</Text>
               </View>
-              <Text style={styles.lockTitle}>18+ Age Assurance Required</Text>
-              <Text style={styles.lockSubtitle}>MANDATORY COMMUNITY PROTECTION</Text>
-              <Text style={styles.lockDescription}>
+              <Text style={[styles.lockTitle, { color: colors.text }]}>18+ Age Assurance Required</Text>
+              <Text style={[styles.lockSubtitle, { color: colors.gold }]}>MANDATORY COMMUNITY PROTECTION</Text>
+              <Text style={[styles.lockDescription, { color: colors.textMuted }]}>
                 Dating discovery, matching, and messaging are locked until your adult status is confirmed. Complete a
                 quick verification selfie to unlock the deck and connect with members waiting nearby.
               </Text>
               <View style={styles.lockButtonsContainer}>
                 <TouchableOpacity
-                  style={styles.lockPrimaryButton}
+                  style={[styles.lockPrimaryButton, { backgroundColor: colors.gold }]}
                   onPress={() => router.push('/(auth)/verify-age')}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.lockPrimaryButtonText}>Complete Age Verification</Text>
+                  <Text style={[styles.lockPrimaryButtonText, { color: colors.textInverse }]}>Complete Age Verification</Text>
                 </TouchableOpacity>
                 <TouchableOpacity
-                  style={styles.lockSecondaryButton}
+                  style={[styles.lockSecondaryButton, { borderColor: colors.border }]}
                   onPress={handleCheckVerificationStatus}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.lockSecondaryButtonText}>Check Verification Status</Text>
+                  <Text style={[styles.lockSecondaryButtonText, { color: colors.text }]}>Check Verification Status</Text>
                 </TouchableOpacity>
               </View>
             </View>
