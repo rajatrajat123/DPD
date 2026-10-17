@@ -1,7 +1,7 @@
 import { api } from '../api/client';
 import { config } from '../../config/env';
 import { secureStorage } from '../storage/secureStore';
-import { Match, Conversation, Message } from '../../types';
+import { Match, Conversation, Message, MessageRequest } from '../../types';
 import { buildMediaUrl } from '../media/mediaUploader';
 
 export type ConnectionStatus = 'CONNECTED' | 'CONNECTING' | 'RECONNECTING' | 'DISCONNECTED';
@@ -415,5 +415,34 @@ export const chatService = {
       media_asset_id: mediaAssetId,
     });
     return normalizeMessage(res);
+  },
+
+  /**
+   * Fetches incoming pending message requests
+   */
+  async getMessageRequests(): Promise<MessageRequest[]> {
+    const res = await api.get<{ requests: MessageRequest[] }>('/api/v1/message-requests');
+    return res.requests || [];
+  },
+
+  /**
+   * Accepts a message request, establishing a match & conversation
+   */
+  async acceptMessageRequest(requestId: string): Promise<{ success: boolean; conversation_id?: string; match_id?: string }> {
+    return api.post<{ success: boolean; conversation_id?: string; match_id?: string }>(`/api/v1/message-requests/${requestId}/accept`);
+  },
+
+  /**
+   * Declines a message request
+   */
+  async declineMessageRequest(requestId: string): Promise<{ success: boolean }> {
+    return api.post<{ success: boolean }>(`/api/v1/message-requests/${requestId}/decline`);
+  },
+
+  /**
+   * Blocks the sender of a message request
+   */
+  async blockMessageRequest(requestId: string): Promise<{ success: boolean }> {
+    return api.post<{ success: boolean }>(`/api/v1/message-requests/${requestId}/block`);
   },
 };

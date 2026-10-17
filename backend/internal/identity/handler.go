@@ -157,6 +157,46 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	apperror.WriteJSON(w, http.StatusOK, resp)
 }
 
+func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+		return
+	}
+
+	var req GoogleAuthRequest
+	if apiErr := validator.DecodeAndValidate(w, r, h.maxBodyBytes, &req); apiErr != nil {
+		apperror.WriteError(w, reqID, apiErr)
+		return
+	}
+
+	if strings.TrimSpace(req.IDToken) == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "id_token is required"))
+		return
+	}
+
+	clientInfo := extractClientInfo(r)
+	resp, err := h.svc.AuthenticateWithGoogle(r.Context(), req, clientInfo)
+	if err != nil {
+		if errorsIs(err, ErrAccountNotActive) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Account is suspended or deactivated"))
+			return
+		}
+		if errorsIs(err, ErrOAuthEmailNotVerified) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "Google email is not verified"))
+			return
+		}
+		if errorsIs(err, ErrInvalidOAuthToken) || strings.Contains(strings.ToLower(err.Error()), "token") {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, err.Error()))
+			return
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, resp)
+}
+
 func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
 	if r.Method != http.MethodPost {

@@ -13,11 +13,12 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
-import { Match, Conversation } from '../../src/types';
+import { Match, Conversation, MessageRequest } from '../../src/types';
 import { chatService } from '../../src/services/chat/chatService';
 import { useAuth } from '../../src/context/AuthContext';
 import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanner';
 import { SponsoredBannerAd } from '../../src/components/SponsoredBannerAd';
+import { Alert } from 'react-native';
 
 export default function ChatScreen() {
   const router = useRouter();
@@ -25,17 +26,21 @@ export default function ChatScreen() {
 
   const [matches, setMatches] = useState<Match[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [messageRequests, setMessageRequests] = useState<MessageRequest[]>([]);
+  const [processingRequestId, setProcessingRequestId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const loadData = useCallback(async () => {
     try {
-      const [matchesRes, convsRes] = await Promise.all([
+      const [matchesRes, convsRes, requestsRes] = await Promise.all([
         chatService.getMatches(),
         chatService.getConversations(),
+        chatService.getMessageRequests().catch(() => []),
       ]);
       setMatches(matchesRes || []);
       setConversations(convsRes || []);
+      setMessageRequests(requestsRes || []);
     } catch {
       // Handled
     } finally {
@@ -51,6 +56,66 @@ export default function ChatScreen() {
   const onRefresh = () => {
     setIsRefreshing(true);
     loadData();
+  };
+
+  const handleAcceptRequest = async (req: MessageRequest) => {
+    setProcessingRequestId(req.id);
+    try {
+      const res = await chatService.acceptMessageRequest(req.id);
+      setMessageRequests((prev) => prev.filter((r) => r.id !== req.id));
+      await loadData();
+      if (res.conversation_id) {
+        router.push({
+          pathname: '/chat/[id]',
+          params: {
+            id: res.conversation_id,
+            name: req.sender_name || 'Member',
+            recipientId: req.sender_id,
+          },
+        });
+      }
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Could not accept message request.');
+    } finally {
+      setProcessingRequestId(null);
+    }
+  };
+
+  const handleDeclineRequest = async (req: MessageRequest) => {
+    setProcessingRequestId(req.id);
+    try {
+      await chatService.declineMessageRequest(req.id);
+      setMessageRequests((prev) => prev.filter((r) => r.id !== req.id));
+    } catch (err: any) {
+      Alert.alert('Error', err?.message || 'Could not decline message request.');
+    } finally {
+      setProcessingRequestId(null);
+    }
+  };
+
+  const handleBlockRequest = async (req: MessageRequest) => {
+    Alert.alert(
+      'Block Member?',
+      `Are you sure you want to block ${req.sender_name || 'this member'}? They will no longer be able to message you or view your profile.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Block',
+          style: 'destructive',
+          onPress: async () => {
+            setProcessingRequestId(req.id);
+            try {
+              await chatService.blockMessageRequest(req.id);
+              setMessageRequests((prev) => prev.filter((r) => r.id !== req.id));
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Could not block member.');
+            } finally {
+              setProcessingRequestId(null);
+            }
+          },
+        },
+      ]
+    );
   };
 
   const openConversation = (convId: string, participantName: string, participantId: string) => {
@@ -140,6 +205,90 @@ export default function ChatScreen() {
               </ScrollView>
             )}
           </View>
+
+          {/* Message Requests Section */}
+          {messageRequests.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeaderRow}>
+                <Text style={styles.sectionTitle}>Message Requests</Text>
+                <View style={styles.countPillGold}>
+                  <Text style={styles.countPillGoldText}>{messageRequests.length}</Text>
+                </View>
+              </View>
+
+              {messageRequests.map((req) => (
+                <View key={req.id} style={styles.requestCard}>
+                  <View style={styles.requestHeader}>
+                    <View style={styles.requestAvatarWrap}>
+                      {req.sender_avatar ? (
+                        <Image source={{ uri: req.sender_avatar }} style={styles.requestAvatar} />
+                      ) : (
+                        <View style={[styles.requestAvatar, styles.avatarPlaceholder]}>
+                          <Text style={styles.monogramText}>
+                            {req.sender_name ? req.sender_name.charAt(0) : 'M'}
+                          </Text>
+                        </View>
+                      )}
+                      {req.sender_is_verified && (
+                        <View style={styles.verifiedDot}>
+                          <Text style={styles.verifiedDotText}>✓</Text>
+                        </View>
+                      )}
+                    </View>
+
+                    <View style={styles.requestInfo}>
+                      <Text style={styles.requestName}>
+                        {req.sender_name || 'Member'}{req.sender_age ? `, ${req.sender_age}` : ''}
+                      </Text>
+                      <Text style={styles.requestTimestamp}>
+                        {new Date(req.created_at).toLocaleDateString([], {
+                          month: 'short',
+                          day: 'numeric',
+                        })}
+                      </Text>
+                    </View>
+                  </View>
+
+                  <View style={styles.requestBubble}>
+                    <Text style={styles.requestBodyText}>{req.body}</Text>
+                  </View>
+
+                  <View style={styles.requestActions}>
+                    <TouchableOpacity
+                      style={[styles.requestActionBtn, styles.acceptBtn]}
+                      onPress={() => handleAcceptRequest(req)}
+                      disabled={processingRequestId === req.id}
+                      activeOpacity={0.8}
+                    >
+                      {processingRequestId === req.id ? (
+                        <ActivityIndicator color={colors.textInverse} size="small" />
+                      ) : (
+                        <Text style={styles.acceptBtnText}>Accept</Text>
+                      )}
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.requestActionBtn, styles.declineBtn]}
+                      onPress={() => handleDeclineRequest(req)}
+                      disabled={processingRequestId === req.id}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.declineBtnText}>Decline</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity
+                      style={[styles.requestActionBtn, styles.blockBtn]}
+                      onPress={() => handleBlockRequest(req)}
+                      disabled={processingRequestId === req.id}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={styles.blockBtnText}>Block</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ))}
+            </View>
+          )}
 
           {/* Conversations Inbox */}
           <View style={styles.section}>
@@ -436,5 +585,110 @@ const styles = StyleSheet.create({
     color: colors.textInverse,
     fontWeight: '700',
     fontSize: 12,
+  },
+  countPillGold: {
+    backgroundColor: 'rgba(212, 175, 55, 0.15)',
+    borderWidth: 1,
+    borderColor: colors.gold,
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 1,
+  },
+  countPillGoldText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '700',
+    color: colors.gold,
+  },
+  requestCard: {
+    backgroundColor: colors.card,
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
+  },
+  requestHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  requestAvatarWrap: {
+    position: 'relative',
+    marginRight: spacing.sm,
+  },
+  requestAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  requestInfo: {
+    flex: 1,
+  },
+  requestName: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  requestTimestamp: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textMuted,
+    marginTop: 2,
+  },
+  requestBubble: {
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.sm,
+    padding: spacing.sm,
+    borderWidth: 1,
+    borderColor: colors.borderSubtle,
+    marginBottom: spacing.sm,
+  },
+  requestBodyText: {
+    ...typography.bodySmall,
+    color: colors.text,
+    lineHeight: 18,
+    fontStyle: 'italic',
+  },
+  requestActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    justifyContent: 'flex-end',
+    alignItems: 'center',
+  },
+  requestActionBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: borderRadius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  acceptBtn: {
+    backgroundColor: colors.gold,
+  },
+  acceptBtnText: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: colors.textInverse,
+  },
+  declineBtn: {
+    backgroundColor: colors.cardElevated,
+    borderWidth: 1,
+    borderColor: colors.border,
+  },
+  declineBtnText: {
+    ...typography.caption,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  blockBtn: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: spacing.xs,
+  },
+  blockBtnText: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.ruby,
+    fontWeight: '600',
   },
 });

@@ -6,12 +6,16 @@ import {
   ActivityIndicator,
   Alert,
   TouchableOpacity,
+  KeyboardAvoidingView,
+  Platform,
+  Keyboard,
+  TouchableWithoutFeedback,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
-import { DiscoveryCandidate, SwipeResponse } from '../../src/types';
+import { DiscoveryCandidate, SwipeResponse, DiscoveryPreferences } from '../../src/types';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
 import { DiscoveryCard } from '../../src/components/DiscoveryCard';
 import { SponsoredCard } from '../../src/components/SponsoredCard';
@@ -19,15 +23,20 @@ import { DealbreakerEmptyState } from '../../src/components/DealbreakerEmptyStat
 import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanner';
 import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModal';
 import { SwipeQuotaModal } from '../../src/components/SwipeQuotaModal';
+import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
+import { QuickMessageComposer } from '../../src/components/QuickMessageComposer';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { authService } from '../../src/services/auth/authService';
 import { admobService, adBreakManager, SwipeAllowance, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
 
 export default function DiscoveryScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { isAgeVerified, profile, refreshProfile } = useAuth();
 
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
+  const [showFilterModal, setShowFilterModal] = useState(false);
+  const [preferences, setPreferences] = useState<DiscoveryPreferences | null>(null);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
   const [emptyStateReason, setEmptyStateReason] = useState<string>('');
@@ -37,6 +46,24 @@ export default function DiscoveryScreen() {
   const [lastSwipedCandidate, setLastSwipedCandidate] = useState<DiscoveryCandidate | null>(null);
   const [showSponsoredBreak, setShowSponsoredBreak] = useState(false);
   const isSwipingRef = useRef(false);
+  const [isKeyboardOpen, setIsKeyboardOpen] = useState(false);
+  const [cardRegionHeight, setCardRegionHeight] = useState<number>(0);
+
+  // Monitor software keyboard visibility for responsive Discovery layout
+  useEffect(() => {
+    const showSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => setIsKeyboardOpen(true)
+    );
+    const hideSub = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => setIsKeyboardOpen(false)
+    );
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
 
   // Match Celebration Modal state
   const [matchedCandidate, setMatchedCandidate] = useState<DiscoveryCandidate | null>(null);
@@ -103,6 +130,13 @@ export default function DiscoveryScreen() {
 
       const allowRes = await admobService.getSwipeAllowance();
       setAllowance(allowRes);
+
+      try {
+        const prefs = await discoveryService.getPreferences();
+        setPreferences(prefs);
+      } catch {
+        // fallback
+      }
     } catch (err: any) {
       const msg = err instanceof Error ? err.message : (err?.message || 'Could not load discovery feed.');
       setFeedError(msg);
@@ -114,6 +148,25 @@ export default function DiscoveryScreen() {
       setIsLoading(false);
     }
   }, [refreshProfile]);
+
+  const hasActiveFilters = Boolean(
+    preferences && (
+      (preferences.min_age && preferences.min_age > 18) ||
+      (preferences.max_age && preferences.max_age < 99) ||
+      (preferences.min_height_cm && preferences.min_height_cm > 90) ||
+      (preferences.max_height_cm && preferences.max_height_cm < 250) ||
+      (preferences.min_weight_kg && preferences.min_weight_kg > 30) ||
+      (preferences.max_weight_kg && preferences.max_weight_kg < 300) ||
+      preferences.verified_profiles_only ||
+      preferences.verified_only ||
+      (preferences.preferred_orientations && preferences.preferred_orientations.length > 0) ||
+      (preferences.dealbreakers && (
+        preferences.dealbreakers.non_smoker_only ||
+        preferences.dealbreakers.require_verified ||
+        preferences.dealbreakers.require_monogamous
+      ))
+    )
+  );
 
   useEffect(() => {
     loadFeed();
@@ -155,7 +208,8 @@ export default function DiscoveryScreen() {
     }
   };
 
-  const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK') => {
+  const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK', introNote?: string) => {
+    Keyboard.dismiss();
     if (isSwipingRef.current) return;
     const candidate = candidates[currentIndex];
     if (!candidate) return;
@@ -200,11 +254,17 @@ export default function DiscoveryScreen() {
     }
 
     try {
-      const res: SwipeResponse = await discoveryService.swipe(candidate.user_id, direction);
+      const res: SwipeResponse = await discoveryService.swipe(candidate.user_id, direction, introNote);
       if (res.is_mutual_match) {
         setMatchedCandidate(candidate);
         setActiveConversationId(res.conversation_id || null);
+      } else if (introNote) {
+        Alert.alert(
+          'Intro Note Sent',
+          `Your message request was delivered to ${candidate.display_name}. When they like you back, you'll be connected in Chat.`
+        );
       }
+      return res;
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
       if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
@@ -220,6 +280,14 @@ export default function DiscoveryScreen() {
       } else if (errMsg.includes('SWIPE_LIMIT_REACHED') || errMsg.includes('limit reached')) {
         setShowQuotaModal(true);
         setCurrentIndex((prev) => Math.max(0, prev - 1));
+      } else {
+        if (introNote) {
+          Alert.alert('Send Failed', 'Could not deliver intro note. Please check your connection and try again.');
+          setCurrentIndex((prev) => Math.max(0, prev - 1));
+        }
+      }
+      if (introNote) {
+        throw err;
       }
     } finally {
       isSwipingRef.current = false;
@@ -254,78 +322,144 @@ export default function DiscoveryScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      {/* Top Header */}
-      <View style={styles.header}>
-        <View style={styles.brandGroup}>
-          <Text style={styles.brandTitle}>AURA</Text>
-          <Text style={styles.brandSubtitle}>Exclusive Discovery</Text>
+      <KeyboardAvoidingView
+        style={styles.keyboardAvoidContainer}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
+      >
+        {/* Top Header */}
+        <View style={styles.header}>
+          <View style={styles.brandGroup}>
+            <Text style={styles.brandTitle}>AURA</Text>
+            <Text style={styles.brandSubtitle}>Exclusive Discovery</Text>
+          </View>
+
+          <View style={styles.headerRight}>
+            <TouchableOpacity
+              style={styles.searchButton}
+              onPress={() => router.push('/search')}
+              activeOpacity={0.7}
+              testID="discovery-search-button"
+            >
+              <Text style={styles.searchIcon}>🔍</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.filterButton}
+              onPress={() => setShowFilterModal(true)}
+              activeOpacity={0.7}
+              testID="discovery-filter-button"
+            >
+              <Text style={styles.filterIcon}>🎛️</Text>
+              {hasActiveFilters && <View style={styles.filterActiveDot} />}
+            </TouchableOpacity>
+
+            <View style={styles.headerBadges}>
+              {allowance ? (
+                <View style={styles.allowancePill} testID="allowance-badge">
+                  <Text style={styles.allowanceText}>
+                    {allowance.isIntroductory
+                      ? '✨ 30-Day Free Intro'
+                      : allowance.isUnlimited
+                      ? '✨ Unlimited'
+                      : `💛 ${allowance.remainingLikes}/${allowance.dailyQuota} Likes`}
+                  </Text>
+                </View>
+              ) : null}
+
+              {nearbySummary ? (
+                <View style={styles.summaryPill}>
+                  <Text style={styles.summaryText}>📍 {nearbySummary} nearby</Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
         </View>
 
-        <View style={styles.headerRight}>
+        {/* Mandatory Age Assurance Gating Notice - collapsed while typing for vertical clearance */}
+        {!isAgeVerified && !isKeyboardOpen && (
+          <AgeVerificationBanner
+            onVerifyPress={() => router.push('/(auth)/verify-age')}
+            onCheckStatus={handleCheckVerificationStatus}
+          />
+        )}
+
+        {/* Discovery Incomplete Notice if Height or Weight Missing */}
+        {(!profile?.height_cm || !profile?.weight_kg) && !isKeyboardOpen && (
           <TouchableOpacity
-            style={styles.searchButton}
-            onPress={() => router.push('/search')}
-            activeOpacity={0.7}
-            testID="discovery-search-button"
+            style={styles.incompleteBanner}
+            onPress={() => router.push('/(tabs)/profile')}
+            activeOpacity={0.8}
           >
-            <Text style={styles.searchIcon}>🔍</Text>
+            <View style={styles.incompleteBannerLeft}>
+              <Text style={styles.incompleteBannerIcon}>⚠️</Text>
+              <View>
+                <Text style={styles.incompleteBannerTitle}>Profile Incomplete for Discovery</Text>
+                <Text style={styles.incompleteBannerSubtitle}>Add height and weight to unlock matching in feeds</Text>
+              </View>
+            </View>
+            <Text style={styles.incompleteBannerAction}>Complete ➔</Text>
           </TouchableOpacity>
+        )}
 
-          <View style={styles.headerBadges}>
-            {allowance ? (
-              <View style={styles.allowancePill} testID="allowance-badge">
-                <Text style={styles.allowanceText}>
-                  {allowance.isIntroductory
-                    ? '✨ 30-Day Free Intro'
-                    : allowance.isUnlimited
-                    ? '✨ Unlimited'
-                    : `💛 ${allowance.remainingLikes}/${allowance.dailyQuota} Likes`}
-                </Text>
+        {/* Main Deck Container */}
+        <View style={[styles.content, isKeyboardOpen && styles.contentKeyboard]}>
+          {isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore)) ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator color={colors.gold} size="large" />
+              <Text style={styles.loadingText}>Curating your exclusive deck...</Text>
+            </View>
+          ) : showSponsoredBreak ? (
+            <SponsoredCard
+              onDismiss={() => {
+                setShowSponsoredBreak(false);
+                adBreakManager.onAdCompleted();
+              }}
+            />
+          ) : activeCandidate ? (
+            <View style={[styles.deckContainer, isKeyboardOpen && styles.deckContainerKeyboard]}>
+              {/* Region 1: Flexible Card Area (Takes remaining space, scales down to fit) */}
+              <TouchableWithoutFeedback
+                disabled={!isKeyboardOpen}
+                onPress={Keyboard.dismiss}
+                accessible={false}
+              >
+                <View
+                  style={styles.cardRegion}
+                  onLayout={(e) => {
+                    const h = e.nativeEvent.layout.height;
+                    if (h > 0 && Math.abs(h - cardRegionHeight) > 2) {
+                      setCardRegionHeight(h);
+                    }
+                  }}
+                >
+                  <DiscoveryCard
+                    key={activeCandidate.user_id || activeCandidate.id || `candidate-${currentIndex}`}
+                    candidate={activeCandidate}
+                    onLike={() => handleSwipe('LIKE')}
+                    onPass={() => handleSwipe('PASS')}
+                    onSuperSpark={() => handleSwipe('SUPER_SPARK')}
+                    onRewind={handleRewind}
+                    canRewind={canRewind && currentIndex > 0}
+                    isKeyboardOpen={isKeyboardOpen}
+                    maxCardHeight={cardRegionHeight}
+                  />
+                </View>
+              </TouchableWithoutFeedback>
+
+              {/* Region 2: Dedicated Composer Area (Pinned right above keyboard) */}
+              <View style={[styles.composerRegion, isKeyboardOpen && styles.composerRegionKeyboard]}>
+                <QuickMessageComposer
+                  recipientId={activeCandidate.user_id || activeCandidate.id}
+                  recipientName={activeCandidate.display_name}
+                  onFocus={() => setIsKeyboardOpen(true)}
+                  onSend={async (note) => {
+                    await handleSwipe('LIKE', note);
+                  }}
+                />
               </View>
-            ) : null}
-
-            {nearbySummary ? (
-              <View style={styles.summaryPill}>
-                <Text style={styles.summaryText}>📍 {nearbySummary} nearby</Text>
-              </View>
-            ) : null}
-          </View>
-        </View>
-      </View>
-
-      {/* Mandatory Age Assurance Gating Notice */}
-      {!isAgeVerified && (
-        <AgeVerificationBanner
-          onVerifyPress={() => router.push('/(auth)/verify-age')}
-          onCheckStatus={handleCheckVerificationStatus}
-        />
-      )}
-
-      {/* Main Deck Container */}
-      <View style={styles.content}>
-        {isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore)) ? (
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator color={colors.gold} size="large" />
-            <Text style={styles.loadingText}>Curating your exclusive deck...</Text>
-          </View>
-        ) : showSponsoredBreak ? (
-          <SponsoredCard
-            onDismiss={() => {
-              setShowSponsoredBreak(false);
-              adBreakManager.onAdCompleted();
-            }}
-          />
-        ) : activeCandidate ? (
-          <DiscoveryCard
-            key={activeCandidate.user_id || activeCandidate.id || `candidate-${currentIndex}`}
-            candidate={activeCandidate}
-            onLike={() => handleSwipe('LIKE')}
-            onPass={() => handleSwipe('PASS')}
-            onSuperSpark={() => handleSwipe('SUPER_SPARK')}
-            onRewind={handleRewind}
-            canRewind={canRewind && currentIndex > 0}
-          />
-        ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
+            </View>
+            ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
           <View style={styles.lockContainer} testID="photo-minimum-feed-state">
             <View style={styles.lockIconCircle}>
               <Text style={styles.lockIcon}>📸</Text>
@@ -448,6 +582,19 @@ export default function DiscoveryScreen() {
         }}
         onUpgradePress={() => router.push('/(tabs)/membership')}
       />
+
+      {/* Discovery Preferences & Dealbreakers Filter Sheet */}
+      <DiscoveryFilterModal
+        visible={showFilterModal}
+        onClose={() => setShowFilterModal(false)}
+        currentPreferences={preferences}
+        onApply={async (updated) => {
+          setPreferences(updated);
+          setShowFilterModal(false);
+          await loadFeed();
+        }}
+      />
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -456,6 +603,9 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: colors.background,
+  },
+  keyboardAvoidContainer: {
+    flex: 1,
   },
   header: {
     flexDirection: 'row',
@@ -483,6 +633,101 @@ const styles = StyleSheet.create({
   },
   searchIcon: {
     fontSize: 16,
+  },
+  filterButton: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.border,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  filterIcon: {
+    fontSize: 16,
+  },
+  filterActiveDot: {
+    position: 'absolute',
+    top: 2,
+    right: 2,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: colors.gold,
+  },
+  incompleteBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(255, 149, 0, 0.12)',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255, 149, 0, 0.3)',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+  },
+  incompleteBannerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    flex: 1,
+  },
+  incompleteBannerIcon: {
+    fontSize: 14,
+  },
+  incompleteBannerTitle: {
+    ...typography.caption,
+    fontWeight: '700',
+    color: '#FF9500',
+    fontSize: 11,
+  },
+  incompleteBannerSubtitle: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontSize: 10,
+  },
+  incompleteBannerAction: {
+    ...typography.caption,
+    color: colors.gold,
+    fontWeight: '700',
+    fontSize: 11,
+    marginLeft: spacing.sm,
+  },
+  deckContainer: {
+    flex: 1,
+    width: '100%',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  deckContainerKeyboard: {
+    flex: 1,
+    width: '100%',
+    flexDirection: 'column',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingBottom: Platform.OS === 'android' ? 6 : 4,
+  },
+  cardRegion: {
+    flex: 1,
+    flexShrink: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+  },
+  composerRegion: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    zIndex: 10,
+    paddingBottom: 2,
+  },
+  composerRegionKeyboard: {
+    paddingBottom: Platform.OS === 'android' ? 6 : 4,
+    paddingTop: 2,
   },
   headerBadges: {
     flexDirection: 'column',
@@ -535,6 +780,10 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     paddingVertical: 2,
+  },
+  contentKeyboard: {
+    justifyContent: 'space-between',
+    paddingVertical: 0,
   },
   loadingContainer: {
     alignItems: 'center',

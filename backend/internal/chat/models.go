@@ -166,3 +166,29 @@ func NewWSEvent(t WSEventType, payload any) (*WSServerMessage, error) {
 		Timestamp: time.Now().UTC(),
 	}, nil
 }
+
+type MessageRequestStatus string
+
+const (
+	RequestPending  MessageRequestStatus = "PENDING"
+	RequestAccepted MessageRequestStatus = "ACCEPTED"
+	RequestDeclined MessageRequestStatus = "DECLINED"
+	RequestBlocked  MessageRequestStatus = "BLOCKED"
+)
+
+type MessageRequest struct {
+	ID              string               `json:"id"`
+	SenderUserID    string               `json:"sender_user_id"`
+	RecipientUserID string               `json:"recipient_user_id"`
+	Body            string               `json:"body"`
+	Status          MessageRequestStatus `json:"status"`
+	CreatedAt       time.Time            `json:"created_at"`
+	RespondedAt     *time.Time           `json:"responded_at,omitempty"`
+	Sender          *ConversationPartner `json:"sender,omitempty"`
+}
+
+type MessageRequestActionResponse struct {
+	Success        bool    `json:"success"`
+	ConversationID *string `json:"conversation_id,omitempty"`
+	MatchID        *string `json:"match_id,omitempty"`
+}

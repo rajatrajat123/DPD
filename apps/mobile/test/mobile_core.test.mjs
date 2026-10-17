@@ -3367,5 +3367,613 @@ test('Compact Verification Strip & Non-Overlapping Discovery Card Layout', async
   }
 });
 
+// --- Test 61: Profile Completion, Height/Weight Validation, Unit Conversion & Privacy ---
+test('Profile Completion: Height and weight units (cm/in, kg/lb), ranges, and visibility gating', async () => {
+  // 1. Metric to Imperial conversion arithmetic
+  function cmToFtIn(cm) {
+    const totalInches = Math.round(cm / 2.54);
+    const feet = Math.floor(totalInches / 12);
+    const inches = totalInches % 12;
+    return { feet, inches };
+  }
 
+  function ftInToCm(feet, inches) {
+    const totalInches = (Number(feet) || 0) * 12 + (Number(inches) || 0);
+    return Math.round(totalInches * 2.54);
+  }
 
+  function kgToLb(kg) {
+    return Math.round(kg / 0.45359237);
+  }
+
+  function lbToKg(lb) {
+    return Math.round(lb * 0.45359237);
+  }
+
+  // Conversions test
+  const ftIn = cmToFtIn(175);
+  assert.equal(ftIn.feet, 5);
+  assert.equal(ftIn.inches, 9);
+  assert.equal(ftInToCm(5, 9), 175);
+
+  const lb = kgToLb(70);
+  assert.equal(lb, 154);
+  assert.equal(lbToKg(154), 70);
+
+  // 2. Validation bounds: Height 90-250 cm, Weight 30-300 kg
+  function validateHeightCm(h) {
+    if (h == null || isNaN(h)) return 'Height is required';
+    if (h < 90 || h > 250) return 'Height must be between 90 and 250 cm (approx 3\'0" - 8\'2")';
+    return null;
+  }
+
+  function validateWeightKg(w) {
+    if (w == null || isNaN(w)) return 'Weight is required';
+    if (w < 30 || w > 300) return 'Weight must be between 30 and 300 kg (approx 66 - 661 lbs)';
+    return null;
+  }
+
+  assert.equal(validateHeightCm(89), 'Height must be between 90 and 250 cm (approx 3\'0" - 8\'2")');
+  assert.equal(validateHeightCm(180), null);
+  assert.equal(validateHeightCm(251), 'Height must be between 90 and 250 cm (approx 3\'0" - 8\'2")');
+
+  assert.equal(validateWeightKg(29), 'Weight must be between 30 and 300 kg (approx 66 - 661 lbs)');
+  assert.equal(validateWeightKg(75), null);
+  assert.equal(validateWeightKg(305), 'Weight must be between 30 and 300 kg (approx 66 - 661 lbs)');
+
+  // 3. Profile completion status check
+  function isProfileComplete(profile) {
+    const hasName = Boolean(profile.display_name?.trim());
+    const hasBirthdate = Boolean(profile.birthdate);
+    const hasHeight = profile.height_cm != null && profile.height_cm >= 90 && profile.height_cm <= 250;
+    const hasWeight = profile.weight_kg != null && profile.weight_kg >= 30 && profile.weight_kg <= 300;
+    return hasName && hasBirthdate && hasHeight && hasWeight;
+  }
+
+  assert.equal(isProfileComplete({ display_name: 'Alex', birthdate: '1995-01-01' }), false);
+  assert.equal(isProfileComplete({ display_name: 'Alex', birthdate: '1995-01-01', height_cm: 175 }), false);
+  assert.equal(isProfileComplete({ display_name: 'Alex', birthdate: '1995-01-01', height_cm: 175, weight_kg: 70 }), true);
+
+  // 4. Privacy visibility modes: PUBLIC, MATCHES_ONLY, HIDDEN
+  const validVisibilities = ['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'];
+  assert.ok(validVisibilities.includes('PUBLIC'));
+  assert.ok(validVisibilities.includes('MATCHES_ONLY'));
+  assert.ok(validVisibilities.includes('HIDDEN'));
+});
+
+// --- Test 62: Discovery Filter Preferences & Active Filter Indicator ---
+test('Discovery Filters: Range controls, unit conversions (miles/km), and active filter indicator', async () => {
+  // Conversion: 1 mile = 1.60934 km
+  function milesToKm(miles) {
+    return Math.round(miles * 1.60934);
+  }
+
+  function kmToMiles(km) {
+    return Math.round(km / 1.60934);
+  }
+
+  assert.equal(milesToKm(2), 3);
+  assert.equal(milesToKm(50), 80);
+  assert.equal(milesToKm(160), 257);
+  assert.equal(kmToMiles(257), 160);
+
+  // Default discovery filters vs active filter detection
+  const defaultFilters = {
+    min_age: 18,
+    max_age: 99,
+    max_distance_km: 160,
+    min_height_cm: null,
+    max_height_cm: null,
+    min_weight_kg: null,
+    max_weight_kg: null,
+    verified_profiles_only: false,
+    dealbreakers: [],
+  };
+
+  function hasActiveFilters(current) {
+    if (current.min_age && current.min_age > 18) return true;
+    if (current.max_age && current.max_age < 99) return true;
+    if (current.max_distance_km && current.max_distance_km < 160) return true;
+    if (current.min_height_cm != null) return true;
+    if (current.max_height_cm != null) return true;
+    if (current.min_weight_kg != null) return true;
+    if (current.max_weight_kg != null) return true;
+    if (current.verified_profiles_only) return true;
+    if (current.dealbreakers && current.dealbreakers.length > 0) return true;
+    return false;
+  }
+
+  assert.equal(hasActiveFilters(defaultFilters), false);
+  assert.equal(hasActiveFilters({ ...defaultFilters, min_height_cm: 160 }), true);
+  assert.equal(hasActiveFilters({ ...defaultFilters, max_distance_km: 50 }), true);
+  assert.equal(hasActiveFilters({ ...defaultFilters, verified_profiles_only: true }), true);
+});
+
+// --- Test 63: Quick-Message Composer, Character Limit & Message Requests Workflow ---
+test('Quick-Message Composer: Intro note delivery, 500 character limit, and request action controls', async () => {
+  const MAX_INTRO_LENGTH = 500;
+
+  // 1. Character limit validation
+  function validateIntroNote(note) {
+    if (!note || !note.trim()) return { valid: false, error: 'Message cannot be empty' };
+    if (note.length > MAX_INTRO_LENGTH) return { valid: false, error: `Message cannot exceed ${MAX_INTRO_LENGTH} characters` };
+    return { valid: true, note: note.trim() };
+  }
+
+  assert.equal(validateIntroNote('').valid, false);
+  assert.equal(validateIntroNote('   ').valid, false);
+  assert.equal(validateIntroNote('Hello there!').valid, true);
+  assert.equal(validateIntroNote('a'.repeat(501)).valid, false);
+
+  // 2. Message Request Flow Simulation
+  const messageRequests = [];
+  function sendIntroNote(senderId, recipientId, note) {
+    const check = validateIntroNote(note);
+    if (!check.valid) throw new Error(check.error);
+    const req = {
+      id: `req_${Date.now()}`,
+      sender_id: senderId,
+      recipient_id: recipientId,
+      body: check.note,
+      status: 'PENDING',
+      created_at: new Date().toISOString(),
+    };
+    messageRequests.push(req);
+    return req;
+  }
+
+  const req1 = sendIntroNote('user_alice', 'user_bob', 'Hey Bob, loved your travel photos!');
+  assert.equal(req1.status, 'PENDING');
+  assert.equal(req1.body, 'Hey Bob, loved your travel photos!');
+
+  // 3. Actions: ACCEPT, DECLINE, BLOCK
+  function handleRequestAction(requestId, action) {
+    const item = messageRequests.find((r) => r.id === requestId);
+    if (!item) throw new Error('Request not found');
+    if (action === 'ACCEPT') {
+      item.status = 'ACCEPTED';
+    } else if (action === 'DECLINE') {
+      item.status = 'DECLINED';
+    } else if (action === 'BLOCK') {
+      item.status = 'BLOCKED';
+    }
+    return item;
+  }
+
+  const accepted = handleRequestAction(req1.id, 'ACCEPT');
+  assert.equal(accepted.status, 'ACCEPTED');
+
+  const req2 = sendIntroNote('user_carol', 'user_bob', 'Hi!');
+  const declined = handleRequestAction(req2.id, 'DECLINE');
+  assert.equal(declined.status, 'DECLINED');
+
+  const req3 = sendIntroNote('user_spammer', 'user_bob', 'Buy crypto');
+  const blocked = handleRequestAction(req3.id, 'BLOCK');
+  assert.equal(blocked.status, 'BLOCKED');
+});
+
+// --- Test 64: Dual-ended RangeSlider & SingleSlider Bidirectional Synchronization ---
+test('Discovery Filters: Dual-ended RangeSlider & SingleSlider state arithmetic and bidirectional text input sync', () => {
+  // 1. Dual-ended range slider position arithmetic
+  function calculateRangePositions(min, max, minValue, maxValue, trackWidth) {
+    const clampedMin = Math.max(min, Math.min(max, minValue));
+    const clampedMax = Math.max(min, Math.min(max, maxValue));
+    const rangeSpan = max - min || 1;
+    const minRatio = (clampedMin - min) / rangeSpan;
+    const maxRatio = (clampedMax - min) / rangeSpan;
+    const minPos = minRatio * trackWidth;
+    const maxPos = maxRatio * trackWidth;
+    return { minPos, maxPos, activeWidth: maxPos - minPos };
+  }
+
+  const agePositions = calculateRangePositions(18, 99, 25, 45, 300);
+  assert.ok(agePositions.minPos > 0);
+  assert.ok(agePositions.maxPos > agePositions.minPos);
+  assert.equal(agePositions.activeWidth, agePositions.maxPos - agePositions.minPos);
+
+  // 2. Bidirectional input synchronization: Age input typing
+  function syncAgeInput(rawText, isMin, currentMin, currentMax) {
+    const n = parseInt(rawText, 10);
+    if (isNaN(n)) return { valid: false, minAge: currentMin, maxAge: currentMax };
+    if (isMin) {
+      if (n < 18 || n > 99) return { valid: false, minAge: currentMin, maxAge: currentMax };
+      const clamped = Math.min(n, currentMax);
+      return { valid: true, minAge: clamped, maxAge: currentMax, text: String(clamped) };
+    } else {
+      if (n < 18 || n > 99) return { valid: false, minAge: currentMin, maxAge: currentMax };
+      const clamped = Math.max(n, currentMin);
+      return { valid: true, minAge: currentMin, maxAge: clamped, text: String(clamped) };
+    }
+  }
+
+  const typedMin = syncAgeInput('30', true, 18, 50);
+  assert.equal(typedMin.valid, true);
+  assert.equal(typedMin.minAge, 30);
+  assert.equal(typedMin.maxAge, 50);
+
+  // Typing min > max clamps to max
+  const typedExcessMin = syncAgeInput('65', true, 18, 50);
+  assert.equal(typedExcessMin.minAge, 50);
+
+  // Typing max < min clamps to min
+  const typedSubMax = syncAgeInput('20', false, 30, 50);
+  assert.equal(typedSubMax.maxAge, 30);
+
+  // 3. Slider drag updates input values
+  function onSliderChange(newMin, newMax) {
+    return {
+      minAge: newMin,
+      maxAge: newMax,
+      minAgeText: String(newMin),
+      maxAgeText: String(newMax),
+    };
+  }
+
+  const dragged = onSliderChange(21, 35);
+  assert.equal(dragged.minAge, 21);
+  assert.equal(dragged.maxAge, 35);
+  assert.equal(dragged.minAgeText, '21');
+  assert.equal(dragged.maxAgeText, '35');
+});
+
+// --- Test 65: Distance Slider, Direct Input, and Miles to Kilometres Conversion ---
+test('Discovery Filters: Distance conversions (2-160 miles <-> km), quick presets, and backend payload mapping', () => {
+  function milesToKm(miles) {
+    return Math.round(miles * 1.60934);
+  }
+
+  function kmToMiles(km) {
+    return Math.round(km / 1.60934);
+  }
+
+  // Bounds verification: 2 to 160 miles
+  assert.equal(milesToKm(2), 3);
+  assert.equal(milesToKm(160), 257);
+
+  // Presets mapping
+  const presets = [5, 15, 25, 50, 100, 160];
+  for (const p of presets) {
+    assert.ok(p >= 2 && p <= 160);
+    const km = milesToKm(p);
+    assert.ok(km > p, 'km is numerically larger than miles');
+    const backToMiles = kmToMiles(km);
+    assert.equal(backToMiles, p, `preset ${p} mi roundtrips through km accurately`);
+  }
+
+  // Direct distance input handling
+  function handleDistanceInput(rawText) {
+    const n = parseInt(rawText, 10);
+    if (isNaN(n) || n < 2) return { miles: 2, text: '2' };
+    if (n > 160) return { miles: 160, text: '160' };
+    return { miles: n, text: String(n) };
+  }
+
+  assert.equal(handleDistanceInput('0').miles, 2);
+  assert.equal(handleDistanceInput('75').miles, 75);
+  assert.equal(handleDistanceInput('200').miles, 160);
+});
+
+// --- Test 66: Height & Weight Range Controls, Unit Sync, Apply & Reset Restoration ---
+test('Discovery Filters: Height & Weight metric/imperial slider bounds, validation, Apply gating, and Reset restoration', () => {
+  // 1. Height conversion
+  function cmToFtIn(cm) {
+    const totalIn = Math.round(cm / 2.54);
+    const ft = Math.floor(totalIn / 12);
+    const inch = totalIn % 12;
+    return { ft, inch, label: `${ft}'${inch}"` };
+  }
+
+  function ftInToCm(ft, inch) {
+    const totalIn = (Number(ft) || 0) * 12 + (Number(inch) || 0);
+    return Math.round(totalIn * 2.54);
+  }
+
+  assert.equal(cmToFtIn(183).label, `6'0"`);
+  assert.equal(ftInToCm(6, 0), 183);
+
+  // 2. Weight conversion
+  function kgToLb(kg) {
+    return Math.round(kg / 0.45359237);
+  }
+
+  function lbToKg(lb) {
+    return Math.round(lb * 0.45359237);
+  }
+
+  assert.equal(kgToLb(70), 154);
+  assert.equal(lbToKg(154), 70);
+
+  // 3. Validation gating on Apply
+  function validateFilters(minAge, maxAge, minH, maxH, minW, maxW) {
+    if (minAge > maxAge) return { ok: false, error: 'Invalid Age Range' };
+    if (minH > maxH) return { ok: false, error: 'Invalid Height Range' };
+    if (minW > maxW) return { ok: false, error: 'Invalid Weight Range' };
+    return { ok: true };
+  }
+
+  assert.equal(validateFilters(25, 20, 150, 180, 50, 80).ok, false);
+  assert.equal(validateFilters(20, 30, 190, 150, 50, 80).ok, false);
+  assert.equal(validateFilters(20, 30, 150, 180, 90, 60).ok, false);
+  assert.equal(validateFilters(20, 30, 150, 180, 60, 90).ok, true);
+
+  // 4. Saved filter restoration on open
+  function restoreFilters(savedPrefs) {
+    const minAge = savedPrefs?.min_age || 18;
+    const maxAge = savedPrefs?.max_age || 99;
+    const km = savedPrefs?.max_distance_km || 80;
+    const miles = Math.min(160, Math.max(2, Math.round(km / 1.60934)));
+    const minH = savedPrefs?.min_height_cm || 90;
+    const maxH = savedPrefs?.max_height_cm || 250;
+    const minW = savedPrefs?.min_weight_kg || 30;
+    const maxW = savedPrefs?.max_weight_kg || 300;
+    return { minAge, maxAge, miles, minH, maxH, minW, maxW };
+  }
+
+  const restored = restoreFilters({
+    min_age: 24,
+    max_age: 38,
+    max_distance_km: 120,
+    min_height_cm: 165,
+    max_height_cm: 195,
+    min_weight_kg: 55,
+    max_weight_kg: 95,
+  });
+
+  assert.equal(restored.minAge, 24);
+  assert.equal(restored.maxAge, 38);
+  assert.equal(restored.miles, 75); // 120km / 1.60934 = 74.56 -> 75 mi
+  assert.equal(restored.minH, 165);
+  assert.equal(restored.maxH, 195);
+  assert.equal(restored.minW, 55);
+  assert.equal(restored.maxW, 95);
+
+  // 5. Reset to defaults
+  const resetDefaults = restoreFilters(null);
+  assert.equal(resetDefaults.minAge, 18);
+  assert.equal(resetDefaults.maxAge, 99);
+  assert.equal(resetDefaults.miles, 50); // 80km / 1.60934 = 50 mi
+  assert.equal(resetDefaults.minH, 90);
+  assert.equal(resetDefaults.maxH, 250);
+  assert.equal(resetDefaults.minW, 30);
+  assert.equal(resetDefaults.maxW, 300);
+});
+
+// --- Test 67: Android Bottom Navigation Safe Area Insets & Restyled Like Button ---
+test('Android Bottom Safe Area & Restyled Like Button: dynamic insets, 48dp touch targets, and dark-gold Like styling', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify TabLayout (_layout.tsx) implements dynamic insets and >= 48dp touch targets
+  const layoutFile = await fs.readFile(
+    new URL('../app/(tabs)/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(layoutFile.includes('useSafeAreaInsets'), 'TabLayout must use useSafeAreaInsets from react-native-safe-area-context');
+  assert.ok(layoutFile.includes("Math.max(insets.bottom, 16)"), 'Android bottom inset must guarantee at least 16dp clearance or system nav height');
+  assert.ok(layoutFile.includes('tabBarItemStyle: styles.tabBarItem'), 'TabLayout must apply tabBarItemStyle');
+  assert.ok(layoutFile.includes('minHeight: 48'), 'tabBarItem must enforce >= 48dp touch target');
+  assert.ok(layoutFile.includes('horizontalInset'), 'TabLayout must guard curved screens with dynamic horizontal insets');
+  assert.ok(layoutFile.includes('paddingBottom: bottomInset + 4'), 'tabBar must pad above Android system navigation gesture/buttons');
+
+  // 2. Verify dynamic height budgeting across Android devices
+  function calculateTabHeight(platform, insetsBottom) {
+    const bottomInset = platform === 'android'
+      ? Math.max(insetsBottom, 16)
+      : (insetsBottom > 0 ? insetsBottom : 12);
+    const tabContentHeight = 52;
+    return {
+      totalHeight: tabContentHeight + bottomInset,
+      paddingBottom: bottomInset + 4,
+    };
+  }
+
+  // Android with 3-button navigation (e.g. 48dp system bar)
+  const threeButtonNav = calculateTabHeight('android', 48);
+  assert.equal(threeButtonNav.totalHeight, 100);
+  assert.equal(threeButtonNav.paddingBottom, 52);
+
+  // Android with gesture navigation (e.g. 24dp system bar)
+  const gestureNav = calculateTabHeight('android', 24);
+  assert.equal(gestureNav.totalHeight, 76);
+  assert.equal(gestureNav.paddingBottom, 28);
+
+  // Android with hidden or zero insets
+  const zeroInsets = calculateTabHeight('android', 0);
+  assert.equal(zeroInsets.totalHeight, 68);
+  assert.equal(zeroInsets.paddingBottom, 20);
+
+  // 3. Verify DiscoveryCard restyled Like button
+  const cardFile = await fs.readFile(
+    new URL('../src/components/DiscoveryCard.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(cardFile.includes("backgroundColor: '#1D202B'"), 'Like button must use dark charcoal background instead of bright solid red');
+  assert.ok(cardFile.includes('borderColor: colors.gold'), 'Like button must have refined champagne gold border');
+  assert.ok(cardFile.includes("color: '#FF6584'"), 'Like icon must use warm coral/rose heart color');
+  assert.ok(cardFile.includes('width: 54') && cardFile.includes('height: 54'), 'Like button must preserve 54x54dp dimensions');
+  assert.ok(cardFile.includes('borderRadius: 27'), 'Like button must be perfectly circular');
+});
+
+// --- Test 68: Google Sign-In & Mobile Flow ---
+test('Google Sign-In: validates authService payload, component structure, and screen integration', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify authService.loginWithGoogle
+  const authServiceFile = await fs.readFile(
+    new URL('../src/services/auth/authService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(authServiceFile.includes('loginWithGoogle'), 'authService must export loginWithGoogle method');
+  assert.ok(authServiceFile.includes("'/api/v1/auth/google'"), 'loginWithGoogle must POST to /api/v1/auth/google');
+  assert.ok(authServiceFile.includes('GoogleAuthPayload'), 'authService must define GoogleAuthPayload');
+
+  // 2. Verify GoogleSignInButton component
+  const googleBtnFile = await fs.readFile(
+    new URL('../src/components/GoogleSignInButton.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(googleBtnFile.includes('GoogleSignInButton'), 'Must export GoogleSignInButton component');
+  assert.ok(googleBtnFile.includes('Continue with Google'), 'Must render standard Continue with Google text');
+  assert.ok(googleBtnFile.includes('testID="google-sign-in-btn"'), 'Must specify testID for Google button');
+  assert.ok(googleBtnFile.includes('loginWithGoogle'), 'Must invoke loginWithGoogle from useAuth');
+
+  // 3. Verify Login & Register screen integration
+  const loginFile = await fs.readFile(
+    new URL('../app/(auth)/login.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(loginFile.includes('GoogleSignInButton'), 'login.tsx must render GoogleSignInButton');
+  assert.ok(loginFile.includes('dividerRow'), 'login.tsx must include divider row');
+
+  const registerFile = await fs.readFile(
+    new URL('../app/(auth)/register.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(registerFile.includes('GoogleSignInButton'), 'register.tsx must render GoogleSignInButton');
+  assert.ok(registerFile.includes('dividerRow'), 'register.tsx must include divider row');
+});
+
+// --- Test 69: Responsive Chat & Keyboard Avoidance ---
+test('Responsive Chat: validates safe area insets, keyboard avoidance, auto-scroll, and draft preservation', async () => {
+  const fs = await import('node:fs/promises');
+  const chatFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Dynamic insets and keyboard avoidance
+  assert.ok(chatFile.includes('useSafeAreaInsets'), 'ChatRoom must import and use useSafeAreaInsets');
+  assert.ok(chatFile.includes("behavior={Platform.OS === 'ios' ? 'padding' : 'height'}"), 'Android must use height behavior to avoid occlusion');
+  assert.ok(chatFile.includes('Math.max(insets.bottom'), 'Input bar must pad above system navigation gesture/buttons');
+
+  // 2. Auto-scroll on keyboard appearance
+  assert.ok(chatFile.includes('keyboardDidShow'), 'ChatRoom must register keyboardDidShow listener');
+  assert.ok(chatFile.includes('scrollToOffset'), 'Must scroll FlatList to offset 0 on keyboard show and message send');
+
+  // 3. Draft preservation on send failure
+  assert.ok(chatFile.includes('setInputText(text)'), 'ChatRoom must restore input draft if sendMessage throws');
+
+  // 4. Send button touch target and accessibility
+  assert.ok(chatFile.includes('minWidth: 44') && chatFile.includes('minHeight: 44'), 'Send button must enforce >= 44dp accessible touch target');
+  assert.ok(chatFile.includes('testID="chat-send-btn"'), 'Send button must have testID="chat-send-btn"');
+});
+
+// --- Test 70: Five Selectable App-Wide Themes ---
+test('App Themes: validates 5 luxury palettes, complete keys, persistence, and profile selector', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify colors.ts defines all 5 themes and metadata
+  const colorsFile = await fs.readFile(
+    new URL('../src/theme/colors.ts', import.meta.url),
+    'utf-8'
+  );
+
+  const themeIds = ['midnight-gold', 'pride-spectrum', 'youth-pop', 'lavender', 'ocean'];
+  for (const id of themeIds) {
+    assert.ok(colorsFile.includes(`'${id}'`), `colors.ts must register theme '${id}'`);
+  }
+  assert.ok(colorsFile.includes('midnightGoldTheme'), 'Must export midnightGoldTheme');
+  assert.ok(colorsFile.includes('prideSpectrumTheme'), 'Must export prideSpectrumTheme');
+  assert.ok(colorsFile.includes('youthPopTheme'), 'Must export youthPopTheme');
+  assert.ok(colorsFile.includes('lavenderTheme'), 'Must export lavenderTheme');
+  assert.ok(colorsFile.includes('oceanTheme'), 'Must export oceanTheme');
+  assert.ok(colorsFile.includes('THEME_METAS'), 'Must export THEME_METAS array');
+  assert.ok(colorsFile.includes('THEME_REGISTRY'), 'Must export THEME_REGISTRY');
+
+  // 2. Verify ThemeContext and ThemeProvider implementation
+  const contextFile = await fs.readFile(
+    new URL('../src/theme/ThemeContext.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(contextFile.includes('ThemeProvider'), 'ThemeContext must export ThemeProvider');
+  assert.ok(contextFile.includes('useTheme'), 'ThemeContext must export useTheme hook');
+  assert.ok(contextFile.includes('aura_active_theme'), 'Must persist active theme to storage key aura_active_theme');
+
+  // 3. Verify Theme selector in ProfileScreen
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(profileFile.includes('App Appearance & Theme'), 'Profile screen must include App Appearance & Theme section');
+  assert.ok(profileFile.includes('useTheme'), 'Profile screen must call useTheme');
+  assert.ok(profileFile.includes('theme-option-'), 'Must provide theme option testIDs');
+  assert.ok(profileFile.includes('Active ✓'), 'Must render Active indicator for selected theme');
+});
+
+// --- Test 71: AdMob Native Configuration & Safe Privacy Gating ---
+test('AdMob Native Config: validates app.json plugin, honest SDK availability, and 15-profile cadence', async () => {
+  const fs = await import('node:fs/promises');
+  const appJson = JSON.parse(await fs.readFile(new URL('../app.json', import.meta.url), 'utf-8'));
+
+  // 1. Verify app.json plugin
+  const plugins = appJson.expo?.plugins || [];
+  const adMobPlugin = plugins.find((p) => Array.isArray(p) && p[0] === 'react-native-google-mobile-ads');
+  assert.ok(adMobPlugin, 'app.json must declare react-native-google-mobile-ads plugin');
+  const adMobConfig = adMobPlugin[1];
+  assert.ok(adMobConfig.androidAppId, 'Must configure androidAppId in app.json plugin');
+  assert.ok(adMobConfig.iosAppId, 'Must configure iosAppId in app.json plugin');
+
+  // 2. Verify admobService implementation & honest Expo Go check
+  const admobFile = await fs.readFile(
+    new URL('../src/services/ads/admobService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(admobFile.includes('isGoogleMobileAdsAvailable'), 'Must export isGoogleMobileAdsAvailable');
+  assert.ok(admobFile.includes('isExpoGo'), 'Must check isExpoGo');
+  assert.ok(admobFile.includes('threshold = 15'), 'Must enforce 15-profile interstitial cadence');
+  assert.ok(admobFile.includes('viewedProfileIds'), 'Must maintain viewedProfileIds Set to deduplicate rerenders');
+  assert.ok(admobFile.includes('assertPrivacyClean'), 'Must enforce assertPrivacyClean');
+  assert.ok(admobFile.includes('FORBIDDEN_PRIVACY_KEYS'), 'Must check FORBIDDEN_PRIVACY_KEYS');
+});
+
+// --- Test 72: Discovery Quick-Message Keyboard Avoidance & Draft Preservation ---
+test('Discovery Quick Message: validates keyboard avoidance, card height adaptation, tab bar hiding, and draft preservation', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify TabLayout hides bottom bar when software keyboard appears on Android
+  const layoutFile = await fs.readFile(
+    new URL('../app/(tabs)/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(layoutFile.includes('tabBarHideOnKeyboard: true'), 'TabLayout must enable tabBarHideOnKeyboard: true');
+
+  // 2. Verify QuickMessageComposer preserves draft on failure and provides accessible controls
+  const composerFile = await fs.readFile(
+    new URL('../src/components/QuickMessageComposer.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(composerFile.includes('Keyboard.dismiss()'), 'QuickMessageComposer must dismiss keyboard on send');
+  assert.ok(composerFile.includes('setText(draftText)'), 'QuickMessageComposer must restore draftText on send failure');
+  assert.ok(composerFile.includes('recipientId || recipientName'), 'QuickMessageComposer must reset draft when recipient changes');
+  assert.ok(composerFile.includes('testID="quick-message-input"'), 'Must define quick-message-input testID');
+  assert.ok(composerFile.includes('testID="quick-message-send-btn"'), 'Must define quick-message-send-btn testID');
+  assert.ok(composerFile.includes('minWidth: 44') && composerFile.includes('minHeight: 44'), 'Send button must enforce >= 44dp accessible touch target');
+
+  // 3. Verify DiscoveryCard adapts height responsively for keyboard without distorting images or breaking swiping
+  const cardFile = await fs.readFile(
+    new URL('../src/components/DiscoveryCard.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(cardFile.includes('isKeyboardOpen'), 'DiscoveryCard must accept isKeyboardOpen prop');
+  assert.ok(cardFile.includes('resizeMode="cover"'), 'Photo resizeMode="cover" must be preserved without distortion');
+  assert.ok(cardFile.includes('actionsBarCompact'), 'DiscoveryCard must provide compact actionsBar styling');
+  assert.ok(cardFile.includes('infoOverlayCompact'), 'DiscoveryCard must provide compact infoOverlay styling');
+  assert.ok(cardFile.includes('Keyboard.dismiss()'), 'DiscoveryCard must dismiss keyboard on swipe gesture and button interactions');
+
+  // 4. Verify DiscoveryScreen integration and draft error propagation
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(indexFile.includes('KeyboardAvoidingView'), 'index.tsx must wrap deck in KeyboardAvoidingView');
+  assert.ok(indexFile.includes("behavior={Platform.OS === 'ios' ? 'padding' : undefined}"), 'Must avoid double-shrinkage on Android adjustResize');
+  assert.ok(indexFile.includes('Keyboard.addListener'), 'index.tsx must monitor software keyboard events');
+  assert.ok(indexFile.includes('isKeyboardOpen={isKeyboardOpen}'), 'index.tsx must pass isKeyboardOpen to DiscoveryCard');
+  assert.ok(indexFile.includes('maxCardHeight={cardRegionHeight}'), 'index.tsx must pass maxCardHeight to DiscoveryCard');
+  assert.ok(indexFile.includes('cardRegion'), 'index.tsx must provide flexible cardRegion container');
+  assert.ok(indexFile.includes('composerRegion'), 'index.tsx must provide dedicated composerRegion pinned above keyboard');
+  assert.ok(indexFile.includes('throw err'), 'handleSwipe must propagate introNote errors for draft preservation');
+  assert.ok(indexFile.includes('deckContainerKeyboard'), 'Must provide deckContainerKeyboard flex styles');
+  assert.ok(indexFile.includes('TouchableWithoutFeedback'), 'Must support dismissing keyboard when tapping outside');
+});

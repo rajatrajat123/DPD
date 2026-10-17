@@ -13,7 +13,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { colors, typography, spacing, borderRadius } from '../../src/theme';
+import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { mediaUploader } from '../../src/services/media/mediaUploader';
 import { authService } from '../../src/services/auth/authService';
@@ -58,6 +58,7 @@ function buildFinalList(selected: string[], customText: string): string[] {
 export default function ProfileScreen() {
   const router = useRouter();
   const { profile, refreshProfile } = useAuth();
+  const { themeId, setTheme, themes } = useTheme();
 
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [bio, setBio] = useState(profile?.bio || '');
@@ -75,6 +76,19 @@ export default function ProfileScreen() {
   // 3. Sexual orientation
   const [selectedOrientations, setSelectedOrientations] = useState<string[]>([]);
   const [customOrientationText, setCustomOrientationText] = useState('');
+
+  // Physical Attributes (Required for Discovery completion)
+  const [heightUnit, setHeightUnit] = useState<'metric' | 'imperial'>('metric');
+  const [weightUnit, setWeightUnit] = useState<'metric' | 'imperial'>('metric');
+  const [heightCmInput, setHeightCmInput] = useState('');
+  const [heightFtInput, setHeightFtInput] = useState('');
+  const [heightInInput, setHeightInInput] = useState('');
+  const [weightKgInput, setWeightKgInput] = useState('');
+  const [weightLbInput, setWeightLbInput] = useState('');
+  const [heightVisibility, setHeightVisibility] = useState<'PUBLIC' | 'MATCHES_ONLY' | 'HIDDEN'>('PUBLIC');
+  const [weightVisibility, setWeightVisibility] = useState<'PUBLIC' | 'MATCHES_ONLY' | 'HIDDEN'>('PUBLIC');
+  const [heightError, setHeightError] = useState<string | null>(null);
+  const [weightError, setWeightError] = useState<string | null>(null);
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -130,6 +144,25 @@ export default function ProfileScreen() {
       const parsedOrientations = parseInitialTaxonomy(profile.sexual_orientations);
       setSelectedOrientations(parsedOrientations.selected);
       setCustomOrientationText(parsedOrientations.customText);
+
+      if (profile.height_cm) {
+        setHeightCmInput(String(profile.height_cm));
+        const totalInches = Math.round(profile.height_cm / 2.54);
+        const ft = Math.floor(totalInches / 12);
+        const inch = totalInches % 12;
+        setHeightFtInput(String(ft));
+        setHeightInInput(String(inch));
+      }
+      if (profile.weight_kg) {
+        setWeightKgInput(String(profile.weight_kg));
+        setWeightLbInput(String(Math.round(profile.weight_kg * 2.20462)));
+      }
+      if (profile.visibility_settings?.height) {
+        setHeightVisibility(profile.visibility_settings.height as any);
+      }
+      if (profile.visibility_settings?.weight) {
+        setWeightVisibility(profile.visibility_settings.weight as any);
+      }
     }
   }, [profile]);
 
@@ -284,6 +317,55 @@ export default function ProfileScreen() {
       Alert.alert('Sexual Orientation Required', 'Please select at least one sexual orientation.');
       return;
     }
+    // Validate Height (90-250 cm)
+    let finalHeightCm: number | undefined;
+    if (heightUnit === 'metric') {
+      const parsed = parseInt(heightCmInput.trim(), 10);
+      if (isNaN(parsed) || parsed < 90 || parsed > 250) {
+        setHeightError('Height must be between 90 cm and 250 cm.');
+        Alert.alert('Height Required', 'Height must be between 90 cm and 250 cm.');
+        return;
+      }
+      finalHeightCm = parsed;
+    } else {
+      const ft = parseInt(heightFtInput.trim(), 10);
+      const inch = parseInt(heightInInput.trim() || '0', 10);
+      if (isNaN(ft) || ft < 3 || ft > 8 || isNaN(inch) || inch < 0 || inch >= 12) {
+        setHeightError('Height must be between 3 ft 0 in and 8 ft 2 in.');
+        Alert.alert('Height Required', 'Height must be between 3 ft 0 in and 8 ft 2 in.');
+        return;
+      }
+      const totalInches = ft * 12 + inch;
+      const converted = Math.round(totalInches * 2.54);
+      if (converted < 90 || converted > 250) {
+        setHeightError('Height must be between 90 cm (3\'0") and 250 cm (8\'2").');
+        Alert.alert('Height Required', 'Height must be between 90 cm (3\'0") and 250 cm (8\'2").');
+        return;
+      }
+      finalHeightCm = converted;
+    }
+    setHeightError(null);
+
+    // Validate Weight (30-300 kg)
+    let finalWeightKg: number | undefined;
+    if (weightUnit === 'metric') {
+      const parsed = parseInt(weightKgInput.trim(), 10);
+      if (isNaN(parsed) || parsed < 30 || parsed > 300) {
+        setWeightError('Weight must be between 30 kg and 300 kg.');
+        Alert.alert('Weight Required', 'Weight must be between 30 kg and 300 kg.');
+        return;
+      }
+      finalWeightKg = parsed;
+    } else {
+      const lb = parseInt(weightLbInput.trim(), 10);
+      if (isNaN(lb) || lb < 66 || lb > 660) {
+        setWeightError('Weight must be between 66 lb and 660 lb.');
+        Alert.alert('Weight Required', 'Weight must be between 66 lb and 660 lb.');
+        return;
+      }
+      finalWeightKg = Math.round(lb * 0.45359237);
+    }
+    setWeightError(null);
 
     setIsSaving(true);
     try {
@@ -297,6 +379,13 @@ export default function ProfileScreen() {
         sexual_orientations: finalOrientations,
         smoking_habit: smokingPref,
         smoking_preference: smokingPref,
+        height_cm: finalHeightCm,
+        weight_kg: finalWeightKg,
+        visibility_settings: {
+          ...(profile?.visibility_settings || {}),
+          height: heightVisibility,
+          weight: weightVisibility,
+        },
       });
 
       // 2. Update discovery preferences dealbreaker and preferred genders on backend
@@ -400,9 +489,31 @@ export default function ProfileScreen() {
                   📍 {profile?.city || 'Local Member'}
                 </Text>
               </View>
+              {Boolean(profile?.height_cm && profile?.weight_kg) ? (
+                <View style={styles.completedBadge}>
+                  <Text style={styles.completedBadgeText}>✨ Complete</Text>
+                </View>
+              ) : (
+                <View style={styles.incompleteBadge}>
+                  <Text style={styles.incompleteBadgeText}>⚠️ Incomplete</Text>
+                </View>
+              )}
             </View>
           </View>
         </View>
+
+        {/* Discovery Incomplete Notice Banner */}
+        {(!profile?.height_cm || !profile?.weight_kg) && (
+          <View style={styles.incompleteNoticeBanner}>
+            <Text style={styles.incompleteNoticeIcon}>⚠️</Text>
+            <View style={{ flex: 1 }}>
+              <Text style={styles.incompleteNoticeTitle}>Height & Weight Required for Discovery</Text>
+              <Text style={styles.incompleteNoticeText}>
+                Your profile is not yet eligible for Discovery matching. Please enter your height and weight below to activate your account in member feeds.
+              </Text>
+            </View>
+          </View>
+        )}
 
         {/* Photo Gallery Grid */}
         <View style={styles.sectionCard}>
@@ -528,6 +639,245 @@ export default function ProfileScreen() {
               multiline
               numberOfLines={4}
             />
+          </View>
+        </View>
+
+        {/* Physical Attributes Section (Required for Discovery) */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>Physical Attributes</Text>
+            <View style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadge : styles.incompleteBadge}>
+              <Text style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadgeText : styles.incompleteBadgeText}>
+                {Boolean(profile?.height_cm && profile?.weight_kg) ? '✓ Completed' : 'Required'}
+              </Text>
+            </View>
+          </View>
+          <Text style={styles.sectionDesc}>
+            Height and weight are required before your profile can appear in Discovery. Choose your preferred display units and card privacy.
+          </Text>
+
+          {/* Height Input */}
+          <View style={styles.inputGroup}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.inputLabel}>Height (90–250 cm)</Text>
+              <View style={styles.unitToggleGroup}>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, heightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  onPress={() => {
+                    setHeightUnit('metric');
+                    if (!heightCmInput && heightFtInput) {
+                      const ft = parseInt(heightFtInput, 10) || 0;
+                      const inc = parseInt(heightInInput, 10) || 0;
+                      setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                    }
+                  }}
+                >
+                  <Text style={[styles.unitToggleText, heightUnit === 'metric' && styles.unitToggleTextActive]}>cm</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, heightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  onPress={() => {
+                    setHeightUnit('imperial');
+                    if (!heightFtInput && heightCmInput) {
+                      const cm = parseInt(heightCmInput, 10) || 0;
+                      const totalIn = Math.round(cm / 2.54);
+                      setHeightFtInput(String(Math.floor(totalIn / 12)));
+                      setHeightInInput(String(totalIn % 12));
+                    }
+                  }}
+                >
+                  <Text style={[styles.unitToggleText, heightUnit === 'imperial' && styles.unitToggleTextActive]}>ft / in</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {heightUnit === 'metric' ? (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                  value={heightCmInput}
+                  onChangeText={(val) => {
+                    setHeightCmInput(val);
+                    setHeightError(null);
+                    const cm = parseInt(val, 10);
+                    if (!isNaN(cm) && cm > 0) {
+                      const totIn = Math.round(cm / 2.54);
+                      setHeightFtInput(String(Math.floor(totIn / 12)));
+                      setHeightInInput(String(totIn % 12));
+                    }
+                  }}
+                  placeholder="175"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>cm</Text>
+              </View>
+            ) : (
+              <View style={styles.dualInputRow}>
+                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                  <TextInput
+                    style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                    value={heightFtInput}
+                    onChangeText={(val) => {
+                      setHeightFtInput(val);
+                      setHeightError(null);
+                      const ft = parseInt(val, 10) || 0;
+                      const inc = parseInt(heightInInput, 10) || 0;
+                      if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                    }}
+                    placeholder="5"
+                    placeholderTextColor={colors.textSubtle}
+                    keyboardType="numeric"
+                    maxLength={1}
+                  />
+                  <Text style={styles.unitSuffix}>ft</Text>
+                </View>
+                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                  <TextInput
+                    style={[styles.input, styles.numericInput, heightError ? styles.inputError : null]}
+                    value={heightInInput}
+                    onChangeText={(val) => {
+                      setHeightInInput(val);
+                      setHeightError(null);
+                      const ft = parseInt(heightFtInput, 10) || 0;
+                      const inc = parseInt(val, 10) || 0;
+                      if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                    }}
+                    placeholder="9"
+                    placeholderTextColor={colors.textSubtle}
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                  <Text style={styles.unitSuffix}>in</Text>
+                </View>
+              </View>
+            )}
+
+            {heightCmInput ? (
+              <Text style={styles.conversionHelper}>
+                ≈ {heightCmInput} cm ({heightFtInput || '0'}'{heightInInput || '0'}")
+              </Text>
+            ) : null}
+
+            {heightError ? <Text style={styles.errorText}>{heightError}</Text> : null}
+
+            <View style={styles.visibilityRow}>
+              <Text style={styles.visibilityLabel}>Card Visibility:</Text>
+              <View style={styles.visibilityPills}>
+                {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
+                  <TouchableOpacity
+                    key={vis}
+                    style={[styles.visPill, heightVisibility === vis && styles.visPillActive]}
+                    onPress={() => setHeightVisibility(vis)}
+                  >
+                    <Text style={[styles.visPillText, heightVisibility === vis && styles.visPillTextActive]}>
+                      {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </View>
+
+          {/* Weight Input */}
+          <View style={styles.inputGroup}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.inputLabel}>Weight (30–300 kg)</Text>
+              <View style={styles.unitToggleGroup}>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, weightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  onPress={() => {
+                    setWeightUnit('metric');
+                    if (!weightKgInput && weightLbInput) {
+                      const lb = parseInt(weightLbInput, 10) || 0;
+                      setWeightKgInput(String(Math.round(lb * 0.45359237)));
+                    }
+                  }}
+                >
+                  <Text style={[styles.unitToggleText, weightUnit === 'metric' && styles.unitToggleTextActive]}>kg</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, weightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  onPress={() => {
+                    setWeightUnit('imperial');
+                    if (!weightLbInput && weightKgInput) {
+                      const kg = parseInt(weightKgInput, 10) || 0;
+                      setWeightLbInput(String(Math.round(kg * 2.20462)));
+                    }
+                  }}
+                >
+                  <Text style={[styles.unitToggleText, weightUnit === 'imperial' && styles.unitToggleTextActive]}>lb</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+
+            {weightUnit === 'metric' ? (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput, weightError ? styles.inputError : null]}
+                  value={weightKgInput}
+                  onChangeText={(val) => {
+                    setWeightKgInput(val);
+                    setWeightError(null);
+                    const kg = parseInt(val, 10);
+                    if (!isNaN(kg) && kg > 0) {
+                      setWeightLbInput(String(Math.round(kg * 2.20462)));
+                    }
+                  }}
+                  placeholder="70"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>kg</Text>
+              </View>
+            ) : (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput, weightError ? styles.inputError : null]}
+                  value={weightLbInput}
+                  onChangeText={(val) => {
+                    setWeightLbInput(val);
+                    setWeightError(null);
+                    const lb = parseInt(val, 10);
+                    if (!isNaN(lb) && lb > 0) {
+                      setWeightKgInput(String(Math.round(lb * 0.45359237)));
+                    }
+                  }}
+                  placeholder="154"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>lb</Text>
+              </View>
+            )}
+
+            {weightKgInput ? (
+              <Text style={styles.conversionHelper}>
+                ≈ {weightKgInput} kg (~{weightLbInput || '0'} lb)
+              </Text>
+            ) : null}
+
+            {weightError ? <Text style={styles.errorText}>{weightError}</Text> : null}
+
+            <View style={styles.visibilityRow}>
+              <Text style={styles.visibilityLabel}>Card Visibility:</Text>
+              <View style={styles.visibilityPills}>
+                {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
+                  <TouchableOpacity
+                    key={vis}
+                    style={[styles.visPill, weightVisibility === vis && styles.visPillActive]}
+                    onPress={() => setWeightVisibility(vis)}
+                  >
+                    <Text style={[styles.visPillText, weightVisibility === vis && styles.visPillTextActive]}>
+                      {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
           </View>
         </View>
 
@@ -679,6 +1029,61 @@ export default function ProfileScreen() {
               trackColor={{ false: colors.border, true: colors.gold }}
               thumbColor={colors.text}
             />
+          </View>
+        </View>
+
+        {/* App Appearance & Themes Section */}
+        <View style={styles.sectionCard}>
+          <View style={styles.sectionTitleRow}>
+            <Text style={styles.sectionTitle}>App Appearance & Theme</Text>
+            <Text style={styles.sectionSubtitle}>5 Custom Palettes</Text>
+          </View>
+          <Text style={styles.themeSectionDesc}>
+            Choose your signature Aura aesthetic. Themes switch reactively and persist across restarts.
+          </Text>
+
+          <View style={styles.themesList}>
+            {themes.map((t) => {
+              const isActive = themeId === t.id;
+              return (
+                <TouchableOpacity
+                  key={t.id}
+                  style={[
+                    styles.themeCard,
+                    { borderColor: isActive ? t.primaryColor : colors.border },
+                    isActive && styles.themeCardActive,
+                  ]}
+                  onPress={() => setTheme(t.id)}
+                  activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Select theme ${t.name}`}
+                  testID={`theme-option-${t.id}`}
+                >
+                  {/* Swatch & Emoji */}
+                  <View style={[styles.themeSwatchContainer, { backgroundColor: t.backgroundColor }]}>
+                    <View style={[styles.themeSwatchAccent, { backgroundColor: t.primaryColor }]}>
+                      <Text style={styles.themeSwatchEmoji}>{t.badgeEmoji}</Text>
+                    </View>
+                    <View style={[styles.themeSwatchSecondary, { backgroundColor: t.secondaryColor }]} />
+                  </View>
+
+                  {/* Theme Info */}
+                  <View style={styles.themeDetails}>
+                    <View style={styles.themeNameRow}>
+                      <Text style={[styles.themeName, isActive && { color: t.primaryColor }]}>
+                        {t.name}
+                      </Text>
+                      {isActive && (
+                        <View style={[styles.activePill, { backgroundColor: t.primaryColor }]}>
+                          <Text style={styles.activePillText}>Active ✓</Text>
+                        </View>
+                      )}
+                    </View>
+                    <Text style={styles.themeTagline}>{t.tagline}</Text>
+                  </View>
+                </TouchableOpacity>
+              );
+            })}
           </View>
         </View>
 
@@ -1001,6 +1406,11 @@ const styles = StyleSheet.create({
     ...typography.h3,
     color: colors.text,
     fontSize: 16,
+  },
+  sectionSubtitle: {
+    ...typography.caption,
+    color: colors.gold,
+    fontWeight: '600',
   },
   photoCountText: {
     ...typography.caption,
@@ -1336,6 +1746,251 @@ const styles = StyleSheet.create({
     ...typography.caption,
     color: colors.gold,
     fontWeight: '600',
+  },
+  completedBadge: {
+    backgroundColor: 'rgba(52, 199, 89, 0.15)',
+    borderWidth: 1,
+    borderColor: '#34C759',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+  },
+  completedBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#34C759',
+  },
+  incompleteBadge: {
+    backgroundColor: 'rgba(255, 149, 0, 0.15)',
+    borderWidth: 1,
+    borderColor: '#FF9500',
+    borderRadius: borderRadius.full,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+  },
+  incompleteBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FF9500',
+  },
+  incompleteNoticeBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 149, 0, 0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 149, 0, 0.35)',
+    borderRadius: borderRadius.md,
+    marginHorizontal: spacing.md,
+    marginBottom: spacing.md,
+    padding: spacing.md,
+    gap: spacing.sm,
+  },
+  incompleteNoticeIcon: {
+    fontSize: 22,
+  },
+  incompleteNoticeTitle: {
+    ...typography.body,
+    fontWeight: '700',
+    color: '#FF9500',
+    marginBottom: 2,
+  },
+  incompleteNoticeText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    lineHeight: 16,
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  unitToggleGroup: {
+    flexDirection: 'row',
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 2,
+  },
+  unitToggleBtn: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: borderRadius.xs,
+  },
+  unitToggleBtnActive: {
+    backgroundColor: colors.gold,
+  },
+  unitToggleText: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  unitToggleTextActive: {
+    color: colors.textInverse,
+    fontWeight: '700',
+  },
+  numericInputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  numericInput: {
+    flex: 1,
+    paddingRight: 40,
+  },
+  unitSuffix: {
+    position: 'absolute',
+    right: spacing.md,
+    ...typography.caption,
+    color: colors.textSubtle,
+    fontWeight: '600',
+  },
+  dualInputRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  inputError: {
+    borderColor: colors.ruby,
+  },
+  conversionHelper: {
+    ...typography.caption,
+    color: colors.gold,
+    fontSize: 11,
+    marginTop: 4,
+    fontStyle: 'italic',
+  },
+  errorText: {
+    ...typography.caption,
+    color: colors.ruby,
+    fontSize: 11,
+    marginTop: 4,
+  },
+  visibilityRow: {
+    marginTop: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.sm,
+    padding: spacing.xs,
+    paddingHorizontal: spacing.sm,
+  },
+  visibilityLabel: {
+    ...typography.caption,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  visibilityPills: {
+    flexDirection: 'row',
+    gap: 4,
+  },
+  visPill: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: borderRadius.xs,
+    borderWidth: 1,
+    borderColor: colors.border,
+    backgroundColor: colors.card,
+  },
+  visPillActive: {
+    borderColor: colors.gold,
+    backgroundColor: colors.goldMuted,
+  },
+  visPillText: {
+    ...typography.caption,
+    fontSize: 10,
+    color: colors.textMuted,
+  },
+  visPillTextActive: {
+    color: colors.gold,
+    fontWeight: '700',
+  },
+  themeSectionDesc: {
+    ...typography.bodySmall,
+    color: colors.textMuted,
+    marginBottom: spacing.md,
+  },
+  themesList: {
+    gap: spacing.sm,
+  },
+  themeCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+  },
+  themeCardActive: {
+    backgroundColor: colors.cardElevated,
+  },
+  themeSwatchContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    justifyContent: 'center',
+    alignItems: 'center',
+    position: 'relative',
+    marginRight: spacing.md,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+    overflow: 'hidden',
+  },
+  themeSwatchAccent: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  themeSwatchEmoji: {
+    fontSize: 14,
+  },
+  themeSwatchSecondary: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    borderWidth: 1.5,
+    borderColor: '#000',
+  },
+  themeDetails: {
+    flex: 1,
+  },
+  themeNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 2,
+  },
+  themeName: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.text,
+  },
+  themeTagline: {
+    ...typography.caption,
+    color: colors.textSubtle,
+    fontSize: 12,
+  },
+  activePill: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.full,
+  },
+  activePillText: {
+    ...typography.caption,
+    color: '#000',
+    fontWeight: '700',
+    fontSize: 10,
+    letterSpacing: 0.5,
   },
 });
 

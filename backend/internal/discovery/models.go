@@ -51,10 +51,18 @@ type DiscoveryCandidate struct {
 	RelationshipStructure string      `json:"relationship_structure,omitempty"`
 	SmokingHabit          string      `json:"smoking_habit,omitempty"`
 	DrinkingHabit         string      `json:"drinking_habit,omitempty"`
+	HeightCm              *int        `json:"height_cm,omitempty"`
+	WeightKg              *int        `json:"weight_kg,omitempty"`
+	Languages             []string    `json:"languages,omitempty"`
+	Interests             []string    `json:"interests,omitempty"`
 	ApproximateDistanceKm int         `json:"approximate_distance_km"` // Privacy-preserving integer km, never exact GPS
 	IsPhotoVerified       bool        `json:"is_photo_verified"`
 	CompatibilityScore    float64     `json:"compatibility_score"`
 	Photos                []PhotoCard `json:"photos"`
+	IsSponsored           bool        `json:"is_sponsored,omitempty"`
+	SponsoredTitle        string      `json:"sponsored_title,omitempty"`
+	SponsoredCTA          string      `json:"sponsored_cta,omitempty"`
+	SponsoredURL          string      `json:"sponsored_url,omitempty"`
 }
 
 type SwipeRequest struct {
@@ -135,3 +143,53 @@ type SwipeAllowanceDetail struct {
 	WindowResetAt         time.Time `json:"window_reset_at"`
 }
 
+type IncomingLikeCard struct {
+	UserID                string      `json:"user_id"`
+	DisplayName           string      `json:"display_name"`
+	Age                   int         `json:"age"`
+	Bio                   string      `json:"bio"`
+	ApproximateDistanceKm int         `json:"approximate_distance_km"`
+	IsPhotoVerified       bool        `json:"is_photo_verified"`
+	IsRevealed            bool        `json:"is_revealed"`
+	LikedAt               time.Time   `json:"liked_at"`
+	Photos                []PhotoCard `json:"photos"`
+	BlurredPhotoURL       string      `json:"blurred_photo_url,omitempty"`
+}
+
+type LikesYouResponse struct {
+	TotalLikes                int                `json:"total_likes"`
+	RevealedCount             int                `json:"revealed_count"`
+	UnrevealedCount           int                `json:"unrevealed_count"`
+	FreeRevealsRemaining      int                `json:"free_reveals_remaining"`
+	BonusRevealsRemaining     int                `json:"bonus_reveals_remaining"`
+	CooldownActive            bool               `json:"cooldown_active"`
+	CooldownRemainingSeconds  int                `json:"cooldown_remaining_seconds"`
+	RewardedAdEnabled         bool               `json:"rewarded_ad_enabled"`
+	Likes                     []IncomingLikeCard `json:"likes"`
+}
+
+type RevealLikeRequest struct {
+	TargetUserID string `json:"target_user_id"`
+}
+
+type RevealLikeResponse struct {
+	Status string           `json:"status"`
+	Card   IncomingLikeCard `json:"card"`
+	Source string           `json:"source"`
+}
+
+type MessageRequest struct {
+	ID              string              `json:"id"`
+	SenderUserID    string              `json:"sender_user_id"`
+	SenderProfile   *DiscoveryCandidate `json:"sender_profile,omitempty"`
+	RecipientUserID string              `json:"recipient_user_id"`
+	Body            string              `json:"body"`
+	Status          string              `json:"status"` // PENDING, ACCEPTED, DECLINED, BLOCKED
+	CreatedAt       time.Time           `json:"created_at"`
+	RespondedAt     *time.Time          `json:"responded_at,omitempty"`
+}
+
+type SendMessageRequestPayload struct {
+	RecipientUserID string `json:"recipient_user_id"`
+	Body            string `json:"body"`
+}

@@ -229,3 +229,81 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
 	}
 }
+
+// ListMessageRequests handles GET /api/v1/message-requests.
+func (h *Handler) ListMessageRequests(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	reqs, err := h.svc.ListMessageRequests(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"count":    len(reqs),
+		"requests": reqs,
+	})
+}
+
+// HandleMessageRequest handles POST /api/v1/message-requests/{id}/{action} (accept, decline, block).
+func (h *Handler) HandleMessageRequest(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	pathRem := strings.TrimPrefix(r.URL.Path, "/api/v1/message-requests/")
+	parts := strings.Split(strings.Trim(pathRem, "/"), "/")
+	if len(parts) < 2 {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Request ID and action required in path"))
+		return
+	}
+
+	requestID := parts[0]
+	action := strings.ToLower(parts[1])
+
+	switch action {
+	case "accept":
+		resp, err := h.svc.AcceptMessageRequest(r.Context(), requestID, authUser.ID)
+		if err != nil {
+			h.handleError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, resp)
+
+	case "decline":
+		if err := h.svc.DeclineMessageRequest(r.Context(), requestID, authUser.ID); err != nil {
+			h.handleError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, map[string]any{"success": true})
+
+	case "block":
+		if err := h.svc.BlockMessageRequest(r.Context(), requestID, authUser.ID); err != nil {
+			h.handleError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, map[string]any{"success": true})
+
+	default:
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Invalid action: must be accept, decline, or block"))
+	}
+}

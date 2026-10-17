@@ -16,6 +16,7 @@ import (
 	"github.com/auradating/platform/backend/internal/chat"
 	"github.com/auradating/platform/backend/internal/cms"
 	"github.com/auradating/platform/backend/internal/config"
+	"github.com/auradating/platform/backend/internal/configmgr"
 	"github.com/auradating/platform/backend/internal/database"
 	"github.com/auradating/platform/backend/internal/discovery"
 	"github.com/auradating/platform/backend/internal/health"
@@ -24,6 +25,7 @@ import (
 	"github.com/auradating/platform/backend/internal/middleware"
 	"github.com/auradating/platform/backend/internal/notification"
 	"github.com/auradating/platform/backend/internal/safety"
+	"github.com/auradating/platform/backend/internal/support"
 	"github.com/auradating/platform/backend/migrations"
 )
 
@@ -46,6 +48,8 @@ type Server struct {
 	notifSvc     *notification.Service
 	cmsSvc       *cms.Service
 	analyticsSvc *analytics.Service
+	configSvc    *configmgr.Service
+	supportSvc   *support.Service
 }
 
 // New constructs a configured HTTP Server with observability middleware, health probes,
@@ -181,6 +185,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	// Public Auth Endpoints
 	mux.HandleFunc("/api/v1/auth/register", identHandler.Register)
 	mux.HandleFunc("/api/v1/auth/login", identHandler.Login)
+	mux.HandleFunc("/api/v1/auth/google", identHandler.GoogleAuth)
 	mux.HandleFunc("/api/v1/auth/refresh", identHandler.RefreshToken)
 	mux.HandleFunc("/api/v1/auth/logout", identHandler.Logout)
 	mux.HandleFunc("/api/v1/auth/password-reset/request", identHandler.RequestPasswordReset)
@@ -311,6 +316,10 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/discovery/feed", communityMw(http.HandlerFunc(discoHandler.Feed)))
 	mux.Handle("/api/v1/discovery/search", communityMw(http.HandlerFunc(discoHandler.Search)))
 	mux.Handle("/api/v1/discovery/matching-summary", communityMw(http.HandlerFunc(discoHandler.MatchingSummary)))
+	mux.Handle("/api/v1/discovery/likes-you", communityMw(http.HandlerFunc(discoHandler.LikesYou)))
+	mux.Handle("/api/v1/discovery/likes-you/reveal", communityMw(http.HandlerFunc(discoHandler.RevealLike)))
+	mux.Handle("/api/v1/discovery/message-requests", communityMw(http.HandlerFunc(discoHandler.MessageRequests)))
+	mux.Handle("/api/v1/discovery/message-requests/", communityMw(http.HandlerFunc(discoHandler.RespondMessageRequest)))
 	mux.Handle("/api/v1/swipes", communityMw(http.HandlerFunc(discoHandler.Swipe)))
 	mux.Handle("/api/v1/swipes/rewind", communityMw(http.HandlerFunc(discoHandler.Rewind)))
 	mux.Handle("/api/v1/swipes/allowance", communityMw(http.HandlerFunc(discoHandler.Allowance)))
@@ -390,6 +399,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	// Authenticated Conversation & Message Endpoints
 	mux.Handle("/api/v1/conversations", communityMw(http.HandlerFunc(chatHandler.ListConversations)))
 	mux.Handle("/api/v1/conversations/", communityMw(http.HandlerFunc(chatHandler.ConversationMessages)))
+	mux.Handle("/api/v1/message-requests", communityMw(http.HandlerFunc(chatHandler.ListMessageRequests)))
+	mux.Handle("/api/v1/message-requests/", communityMw(http.HandlerFunc(chatHandler.HandleMessageRequest)))
 
 	// Billing, Subscriptions, Consumables & Boost Entitlements
 	var billingRepo billing.Repository
@@ -524,6 +535,42 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/admin/support/unlock", authMw(safety.RequirePermission(safety.PermSupportAction, false)(http.HandlerFunc(identHandler.AdminSupportUnlock))))
 	mux.Handle("/api/v1/admin/support/reset-password", authMw(safety.RequirePermission(safety.PermSupportAction, false)(http.HandlerFunc(identHandler.AdminSupportResetPassword))))
 
+	// Dynamic Platform Configuration (Super Admin RBAC)
+	var configRepo configmgr.Repository
+	if usePostgres {
+		configRepo = configmgr.NewPostgresRepository(pg.Pool)
+	} else {
+		configRepo = configmgr.NewMemoryRepository()
+	}
+	configSvc := configmgr.NewService(configRepo)
+	configHandler := configmgr.NewHandler(configSvc)
+
+	mux.Handle("/api/v1/admin/config", authMw(safety.RequirePermission(safety.PermSuperAdmin, false)(http.HandlerFunc(configHandler.HandleAdminConfig))))
+	mux.Handle("/api/v1/admin/config/", authMw(safety.RequirePermission(safety.PermSuperAdmin, false)(http.HandlerFunc(configHandler.HandleAdminConfig))))
+
+	// Customer Support Operations
+	var supportRepo support.Repository
+	if usePostgres {
+		supportRepo = support.NewPostgresRepository(pg.Pool)
+	} else {
+		supportRepo = support.NewMemoryRepository()
+	}
+	supportSvc := support.NewService(supportRepo)
+	supportHandler := support.NewHandler(supportSvc)
+
+	// Public Support Endpoint
+	mux.HandleFunc("/api/v1/support/tickets/public", supportHandler.PublicSubmitTicket)
+
+	// Member Support Endpoints
+	mux.Handle("/api/v1/support/tickets", memberMw(http.HandlerFunc(supportHandler.MemberTickets)))
+	mux.Handle("/api/v1/support/tickets/", memberMw(http.HandlerFunc(supportHandler.MemberTicketDetail)))
+
+	// Admin Support Operations Endpoints (RBAC protected)
+	mux.Handle("/api/v1/admin/support/teams", authMw(safety.RequirePermission(safety.PermSupportRead, false)(http.HandlerFunc(supportHandler.AdminTeams))))
+	mux.Handle("/api/v1/admin/support/teams/", authMw(safety.RequirePermission(safety.PermSupportAction, false)(http.HandlerFunc(supportHandler.AdminTeams))))
+	mux.Handle("/api/v1/admin/support/tickets", authMw(safety.RequirePermission(safety.PermSupportRead, false)(http.HandlerFunc(supportHandler.AdminTickets))))
+	mux.Handle("/api/v1/admin/support/tickets/", authMw(safety.RequirePermission(safety.PermSupportAction, false)(http.HandlerFunc(supportHandler.AdminTicketOperations))))
+
 	// Fallback handler to enforce standardized JSON 404 envelopes
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		reqID := middleware.GetRequestID(r.Context())
@@ -569,7 +616,19 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		notifSvc:     notifSvc,
 		cmsSvc:       cmsSvc,
 		analyticsSvc: analyticsSvc,
+		configSvc:    configSvc,
+		supportSvc:   supportSvc,
 	}
+}
+
+// ConfigService returns the platform configuration service.
+func (s *Server) ConfigService() *configmgr.Service {
+	return s.configSvc
+}
+
+// SupportService returns the customer support service.
+func (s *Server) SupportService() *support.Service {
+	return s.supportSvc
 }
 
 // HTTPServer returns the underlying *http.Server for lifecycle management.

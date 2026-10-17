@@ -11,6 +11,7 @@ import {
   Modal,
   ScrollView,
   useWindowDimensions,
+  Keyboard,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius } from '../theme';
 import { DiscoveryCandidate } from '../types';
@@ -25,6 +26,8 @@ interface DiscoveryCardProps {
   onSuperSpark: () => void;
   onRewind?: () => void;
   canRewind?: boolean;
+  isKeyboardOpen?: boolean;
+  maxCardHeight?: number;
 }
 
 export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
@@ -34,17 +37,26 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   onSuperSpark,
   onRewind,
   canRewind = false,
+  isKeyboardOpen = false,
+  maxCardHeight = 0,
 }) => {
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const cardWidth = Math.min(windowWidth - spacing.md * 2, 420);
-  // Responsively scale photo height so the total card (photo + ~74px actionsBar) starts completely
-  // below the header & compact banner and fits above the bottom tab bar without overlapping.
-  const maxAvailablePhotoHeight = Math.max(windowHeight - 310, 280);
+
+  // Responsively scale photo height:
+  // When keyboard is closed: scale to fit between top header/banners and bottom tab bar (~400-450px)
+  // When keyboard is open: scale down (~120-190px) to strictly budget within the measured card region
+  const normalMaxPhotoHeight = Math.max(windowHeight - 330, 260);
+  const actionsBarBudget = isKeyboardOpen ? 46 : 74;
+  const keyboardBudgetedHeight = maxCardHeight > 0
+    ? Math.max(maxCardHeight - actionsBarBudget - 12, 100)
+    : Math.max(windowHeight - 560, 140);
+
   const photoHeight = Math.min(
-    cardWidth * 1.34,
-    maxAvailablePhotoHeight,
-    windowHeight * 0.54,
-    460
+    cardWidth * (isKeyboardOpen ? 0.65 : 1.34),
+    isKeyboardOpen ? keyboardBudgetedHeight : normalMaxPhotoHeight,
+    isKeyboardOpen ? keyboardBudgetedHeight : windowHeight * 0.52,
+    isKeyboardOpen ? 200 : 450
   );
 
   const [photoIndex, setPhotoIndex] = useState(0);
@@ -71,7 +83,15 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       onMoveShouldSetPanResponder: (_, gestureState) => {
         return Math.abs(gestureState.dx) > 15 || Math.abs(gestureState.dy) > 15;
       },
-      onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false }),
+      onPanResponderGrant: () => {
+        Keyboard.dismiss();
+      },
+      onPanResponderMove: (evt, gestureState) => {
+        if (Math.abs(gestureState.dx) > 10 || Math.abs(gestureState.dy) > 10) {
+          Keyboard.dismiss();
+        }
+        Animated.event([null, { dx: pan.x, dy: pan.y }], { useNativeDriver: false })(evt, gestureState);
+      },
       onPanResponderRelease: (_, gestureState) => {
         if (gestureState.dx > 110) {
           Animated.timing(pan, {
@@ -118,6 +138,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   };
 
   const handleLikeBtn = () => {
+    Keyboard.dismiss();
     Animated.timing(pan, {
       toValue: { x: windowWidth + 150, y: 0 },
       duration: 250,
@@ -126,6 +147,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   };
 
   const handlePassBtn = () => {
+    Keyboard.dismiss();
     Animated.timing(pan, {
       toValue: { x: -windowWidth - 150, y: 0 },
       duration: 250,
@@ -134,6 +156,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   };
 
   const handleNextPhoto = () => {
+    Keyboard.dismiss();
     if (photoIndex < photos.length - 1) {
       setPhotoIndex(photoIndex + 1);
       setImageError(false);
@@ -141,6 +164,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   };
 
   const handlePrevPhoto = () => {
+    Keyboard.dismiss();
     if (photoIndex > 0) {
       setPhotoIndex(photoIndex - 1);
       setImageError(false);
@@ -148,8 +172,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   };
 
   return (
-    <View style={styles.cardContainer}>
-      <Animated.View style={[styles.card, { width: cardWidth }, animatedCardStyle]} {...panResponder.panHandlers}>
+    <View style={[styles.cardContainer, isKeyboardOpen && styles.cardContainerKeyboard]}>
+      <Animated.View style={[styles.card, { width: cardWidth }, isKeyboardOpen && styles.cardCompact, animatedCardStyle]} {...panResponder.panHandlers}>
         {/* Swipe Stamp: LIKE (Red stamp matching new red Like action) */}
         <Animated.View style={[styles.stampContainer, styles.likeStamp, { opacity: likeOpacity }]} pointerEvents="none">
           <Text style={styles.likeStampText}>LIKE</Text>
@@ -207,19 +231,22 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           <TouchableOpacity style={styles.rightTapZone} onPress={handleNextPhoto} activeOpacity={1} />
 
           {/* Bottom Card Info Overlay */}
-          <View style={styles.infoOverlay}>
+          <View style={[styles.infoOverlay, isKeyboardOpen && styles.infoOverlayCompact]}>
             <View style={styles.nameHeaderRow}>
               <View style={styles.nameAndAge}>
-                <Text style={styles.name} numberOfLines={1}>
+                <Text style={[styles.name, isKeyboardOpen && styles.nameCompact]} numberOfLines={1}>
                   {candidate.display_name}
                 </Text>
-                <Text style={styles.age}> {candidate.age}</Text>
+                <Text style={[styles.age, isKeyboardOpen && styles.ageCompact]}> {candidate.age}</Text>
               </View>
 
               {/* Info Button to Open Details Modal */}
               <TouchableOpacity
                 style={styles.infoBtn}
-                onPress={() => setShowDetailsModal(true)}
+                onPress={() => {
+                  Keyboard.dismiss();
+                  setShowDetailsModal(true);
+                }}
                 activeOpacity={0.8}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
               >
@@ -232,6 +259,16 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               {candidate.compatibility_score > 0 && (
                 <View style={styles.scoreTag}>
                   <Text style={styles.scoreTagText}>★ {candidate.compatibility_score}% Compatibility</Text>
+                </View>
+              )}
+              {Boolean(candidate.height_cm) && (
+                <View style={styles.tag}>
+                  <Text style={styles.tagText}>📏 {candidate.height_cm} cm</Text>
+                </View>
+              )}
+              {Boolean(candidate.weight_kg) && (
+                <View style={styles.tag}>
+                  <Text style={styles.tagText}>⚖️ {candidate.weight_kg} kg</Text>
                 </View>
               )}
               {candidate.pronouns && candidate.pronouns.length > 0 && (
@@ -260,7 +297,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
             {/* Bio Snippet */}
             {candidate.bio ? (
-              <Text style={styles.bio} numberOfLines={2}>
+              <Text style={styles.bio} numberOfLines={isKeyboardOpen ? 1 : 2}>
                 {candidate.bio}
               </Text>
             ) : null}
@@ -268,42 +305,48 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         </View>
 
         {/* Premium Rounded Action Buttons */}
-        <View style={styles.actionsBar}>
+        <View style={[styles.actionsBar, isKeyboardOpen && styles.actionsBarCompact]}>
           {canRewind && onRewind && (
             <TouchableOpacity
-              style={[styles.actionBtn, styles.rewindBtn]}
-              onPress={onRewind}
+              style={[styles.actionBtn, styles.rewindBtn, isKeyboardOpen && styles.rewindBtnCompact]}
+              onPress={() => {
+                Keyboard.dismiss();
+                onRewind();
+              }}
               activeOpacity={0.8}
             >
-              <Text style={styles.rewindIcon}>↺</Text>
+              <Text style={[styles.rewindIcon, isKeyboardOpen && styles.rewindIconCompact]}>↺</Text>
             </TouchableOpacity>
           )}
 
           {/* Pass Button: Charcoal round button with clear cross */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.passBtn]}
+            style={[styles.actionBtn, styles.passBtn, isKeyboardOpen && styles.passBtnCompact]}
             onPress={handlePassBtn}
             activeOpacity={0.8}
           >
-            <Text style={styles.passIcon}>✕</Text>
+            <Text style={[styles.passIcon, isKeyboardOpen && styles.passIconCompact]}>✕</Text>
           </TouchableOpacity>
 
           {/* Super Spark Button: Charcoal with gold star */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.superSparkBtn]}
-            onPress={onSuperSpark}
+            style={[styles.actionBtn, styles.superSparkBtn, isKeyboardOpen && styles.superSparkBtnCompact]}
+            onPress={() => {
+              Keyboard.dismiss();
+              onSuperSpark();
+            }}
             activeOpacity={0.8}
           >
-            <Text style={styles.superSparkIcon}>★</Text>
+            <Text style={[styles.superSparkIcon, isKeyboardOpen && styles.superSparkIconCompact]}>★</Text>
           </TouchableOpacity>
 
           {/* Like Button: Red Like Button with heart */}
           <TouchableOpacity
-            style={[styles.actionBtn, styles.likeBtn]}
+            style={[styles.actionBtn, styles.likeBtn, isKeyboardOpen && styles.likeBtnCompact]}
             onPress={handleLikeBtn}
             activeOpacity={0.8}
           >
-            <Text style={styles.likeIcon}>♥</Text>
+            <Text style={[styles.likeIcon, isKeyboardOpen && styles.likeIconCompact]}>♥</Text>
           </TouchableOpacity>
         </View>
       </Animated.View>
@@ -411,6 +454,25 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
                   ) : null}
                 </View>
               </View>
+
+              {/* Physical Attributes if visible */}
+              {(Boolean(candidate.height_cm) || Boolean(candidate.weight_kg)) && (
+                <View style={styles.modalSection}>
+                  <Text style={styles.modalSectionTitle}>Physical</Text>
+                  <View style={styles.tagsRow}>
+                    {Boolean(candidate.height_cm) && (
+                      <View style={styles.modalPill}>
+                        <Text style={styles.modalPillText}>📏 {candidate.height_cm} cm</Text>
+                      </View>
+                    )}
+                    {Boolean(candidate.weight_kg) && (
+                      <View style={styles.modalPill}>
+                        <Text style={styles.modalPillText}>⚖️ {candidate.weight_kg} kg</Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+              )}
 
               {/* Additional Photos Grid if present */}
               {photos.length > 1 && (
@@ -730,14 +792,72 @@ const styles = StyleSheet.create({
     width: 54,
     height: 54,
     borderRadius: 27,
-    backgroundColor: '#E53935', // Red Like Button per user specifications
-    borderWidth: 1,
-    borderColor: '#FF5252',
+    backgroundColor: '#1D202B',
+    borderWidth: 1.5,
+    borderColor: colors.gold,
+    shadowColor: colors.gold,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 4,
   },
   likeIcon: {
     fontSize: 24,
-    color: '#FFFFFF',
+    color: '#FF6584', // Warm coral/rose heart on charcoal with gold border
     fontWeight: '700',
+  },
+  infoOverlayCompact: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+  },
+  nameCompact: {
+    fontSize: 18,
+  },
+  ageCompact: {
+    fontSize: 16,
+  },
+  cardContainerKeyboard: {
+    paddingHorizontal: 4,
+    justifyContent: 'center',
+  },
+  cardCompact: {
+    borderRadius: 18,
+  },
+  actionsBarCompact: {
+    paddingVertical: 3,
+    gap: spacing.sm,
+  },
+  rewindBtnCompact: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+  },
+  rewindIconCompact: {
+    fontSize: 13,
+  },
+  passBtnCompact: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  passIconCompact: {
+    fontSize: 17,
+  },
+  superSparkBtnCompact: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  },
+  superSparkIconCompact: {
+    fontSize: 16,
+  },
+  likeBtnCompact: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  likeIconCompact: {
+    fontSize: 19,
   },
   stampContainer: {
     position: 'absolute',
@@ -750,13 +870,13 @@ const styles = StyleSheet.create({
   },
   likeStamp: {
     left: 24,
-    borderColor: '#E53935',
+    borderColor: '#FF6584',
     transform: [{ rotate: '-18deg' }],
   },
   likeStampText: {
     fontSize: 28,
     fontWeight: '900',
-    color: '#E53935',
+    color: '#FF6584',
     letterSpacing: 2,
   },
   passStamp: {

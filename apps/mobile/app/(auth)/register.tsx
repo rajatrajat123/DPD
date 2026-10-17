@@ -15,6 +15,7 @@ import { useRouter } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { ApiError } from '../../src/services/api/client';
+import { GoogleSignInButton } from '../../src/components/GoogleSignInButton';
 
 export interface TaxonomyOption {
   value: string;
@@ -117,6 +118,15 @@ export default function RegisterScreen() {
   const [referralCode, setReferralCode] = useState('');
   const [loading, setLoading] = useState(false);
 
+  // 4. Physical Attributes (Required for Discovery)
+  const [heightUnit, setHeightUnit] = useState<'metric' | 'imperial'>('metric');
+  const [weightUnit, setWeightUnit] = useState<'metric' | 'imperial'>('metric');
+  const [heightCmText, setHeightCmText] = useState('');
+  const [heightFtText, setHeightFtText] = useState('');
+  const [heightInText, setHeightInText] = useState('');
+  const [weightKgText, setWeightKgText] = useState('');
+  const [weightLbText, setWeightLbText] = useState('');
+
   const toggleGender = (g: string) => {
     setSelectedGenders((prev) =>
       prev.includes(g) ? prev.filter((item) => item !== g) : [...prev, g]
@@ -186,6 +196,48 @@ export default function RegisterScreen() {
       return;
     }
 
+    // 4. Validate Height & Weight (Required for Discovery completion)
+    let finalHeightCm: number | undefined;
+    if (heightUnit === 'metric') {
+      const parsed = parseInt(heightCmText.trim(), 10);
+      if (isNaN(parsed) || parsed < 90 || parsed > 250) {
+        Alert.alert('Height Required', 'Please enter a valid height between 90 cm and 250 cm.');
+        return;
+      }
+      finalHeightCm = parsed;
+    } else {
+      const ft = parseInt(heightFtText.trim(), 10);
+      const inch = parseInt(heightInText.trim() || '0', 10);
+      if (isNaN(ft) || ft < 3 || ft > 8 || isNaN(inch) || inch < 0 || inch >= 12) {
+        Alert.alert('Height Required', 'Please enter a valid height between 3 ft 0 in and 8 ft 2 in.');
+        return;
+      }
+      const totalInches = ft * 12 + inch;
+      const converted = Math.round(totalInches * 2.54);
+      if (converted < 90 || converted > 250) {
+        Alert.alert('Height Required', 'Height must be between 90 cm (3\'0") and 250 cm (8\'2").');
+        return;
+      }
+      finalHeightCm = converted;
+    }
+
+    let finalWeightKg: number | undefined;
+    if (weightUnit === 'metric') {
+      const parsed = parseInt(weightKgText.trim(), 10);
+      if (isNaN(parsed) || parsed < 30 || parsed > 300) {
+        Alert.alert('Weight Required', 'Please enter a valid weight between 30 kg and 300 kg.');
+        return;
+      }
+      finalWeightKg = parsed;
+    } else {
+      const lb = parseInt(weightLbText.trim(), 10);
+      if (isNaN(lb) || lb < 66 || lb > 660) {
+        Alert.alert('Weight Required', 'Please enter a valid weight between 66 lb and 660 lb.');
+        return;
+      }
+      finalWeightKg = Math.round(lb * 0.45359237);
+    }
+
     // Preflight 18+ check
     const birth = new Date(birthdate.trim());
     if (isNaN(birth.getTime())) {
@@ -214,6 +266,8 @@ export default function RegisterScreen() {
         preferred_genders: finalLookingFor,
         looking_for: finalLookingFor,
         sexual_orientations: finalOrientations,
+        height_cm: finalHeightCm,
+        weight_kg: finalWeightKg,
         referral_code: referralCode.trim() || undefined,
       });
 
@@ -407,6 +461,119 @@ export default function RegisterScreen() {
             )}
           </View>
 
+          {/* SECTION 4: Height & Weight (Required for Discovery) */}
+          <View style={styles.inputGroup}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeaderLabel}>4. Height (Required)</Text>
+              <View style={styles.unitToggleGroup}>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, heightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  onPress={() => setHeightUnit('metric')}
+                >
+                  <Text style={[styles.unitToggleText, heightUnit === 'metric' && styles.unitToggleTextActive]}>cm</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, heightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  onPress={() => setHeightUnit('imperial')}
+                >
+                  <Text style={[styles.unitToggleText, heightUnit === 'imperial' && styles.unitToggleTextActive]}>ft / in</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+            <Text style={styles.sectionSubLabel}>90–250 cm (3'0"–8'2")</Text>
+
+            {heightUnit === 'metric' ? (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput]}
+                  value={heightCmText}
+                  onChangeText={setHeightCmText}
+                  placeholder="175"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>cm</Text>
+              </View>
+            ) : (
+              <View style={styles.dualInputRow}>
+                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                  <TextInput
+                    style={[styles.input, styles.numericInput]}
+                    value={heightFtText}
+                    onChangeText={setHeightFtText}
+                    placeholder="5"
+                    placeholderTextColor={colors.textSubtle}
+                    keyboardType="numeric"
+                    maxLength={1}
+                  />
+                  <Text style={styles.unitSuffix}>ft</Text>
+                </View>
+                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                  <TextInput
+                    style={[styles.input, styles.numericInput]}
+                    value={heightInText}
+                    onChangeText={setHeightInText}
+                    placeholder="9"
+                    placeholderTextColor={colors.textSubtle}
+                    keyboardType="numeric"
+                    maxLength={2}
+                  />
+                  <Text style={styles.unitSuffix}>in</Text>
+                </View>
+              </View>
+            )}
+          </View>
+
+          <View style={styles.inputGroup}>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeaderLabel}>5. Weight (Required)</Text>
+              <View style={styles.unitToggleGroup}>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, weightUnit === 'metric' && styles.unitToggleBtnActive]}
+                  onPress={() => setWeightUnit('metric')}
+                >
+                  <Text style={[styles.unitToggleText, weightUnit === 'metric' && styles.unitToggleTextActive]}>kg</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.unitToggleBtn, weightUnit === 'imperial' && styles.unitToggleBtnActive]}
+                  onPress={() => setWeightUnit('imperial')}
+                >
+                  <Text style={[styles.unitToggleText, weightUnit === 'imperial' && styles.unitToggleTextActive]}>lb</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+            <Text style={styles.sectionSubLabel}>30–300 kg (66–660 lb)</Text>
+
+            {weightUnit === 'metric' ? (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput]}
+                  value={weightKgText}
+                  onChangeText={setWeightKgText}
+                  placeholder="70"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>kg</Text>
+              </View>
+            ) : (
+              <View style={styles.numericInputWrapper}>
+                <TextInput
+                  style={[styles.input, styles.numericInput]}
+                  value={weightLbText}
+                  onChangeText={setWeightLbText}
+                  placeholder="154"
+                  placeholderTextColor={colors.textSubtle}
+                  keyboardType="numeric"
+                  maxLength={3}
+                />
+                <Text style={styles.unitSuffix}>lb</Text>
+              </View>
+            )}
+          </View>
+
           <View style={styles.inputGroup}>
             <Text style={styles.inputLabel}>Referral Code (Optional)</Text>
             <TextInput
@@ -431,6 +598,19 @@ export default function RegisterScreen() {
               <Text style={styles.submitBtnText}>Submit Application</Text>
             )}
           </TouchableOpacity>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.dividerText}>OR</Text>
+            <View style={styles.dividerLine} />
+          </View>
+
+          <GoogleSignInButton
+            isRegister
+            onSuccess={() => {
+              router.replace('/(tabs)');
+            }}
+          />
 
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Already have an account?</Text>
@@ -547,11 +727,28 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: spacing.md,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.sm,
   },
   submitBtnText: {
     ...typography.button,
     color: colors.textInverse,
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: colors.border,
+  },
+  dividerText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginHorizontal: spacing.md,
+    fontWeight: '600',
+    letterSpacing: 1,
   },
   footerRow: {
     flexDirection: 'row',
@@ -566,5 +763,57 @@ const styles = StyleSheet.create({
     ...typography.bodySmall,
     color: colors.gold,
     fontWeight: '700',
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 2,
+  },
+  unitToggleGroup: {
+    flexDirection: 'row',
+    backgroundColor: colors.backgroundElevated,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: 2,
+  },
+  unitToggleBtn: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: borderRadius.xs,
+  },
+  unitToggleBtnActive: {
+    backgroundColor: colors.gold,
+  },
+  unitToggleText: {
+    ...typography.caption,
+    fontSize: 11,
+    color: colors.textMuted,
+    fontWeight: '600',
+  },
+  unitToggleTextActive: {
+    color: colors.textInverse,
+    fontWeight: '700',
+  },
+  numericInputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    position: 'relative',
+  },
+  numericInput: {
+    flex: 1,
+    paddingRight: 40,
+  },
+  unitSuffix: {
+    position: 'absolute',
+    right: spacing.md,
+    ...typography.caption,
+    color: colors.textSubtle,
+    fontWeight: '600',
+  },
+  dualInputRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
   },
 });

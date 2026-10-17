@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
-import { authService, LoginPayload, RegisterPayload } from '../services/auth/authService';
+import { authService, LoginPayload, RegisterPayload, GoogleAuthPayload } from '../services/auth/authService';
 import { secureStorage } from '../services/storage/secureStore';
 import { privacyManager } from '../services/security/privacyManager';
 import { chatWebSocket } from '../services/chat/chatService';
@@ -13,6 +13,7 @@ interface AuthContextValue {
   isAgeVerified: boolean;
   biometricLocked: boolean;
   login: (payload: LoginPayload) => Promise<void>;
+  loginWithGoogle: (payload: GoogleAuthPayload) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
   refreshProfile: () => Promise<void>;
@@ -114,6 +115,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const loginWithGoogle = async (payload: GoogleAuthPayload) => {
+    setIsLoading(true);
+    try {
+      const res = await authService.loginWithGoogle(payload);
+      setUser(res.user);
+      if (res.profile) setProfile(res.profile);
+      chatWebSocket.connect();
+      await refreshProfile();
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const register = async (payload: RegisterPayload) => {
     setIsLoading(true);
     try {
@@ -162,6 +176,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAgeVerified,
         biometricLocked,
         login,
+        loginWithGoogle,
         register,
         logout,
         refreshProfile,

@@ -7,10 +7,12 @@ import {
   TextInput,
   TouchableOpacity,
   KeyboardAvoidingView,
+  Keyboard,
   Platform,
   Alert,
   ActivityIndicator,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing, borderRadius } from '../theme';
 import { Message, Conversation } from '../types';
 import { chatService, chatWebSocket, ConnectionStatus } from '../services/chat/chatService';
@@ -34,6 +36,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   onUnmatched,
 }) => {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>(chatWebSocket.connectionStatus);
@@ -43,6 +46,16 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
   const flatListRef = useRef<FlatList>(null);
   const typingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Auto-scroll to latest messages when keyboard appears
+  useEffect(() => {
+    const sub = Keyboard.addListener('keyboardDidShow', () => {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    });
+    return () => {
+      sub.remove();
+    };
+  }, []);
 
   // Enable Android screenshot protection while viewing private chat
   useEffect(() => {
@@ -185,7 +198,9 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         }
         return [sentMsg, ...prev];
       });
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
     } catch {
+      setInputText(text); // Preserve draft when sending fails
       Alert.alert('Message Failed', 'Could not send message. Please check your connection.');
     } finally {
       setIsSending(false);
@@ -322,7 +337,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   return (
     <KeyboardAvoidingView
       style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
       keyboardVerticalOffset={Platform.OS === 'ios' ? 88 : 0}
     >
       {/* Header */}
@@ -379,7 +394,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       )}
 
       {/* Input bar */}
-      <View style={styles.inputBar}>
+      <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, spacing.sm) }]}>
         <TextInput
           style={styles.input}
           value={inputText}
@@ -390,12 +405,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           maxLength={1000}
         />
         <TouchableOpacity
-          style={[styles.sendButton, !inputText.trim() ? styles.sendButtonDisabled : null]}
+          style={[styles.sendButton, (!inputText.trim() || isSending) ? styles.sendButtonDisabled : null]}
           onPress={handleSend}
           disabled={!inputText.trim() || isSending}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="Send Message"
+          testID="chat-send-btn"
         >
-          <Text style={styles.sendButtonText}>↑</Text>
+          {isSending ? (
+            <ActivityIndicator color={colors.textInverse} size="small" />
+          ) : (
+            <Text style={styles.sendButtonText}>↑</Text>
+          )}
         </TouchableOpacity>
       </View>
     </KeyboardAvoidingView>
@@ -559,9 +581,11 @@ const styles = StyleSheet.create({
     ...typography.body,
   },
   sendButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    minWidth: 44,
+    minHeight: 44,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: colors.gold,
     justifyContent: 'center',
     alignItems: 'center',

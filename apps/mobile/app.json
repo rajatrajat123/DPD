@@ -17,6 +17,7 @@
     },
     "android": {
       "package": "com.aura.dating",
+      "softwareKeyboardLayoutMode": "resize",
       "permissions": [
         "android.permission.CAMERA",
         "android.permission.READ_EXTERNAL_STORAGE",

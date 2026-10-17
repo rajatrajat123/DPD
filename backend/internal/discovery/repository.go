@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/auradating/platform/backend/internal/identity"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -48,6 +49,22 @@ type Repository interface {
 	RewindLastSwipe(ctx context.Context, actorID string) (*RewindResponse, error)
 	SetUserCreatedAt(userID string, createdAt time.Time)
 	SearchProfiles(ctx context.Context, actorID string, query string, limit int) ([]DiscoveryCandidate, error)
+	GetIncomingLikes(ctx context.Context, userID string, limit, offset int) (likes []IncomingLikeCard, total int, err error)
+	GetRevealedLikes(ctx context.Context, userID string) (map[string]string, error)
+	RecordLikeReveal(ctx context.Context, userID, likedByUserID, source string) error
+	GetUserLikesUnlockState(ctx context.Context, userID string) (*UserLikesUnlockState, error)
+	SaveUserLikesUnlockState(ctx context.Context, state *UserLikesUnlockState) error
+	CreateMessageRequest(ctx context.Context, mr *MessageRequest) error
+	ListMessageRequests(ctx context.Context, userID, folder string) ([]MessageRequest, error)
+	UpdateMessageRequestStatus(ctx context.Context, requestID, recipientID, status string) error
+}
+
+type UserLikesUnlockState struct {
+	UserID                string
+	FreeRevealsUsed       int
+	AdRevealsToday        int
+	BonusRevealsRemaining int
+	LastAdRevealAt        *time.Time
 }
 
 type cachedSummaryEntry struct {
@@ -73,10 +90,13 @@ type MemoryRepository struct {
 	boosts         map[string]float64 // key: userID -> boost multiplier
 	outboxEvents   []outboxRecord
 	summaryCache   map[string]*cachedSummaryEntry
-	dailyLikeQuota int                  // default 15
-	rewardedLikes  map[string]int       // key: userID -> extra likes earned
-	usedAdRewards  map[string]time.Time // key: transactionID -> verifiedAt (replay protection)
-	userCreatedAt  map[string]time.Time // key: userID -> created_at
+	dailyLikeQuota   int                  // default 15
+	rewardedLikes    map[string]int       // key: userID -> extra likes earned
+	usedAdRewards    map[string]time.Time // key: transactionID -> verifiedAt (replay protection)
+	userCreatedAt    map[string]time.Time // key: userID -> created_at
+	revealedLikes    map[string]map[string]string
+	likesUnlockState map[string]*UserLikesUnlockState
+	messageRequests  map[string]*MessageRequest
 }
 
 type swipeRecord struct {
@@ -101,18 +121,21 @@ type outboxRecord struct {
 
 func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 	return &MemoryRepository{
-		identRepo:      identRepo,
-		swipes:         make(map[string]*swipeRecord),
-		matches:        make(map[string]*Match),
-		matchByPair:    make(map[string]string),
-		blocks:         make(map[string]struct{}),
-		entitlements:   make(map[string][]entitlementRecord),
-		boosts:         make(map[string]float64),
-		summaryCache:   make(map[string]*cachedSummaryEntry),
-		dailyLikeQuota: PostIntroQuota,
-		rewardedLikes:  make(map[string]int),
-		usedAdRewards:  make(map[string]time.Time),
-		userCreatedAt:  make(map[string]time.Time),
+		identRepo:        identRepo,
+		swipes:           make(map[string]*swipeRecord),
+		matches:          make(map[string]*Match),
+		matchByPair:      make(map[string]string),
+		blocks:           make(map[string]struct{}),
+		entitlements:     make(map[string][]entitlementRecord),
+		boosts:           make(map[string]float64),
+		summaryCache:     make(map[string]*cachedSummaryEntry),
+		dailyLikeQuota:   PostIntroQuota,
+		rewardedLikes:    make(map[string]int),
+		usedAdRewards:    make(map[string]time.Time),
+		userCreatedAt:    make(map[string]time.Time),
+		revealedLikes:    make(map[string]map[string]string),
+		likesUnlockState: make(map[string]*UserLikesUnlockState),
+		messageRequests:  make(map[string]*MessageRequest),
 	}
 }
 
@@ -457,6 +480,32 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 			}
 		}
 
+		// Height check
+		if actorPref.MinHeightCm != nil && targetProf.HeightCm != nil && *targetProf.HeightCm < *actorPref.MinHeightCm {
+			continue
+		}
+		if actorPref.MaxHeightCm != nil && targetProf.HeightCm != nil && *targetProf.HeightCm > *actorPref.MaxHeightCm {
+			continue
+		}
+
+		// Weight check
+		if actorPref.MinWeightKg != nil && targetProf.WeightKg != nil && *targetProf.WeightKg < *actorPref.MinWeightKg {
+			continue
+		}
+		if actorPref.MaxWeightKg != nil && targetProf.WeightKg != nil && *targetProf.WeightKg > *actorPref.MaxWeightKg {
+			continue
+		}
+
+		// Sexual orientation preferences
+		if len(actorPref.PreferredOrientations) > 0 && !hasOverlap(actorPref.PreferredOrientations, targetProf.SexualOrientations) {
+			continue
+		}
+
+		// Relationship intents preferences
+		if len(actorPref.PreferredIntents) > 0 && !hasOverlap(actorPref.PreferredIntents, targetProf.RelationshipIntents) {
+			continue
+		}
+
 		// Distance check
 		distanceKm := 10.0 // Default reasonable distance if coords missing
 		if actorLoc != nil {
@@ -494,6 +543,14 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 		if targetProf.VisibilitySettings.SexualOrientation == identity.VisibilityHidden {
 			orientations = nil
 		}
+		var candHeight *int
+		if targetProf.VisibilitySettings.Height != identity.VisibilityHidden {
+			candHeight = targetProf.HeightCm
+		}
+		var candWeight *int
+		if targetProf.VisibilitySettings.Weight != identity.VisibilityHidden {
+			candWeight = targetProf.WeightKg
+		}
 
 		candidates = append(candidates, DiscoveryCandidate{
 			UserID:                targetID,
@@ -507,6 +564,8 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 			RelationshipStructure: string(targetProf.RelationshipStructure),
 			SmokingHabit:          string(targetProf.SmokingHabit),
 			DrinkingHabit:         string(targetProf.DrinkingHabit),
+			HeightCm:              candHeight,
+			WeightKg:              candWeight,
 			ApproximateDistanceKm: displayDist,
 			IsPhotoVerified:       targetProf.IsPhotoVerified,
 			CompatibilityScore:    relevance,
@@ -1033,6 +1092,177 @@ func (m *MemoryRepository) SearchProfiles(ctx context.Context, actorID string, q
 	return results, nil
 }
 
+func (m *MemoryRepository) GetIncomingLikes(ctx context.Context, userID string, limit, offset int) ([]IncomingLikeCard, int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var incoming []IncomingLikeCard
+	for _, s := range m.swipes {
+		if s.TargetID == userID && (s.Direction == SwipeLike || s.Direction == SwipeSuperSpark) {
+			k1 := fmt.Sprintf("%s:%s", userID, s.ActorID)
+			k2 := fmt.Sprintf("%s:%s", s.ActorID, userID)
+			if _, b1 := m.blocks[k1]; b1 {
+				continue
+			}
+			if _, b2 := m.blocks[k2]; b2 {
+				continue
+			}
+
+			prof, err := m.identRepo.GetProfile(ctx, s.ActorID)
+			if err != nil || prof == nil {
+				continue
+			}
+
+			age := calculateAge(prof.Birthdate, time.Now().UTC())
+			isRevealed := false
+			if revs, ok := m.revealedLikes[userID]; ok {
+				if _, rOk := revs[s.ActorID]; rOk {
+					isRevealed = true
+				}
+			}
+
+			distKm := 1
+			actorLoc, _ := m.identRepo.GetLocation(ctx, s.ActorID)
+			targetLoc, _ := m.identRepo.GetLocation(ctx, userID)
+			if actorLoc != nil && targetLoc != nil && (actorLoc.Latitude != 0 || actorLoc.Longitude != 0) && (targetLoc.Latitude != 0 || targetLoc.Longitude != 0) {
+				calculated := int(math.Ceil(haversineDistance(actorLoc.Latitude, actorLoc.Longitude, targetLoc.Latitude, targetLoc.Longitude)))
+				if calculated > 0 {
+					distKm = calculated
+				}
+			}
+
+			card := IncomingLikeCard{
+				UserID:                s.ActorID,
+				DisplayName:           prof.DisplayName,
+				Age:                   age,
+				Bio:                   prof.Bio,
+				ApproximateDistanceKm: distKm,
+				IsPhotoVerified:       prof.IsPhotoVerified,
+				IsRevealed:            isRevealed,
+				LikedAt:               s.CreatedAt,
+				Photos:                []PhotoCard{},
+			}
+			incoming = append(incoming, card)
+		}
+	}
+
+	sort.Slice(incoming, func(i, j int) bool {
+		return incoming[i].LikedAt.After(incoming[j].LikedAt)
+	})
+
+	total := len(incoming)
+	if offset >= total {
+		return []IncomingLikeCard{}, total, nil
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return incoming[offset:end], total, nil
+}
+
+func (m *MemoryRepository) GetRevealedLikes(_ context.Context, userID string) (map[string]string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	out := make(map[string]string)
+	if revs, ok := m.revealedLikes[userID]; ok {
+		for k, v := range revs {
+			out[k] = v
+		}
+	}
+	return out, nil
+}
+
+func (m *MemoryRepository) RecordLikeReveal(_ context.Context, userID, likedByUserID, source string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, ok := m.revealedLikes[userID]; !ok {
+		m.revealedLikes[userID] = make(map[string]string)
+	}
+	m.revealedLikes[userID][likedByUserID] = source
+	return nil
+}
+
+func (m *MemoryRepository) GetUserLikesUnlockState(_ context.Context, userID string) (*UserLikesUnlockState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	st, ok := m.likesUnlockState[userID]
+	if !ok {
+		return &UserLikesUnlockState{
+			UserID:                userID,
+			FreeRevealsUsed:       0,
+			AdRevealsToday:        0,
+			BonusRevealsRemaining: 0,
+		}, nil
+	}
+	cloned := *st
+	return &cloned, nil
+}
+
+func (m *MemoryRepository) SaveUserLikesUnlockState(_ context.Context, state *UserLikesUnlockState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cloned := *state
+	m.likesUnlockState[state.UserID] = &cloned
+	return nil
+}
+
+func (m *MemoryRepository) CreateMessageRequest(_ context.Context, req *MessageRequest) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cloned := *req
+	m.messageRequests[req.ID] = &cloned
+	return nil
+}
+
+func (m *MemoryRepository) ListMessageRequests(ctx context.Context, userID string, folder string) ([]MessageRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var res []MessageRequest
+	for _, req := range m.messageRequests {
+		if folder == "sent" && req.SenderUserID == userID {
+			res = append(res, *req)
+		} else if folder != "sent" && req.RecipientUserID == userID {
+			cloned := *req
+			if prof, err := m.identRepo.GetProfile(ctx, req.SenderUserID); err == nil && prof != nil {
+				age := calculateAge(prof.Birthdate, time.Now().UTC())
+				cloned.SenderProfile = &DiscoveryCandidate{
+					UserID:          req.SenderUserID,
+					DisplayName:     prof.DisplayName,
+					Age:             age,
+					Bio:             prof.Bio,
+					IsPhotoVerified: prof.IsPhotoVerified,
+					Photos:          []PhotoCard{},
+				}
+			}
+			res = append(res, cloned)
+		}
+	}
+	sort.Slice(res, func(i, j int) bool {
+		return res[i].CreatedAt.After(res[j].CreatedAt)
+	})
+	return res, nil
+}
+
+func (m *MemoryRepository) UpdateMessageRequestStatus(_ context.Context, requestID, recipientID, status string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	req, ok := m.messageRequests[requestID]
+	if !ok || req.RecipientUserID != recipientID {
+		return errors.New("message request not found")
+	}
+	req.Status = status
+	now := time.Now().UTC()
+	req.RespondedAt = &now
+	return nil
+}
 
 // PostgresRepository implements production discovery and matching using PostGIS and SQL transactions.
 type PostgresRepository struct {
@@ -1300,6 +1530,12 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 				COALESCE(dp.max_age, 100) AS max_age,
 				COALESCE(dp.max_distance_km, 100) AS max_distance_km,
 				dp.preferred_genders,
+				dp.preferred_intents,
+				dp.preferred_orientations,
+				dp.min_height_cm AS pref_min_height_cm,
+				dp.max_height_cm AS pref_max_height_cm,
+				dp.min_weight_kg AS pref_min_weight_kg,
+				dp.max_weight_kg AS pref_max_weight_kg,
 				COALESCE(dp.verified_profiles_only, false) AS verified_profiles_only,
 				COALESCE((dp.dealbreakers->>'non_smoker_only')::boolean, false) AS non_smoker_only,
 				COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) AS require_verified,
@@ -1324,6 +1560,8 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 			p.is_photo_verified,
 			p.smoking_habit,
 			p.drinking_habit,
+			p.height_cm,
+			p.weight_kg,
 			COALESCE(
 				CEIL(ST_Distance(a.actor_coords, pl.coordinates) / 1000.0)::INT,
 				1
@@ -1354,6 +1592,18 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		  AND a.age BETWEEN COALESCE(dp.min_age, 18) AND COALESCE(dp.max_age, 100)
 		  -- PostGIS Distance radius (if coordinates available)
 		  AND (a.actor_coords IS NULL OR pl.coordinates IS NULL OR ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0))
+		  -- Height filter
+		  AND (a.pref_min_height_cm IS NULL OR p.height_cm IS NULL OR p.height_cm >= a.pref_min_height_cm)
+		  AND (a.pref_max_height_cm IS NULL OR p.height_cm IS NULL OR p.height_cm <= a.pref_max_height_cm)
+		  -- Weight filter
+		  AND (a.pref_min_weight_kg IS NULL OR p.weight_kg IS NULL OR p.weight_kg >= a.pref_min_weight_kg)
+		  AND (a.pref_max_weight_kg IS NULL OR p.weight_kg IS NULL OR p.weight_kg <= a.pref_max_weight_kg)
+		  -- Preferred Orientations filter
+		  AND (a.preferred_orientations IS NULL OR cardinality(a.preferred_orientations) = 0 OR p.sexual_orientations && a.preferred_orientations)
+		  -- Preferred Genders filter
+		  AND (a.preferred_genders IS NULL OR cardinality(a.preferred_genders) = 0 OR p.gender_identities && a.preferred_genders)
+		  -- Preferred Intents filter
+		  AND (a.preferred_intents IS NULL OR cardinality(a.preferred_intents) = 0 OR p.relationship_intents && a.preferred_intents)
 		  -- Exclude previously swiped candidates
 		  AND NOT EXISTS (
 			  SELECT 1 FROM swipes s
@@ -1422,6 +1672,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		var visJSON []byte
 		var structure *string
 		var smoking, drinking string
+		var heightCm, weightKg *int
 		var dist int
 		var boostMult float64
 		var uCreatedAt time.Time
@@ -1429,7 +1680,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		if err := rows.Scan(
 			&c.UserID, &c.DisplayName, &c.Age, &c.Bio, &c.Pronouns, &c.GenderIdentities,
 			&c.SexualOrientations, &c.RelationshipIntents, &structure, &visJSON,
-			&c.IsPhotoVerified, &smoking, &drinking, &dist, &boostMult, &uCreatedAt,
+			&c.IsPhotoVerified, &smoking, &drinking, &heightCm, &weightKg, &dist, &boostMult, &uCreatedAt,
 		); err != nil {
 			return nil, "", "", err
 		}
@@ -1454,6 +1705,12 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		}
 		if vs.SexualOrientation == identity.VisibilityHidden {
 			c.SexualOrientations = nil
+		}
+		if vs.Height != identity.VisibilityHidden {
+			c.HeightCm = heightCm
+		}
+		if vs.Weight != identity.VisibilityHidden {
+			c.WeightKg = weightKg
 		}
 
 		c.Photos = []PhotoCard{}
@@ -1709,6 +1966,15 @@ func (p *PostgresRepository) CreateSwipe(ctx context.Context, actorID, targetID 
 		return false, nil, false, tx.Commit(ctx)
 	}
 
+	// If intro note present, persist message request
+	if strings.TrimSpace(introNote) != "" {
+		reqQuery := `
+			INSERT INTO message_requests (sender_user_id, recipient_user_id, body, status)
+			VALUES ($1, $2, $3, 'PENDING')
+		`
+		_, _ = tx.Exec(ctx, reqQuery, actorID, targetID, strings.TrimSpace(introNote))
+	}
+
 	// Check reciprocal like
 	reciprocalQuery := `
 		SELECT 1 FROM swipes
@@ -1754,6 +2020,20 @@ func (p *PostgresRepository) CreateSwipe(ctx context.Context, actorID, targetID 
 	`
 	if _, err := tx.Exec(ctx, convQuery, m.ID, m.MatchedAt); err != nil {
 		return false, nil, false, fmt.Errorf("failed to create conversation for match: %w", err)
+	}
+
+	if strings.TrimSpace(introNote) != "" {
+		_, _ = tx.Exec(ctx, "UPDATE message_requests SET status = 'ACCEPTED', responded_at = NOW() WHERE sender_user_id = $1 AND recipient_user_id = $2", actorID, targetID)
+		var convID string
+		if err := tx.QueryRow(ctx, "SELECT id FROM conversations WHERE match_id = $1", m.ID).Scan(&convID); err == nil {
+			clientMsgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("%s:%s", actorID, targetID))).String()
+			_, _ = tx.Exec(ctx, `
+				INSERT INTO messages (conversation_id, sender_user_id, client_message_id, body, message_type)
+				VALUES ($1, $2, $3, $4, 'TEXT')
+				ON CONFLICT DO NOTHING
+			`, convID, actorID, clientMsgID, strings.TrimSpace(introNote))
+			_, _ = tx.Exec(ctx, "UPDATE conversations SET last_message_at = NOW() WHERE id = $1", convID)
+		}
 	}
 
 	// Emit match.created.v1 into outbox_events inside same database transaction
@@ -1935,6 +2215,8 @@ func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string,
 			p.is_photo_verified,
 			p.smoking_habit,
 			p.drinking_habit,
+			p.height_cm,
+			p.weight_kg,
 			COALESCE(ROUND(ST_Distance(a.actor_coords, pl.coordinates) / 1000.0)::INT, 1) AS distance_km
 		FROM users u
 		JOIN profiles p ON p.user_id = u.id
@@ -1972,12 +2254,13 @@ func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string,
 		var visJSON []byte
 		var structure *string
 		var smoking, drinking string
+		var heightCm, weightKg *int
 		var dist int
 
 		if err := rows.Scan(
 			&c.UserID, &c.DisplayName, &c.Age, &c.Bio, &c.Pronouns, &c.GenderIdentities,
 			&c.SexualOrientations, &c.RelationshipIntents, &structure, &visJSON,
-			&c.IsPhotoVerified, &smoking, &drinking, &dist,
+			&c.IsPhotoVerified, &smoking, &drinking, &heightCm, &weightKg, &dist,
 		); err != nil {
 			return nil, err
 		}
@@ -2003,12 +2286,248 @@ func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string,
 		if vs.SexualOrientation == identity.VisibilityHidden {
 			c.SexualOrientations = nil
 		}
+		if vs.Height != identity.VisibilityHidden {
+			c.HeightCm = heightCm
+		}
+		if vs.Weight != identity.VisibilityHidden {
+			c.WeightKg = weightKg
+		}
 
 		c.Photos = []PhotoCard{}
 		candidates = append(candidates, c)
 	}
 
 	return candidates, rows.Err()
+}
+
+func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string, limit, offset int) ([]IncomingLikeCard, int, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	countQuery := `
+		SELECT COUNT(*)
+		FROM swipes s
+		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
+		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
+		  AND NOT EXISTS (
+			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
+		  )
+	`
+	var total int
+	if err := p.pool.QueryRow(ctx, countQuery, userID).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("failed to count incoming likes: %w", err)
+	}
+
+	query := `
+		SELECT s.actor_user_id, p.display_name, p.birthdate,
+		       COALESCE(p.bio, ''), p.is_photo_verified, s.created_at,
+		       COALESCE(lr.source, ''),
+		       COALESCE(ROUND(ST_Distance(pl_actor.coordinates, pl_target.coordinates) / 1000.0)::INT, 1) AS distance_km
+		FROM swipes s
+		JOIN profiles p ON p.user_id = s.actor_user_id
+		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
+		LEFT JOIN profile_locations pl_actor ON pl_actor.user_id = s.actor_user_id
+		LEFT JOIN profile_locations pl_target ON pl_target.user_id = $1
+		LEFT JOIN likes_reveals lr ON lr.user_id = $1 AND lr.liked_by_user_id = s.actor_user_id
+		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
+		  AND NOT EXISTS (
+			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
+		  )
+		ORDER BY s.created_at DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	rows, err := p.pool.Query(ctx, query, userID, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query incoming likes: %w", err)
+	}
+	defer rows.Close()
+
+	var likes []IncomingLikeCard
+	for rows.Next() {
+		var actorID, displayName, bio, source string
+		var birthdate, createdAt time.Time
+		var isVerified bool
+		var dist int
+
+		if err := rows.Scan(
+			&actorID, &displayName, &birthdate, &bio, &isVerified, &createdAt, &source, &dist,
+		); err != nil {
+			return nil, 0, err
+		}
+
+		age := calculateAge(birthdate, time.Now().UTC())
+		if dist < 1 {
+			dist = 1
+		}
+
+		card := IncomingLikeCard{
+			UserID:                actorID,
+			DisplayName:           displayName,
+			Age:                   age,
+			Bio:                   bio,
+			ApproximateDistanceKm: dist,
+			IsPhotoVerified:       isVerified,
+			IsRevealed:            source != "",
+			LikedAt:               createdAt,
+			Photos:                []PhotoCard{},
+		}
+		likes = append(likes, card)
+	}
+
+	return likes, total, rows.Err()
+}
+
+func (p *PostgresRepository) GetRevealedLikes(ctx context.Context, userID string) (map[string]string, error) {
+	query := `SELECT liked_by_user_id, source FROM likes_reveals WHERE user_id = $1`
+	rows, err := p.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var likedBy, src string
+		if err := rows.Scan(&likedBy, &src); err != nil {
+			return nil, err
+		}
+		out[likedBy] = src
+	}
+	return out, rows.Err()
+}
+
+func (p *PostgresRepository) RecordLikeReveal(ctx context.Context, userID, likedByUserID, source string) error {
+	query := `
+		INSERT INTO likes_reveals (user_id, liked_by_user_id, source, revealed_at)
+		VALUES ($1, $2, $3, NOW())
+		ON CONFLICT (user_id, liked_by_user_id) DO NOTHING
+	`
+	_, err := p.pool.Exec(ctx, query, userID, likedByUserID, source)
+	return err
+}
+
+func (p *PostgresRepository) GetUserLikesUnlockState(ctx context.Context, userID string) (*UserLikesUnlockState, error) {
+	query := `
+		SELECT user_id, free_reveals_used, ad_reveals_today, bonus_reveals_remaining, last_ad_reveal_at
+		FROM user_likes_unlock_state
+		WHERE user_id = $1
+	`
+	var st UserLikesUnlockState
+	err := p.pool.QueryRow(ctx, query, userID).Scan(
+		&st.UserID, &st.FreeRevealsUsed, &st.AdRevealsToday, &st.BonusRevealsRemaining, &st.LastAdRevealAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return &UserLikesUnlockState{
+			UserID:                userID,
+			FreeRevealsUsed:       0,
+			AdRevealsToday:        0,
+			BonusRevealsRemaining: 0,
+		}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+func (p *PostgresRepository) SaveUserLikesUnlockState(ctx context.Context, state *UserLikesUnlockState) error {
+	query := `
+		INSERT INTO user_likes_unlock_state (
+			user_id, free_reveals_used, ad_reveals_today, bonus_reveals_remaining, last_ad_reveal_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (user_id) DO UPDATE SET
+			free_reveals_used = EXCLUDED.free_reveals_used,
+			ad_reveals_today = EXCLUDED.ad_reveals_today,
+			bonus_reveals_remaining = EXCLUDED.bonus_reveals_remaining,
+			last_ad_reveal_at = EXCLUDED.last_ad_reveal_at,
+			updated_at = NOW()
+	`
+	_, err := p.pool.Exec(ctx, query,
+		state.UserID, state.FreeRevealsUsed, state.AdRevealsToday,
+		state.BonusRevealsRemaining, state.LastAdRevealAt,
+	)
+	return err
+}
+
+func (p *PostgresRepository) CreateMessageRequest(ctx context.Context, req *MessageRequest) error {
+	query := `
+		INSERT INTO message_requests (id, sender_user_id, recipient_user_id, body, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`
+	_, err := p.pool.Exec(ctx, query, req.ID, req.SenderUserID, req.RecipientUserID, req.Body, req.Status, req.CreatedAt)
+	return err
+}
+
+func (p *PostgresRepository) ListMessageRequests(ctx context.Context, userID string, folder string) ([]MessageRequest, error) {
+	where := "mr.recipient_user_id = $1"
+	if folder == "sent" {
+		where = "mr.sender_user_id = $1"
+	}
+
+	query := fmt.Sprintf(`
+		SELECT mr.id, mr.sender_user_id, mr.recipient_user_id, mr.body, mr.status, mr.created_at, mr.responded_at,
+		       p.display_name, p.birthdate, COALESCE(p.bio, ''), p.is_photo_verified
+		FROM message_requests mr
+		JOIN profiles p ON p.user_id = mr.sender_user_id
+		WHERE %s
+		ORDER BY mr.created_at DESC
+	`, where)
+
+	rows, err := p.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []MessageRequest
+	for rows.Next() {
+		var req MessageRequest
+		var displayName, bio string
+		var birthdate time.Time
+		var isVerified bool
+
+		if err := rows.Scan(
+			&req.ID, &req.SenderUserID, &req.RecipientUserID, &req.Body, &req.Status, &req.CreatedAt, &req.RespondedAt,
+			&displayName, &birthdate, &bio, &isVerified,
+		); err != nil {
+			return nil, err
+		}
+
+		age := calculateAge(birthdate, time.Now().UTC())
+		req.SenderProfile = &DiscoveryCandidate{
+			UserID:          req.SenderUserID,
+			DisplayName:     displayName,
+			Age:             age,
+			Bio:             bio,
+			IsPhotoVerified: isVerified,
+			Photos:          []PhotoCard{},
+		}
+		results = append(results, req)
+	}
+	return results, rows.Err()
+}
+
+func (p *PostgresRepository) UpdateMessageRequestStatus(ctx context.Context, requestID, recipientID, status string) error {
+	query := `
+		UPDATE message_requests
+		SET status = $3, responded_at = NOW()
+		WHERE id = $1 AND recipient_user_id = $2
+	`
+	tag, err := p.pool.Exec(ctx, query, requestID, recipientID, status)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errors.New("message request not found or unauthorized")
+	}
+	return nil
 }
 
 // Helpers

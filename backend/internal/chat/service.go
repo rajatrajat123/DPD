@@ -280,3 +280,27 @@ func (s *Service) handleClientWSAction(client *Client, action WSClientMessage) {
 		_ = s.MarkRead(ctx, action.ConversationID, client.userID)
 	}
 }
+
+func (s *Service) ListMessageRequests(ctx context.Context, userID string) ([]*MessageRequest, error) {
+	return s.repo.ListMessageRequests(ctx, userID)
+}
+
+func (s *Service) AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (*MessageRequestActionResponse, error) {
+	convID, matchID, err := s.repo.AcceptMessageRequest(ctx, requestID, recipientID)
+	if err != nil {
+		return nil, err
+	}
+	return &MessageRequestActionResponse{
+		Success:        true,
+		ConversationID: &convID,
+		MatchID:        &matchID,
+	}, nil
+}
+
+func (s *Service) DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	return s.repo.DeclineMessageRequest(ctx, requestID, recipientID)
+}
+
+func (s *Service) BlockMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	return s.repo.BlockMessageRequest(ctx, requestID, recipientID)
+}

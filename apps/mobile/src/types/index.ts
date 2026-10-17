@@ -46,6 +46,14 @@ export interface Profile {
   smoking_preference: SmokingPreference;
   smoking_habit?: SmokingPreference;
   non_smoker_dealbreaker: boolean;
+  height_cm?: number;
+  weight_kg?: number;
+  visibility_settings?: {
+    height?: string;
+    weight?: string;
+    [key: string]: any;
+  };
+  is_complete?: boolean;
   city?: string;
   region?: string;
   photos: ProfilePhoto[];
@@ -61,8 +69,14 @@ export interface DiscoveryPreferences {
   max_distance_km: number;
   preferred_genders: string[];
   preferred_intents: string[];
+  preferred_orientations?: string[];
+  min_height_cm?: number;
+  max_height_cm?: number;
+  min_weight_kg?: number;
+  max_weight_kg?: number;
   dealbreaker_non_smoker: boolean;
   verified_only: boolean;
+  verified_profiles_only?: boolean;
   dealbreakers?: {
     non_smoker_only: boolean;
     require_verified?: boolean;
@@ -82,10 +96,36 @@ export interface DiscoveryCandidate {
   relationship_intents: string[];
   smoking_preference: SmokingPreference;
   distance_bucket_km: number;
+  height_cm?: number;
+  weight_kg?: number;
   photos: ProfilePhoto[];
   compatibility_score: number;
   is_verified: boolean;
   relationship_structure?: string;
+}
+
+export type MessageRequestStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'BLOCKED';
+
+export interface MessageRequest {
+  id: string;
+  sender_user_id: string;
+  recipient_user_id: string;
+  body: string;
+  status: MessageRequestStatus;
+  created_at: string;
+  responded_at?: string;
+  sender_id?: string;
+  sender_name?: string;
+  sender_age?: number;
+  sender_avatar?: string;
+  sender_is_verified?: boolean;
+  sender?: {
+    user_id: string;
+    display_name: string;
+    age: number;
+    avatar_url?: string;
+    is_photo_verified: boolean;
+  };
 }
 
 export type SwipeDirection = 'LIKE' | 'PASS' | 'SUPER_SPARK';

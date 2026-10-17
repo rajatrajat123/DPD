@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -141,6 +142,17 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 	if s.logger != nil {
 		s.logger.Info("admob_ssv_reward_granted", slog.String("user_id", reward.UserID), slog.String("transaction_id", reward.TransactionID), slog.Int("reward_amount", grantAmount))
 	}
+
+	// Grant 2 likes reveals unlocked per completed rewarded ad (Section 5)
+	state, stateErr := s.repo.GetUserLikesUnlockState(ctx, reward.UserID)
+	if stateErr == nil && state != nil {
+		state.BonusRevealsRemaining += 2
+		now := time.Now().UTC()
+		state.LastAdRevealAt = &now
+		state.AdRevealsToday++
+		_ = s.repo.SaveUserLikesUnlockState(ctx, state)
+	}
+
 	reward.RewardAmount = grantAmount
 	return reward, nil
 }
@@ -229,14 +241,39 @@ func (s *Service) GetDiscoveryFeed(ctx context.Context, actorID string, cursor s
 		filteredCandidates = append(filteredCandidates, c)
 	}
 
-	if len(filteredCandidates) == 0 && emptyReason == "" && cursor == "" {
+	// Insert sponsored native card after every 11 candidate profiles (Section 5)
+	finalCandidates := make([]DiscoveryCandidate, 0, len(filteredCandidates)+len(filteredCandidates)/11)
+	for idx, cand := range filteredCandidates {
+		finalCandidates = append(finalCandidates, cand)
+		if (idx+1)%11 == 0 {
+			finalCandidates = append(finalCandidates, DiscoveryCandidate{
+				UserID:                "sponsored_ndp_partner",
+				DisplayName:           "NDP Community Spotlight",
+				Age:                   0,
+				Bio:                   "Discover inclusive events, community spaces, and partner offers curated for our LGBTQ+ sanctuary.",
+				ApproximateDistanceKm: 1,
+				IsSponsored:           true,
+				SponsoredTitle:        "Curated LGBTQ+ Spaces",
+				SponsoredCTA:          "Explore Offers",
+				SponsoredURL:          "/features",
+				Photos: []PhotoCard{{
+					AssetID:  "ad_asset_ndp",
+					ThumbURL: "/images/sponsored-card.jpg",
+					CardURL:  "/images/sponsored-card.jpg",
+					FullURL:  "/images/sponsored-card.jpg",
+				}},
+			})
+		}
+	}
+
+	if len(finalCandidates) == 0 && emptyReason == "" && cursor == "" {
 		emptyReason = "NO_CANDIDATES_AVAILABLE"
 	}
 
 	return &DiscoveryFeedResponse{
-		Candidates:       filteredCandidates,
+		Candidates:       finalCandidates,
 		NextCursor:       nextCursor,
-		Count:            len(filteredCandidates),
+		Count:            len(finalCandidates),
 		EmptyStateReason: emptyReason,
 	}, nil
 }
@@ -544,12 +581,22 @@ func (s *Service) ListMatches(ctx context.Context, userID string) ([]MatchRespon
 		var candidate *DiscoveryCandidate
 		prof, err := s.identRepo.GetProfile(ctx, matchedID)
 		if err == nil && prof != nil {
+			var h *int
+			if prof.VisibilitySettings.Height != identity.VisibilityHidden {
+				h = prof.HeightCm
+			}
+			var w *int
+			if prof.VisibilitySettings.Weight != identity.VisibilityHidden {
+				w = prof.WeightKg
+			}
 			candidate = &DiscoveryCandidate{
 				UserID:                matchedID,
 				DisplayName:           prof.DisplayName,
 				Bio:                   prof.Bio,
 				IsPhotoVerified:       prof.IsPhotoVerified,
 				RelationshipStructure: string(prof.RelationshipStructure),
+				HeightCm:              h,
+				WeightKg:              w,
 				Photos:                []PhotoCard{},
 			}
 			if s.mediaSvc != nil {
@@ -596,11 +643,21 @@ func (s *Service) GetMatch(ctx context.Context, matchID, requesterID string) (*M
 	var candidate *DiscoveryCandidate
 	prof, err := s.identRepo.GetProfile(ctx, matchedID)
 	if err == nil && prof != nil {
+		var h *int
+		if prof.VisibilitySettings.Height != identity.VisibilityHidden {
+			h = prof.HeightCm
+		}
+		var w *int
+		if prof.VisibilitySettings.Weight != identity.VisibilityHidden {
+			w = prof.WeightKg
+		}
 		candidate = &DiscoveryCandidate{
 			UserID:          matchedID,
 			DisplayName:     prof.DisplayName,
 			Bio:             prof.Bio,
 			IsPhotoVerified: prof.IsPhotoVerified,
+			HeightCm:        h,
+			WeightKg:        w,
 			Photos:          []PhotoCard{},
 		}
 	}
@@ -630,4 +687,214 @@ func (s *Service) Rewind(ctx context.Context, actorID string) (*RewindResponse, 
 		return nil, errors.New("actor_user_id is required")
 	}
 	return s.repo.RewindLastSwipe(ctx, actorID)
+}
+
+func (s *Service) GetLikesYou(ctx context.Context, actorID string, limit, offset int) (*LikesYouResponse, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	// 1. Check if user is premium
+	isPremium := false
+	if s.entitlementChecker != nil {
+		isPremium = s.entitlementChecker(ctx, actorID, "SEE_WHO_LIKED_YOU")
+	}
+
+	// 2. Fetch incoming likes
+	likes, total, err := s.repo.GetIncomingLikes(ctx, actorID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. Fetch unlock state
+	state, err := s.repo.GetUserLikesUnlockState(ctx, actorID)
+	if err != nil {
+		state = &UserLikesUnlockState{UserID: actorID}
+	}
+
+	freeLimit := 1
+	cooldownDuration := 4 * time.Hour
+
+	freeRemaining := freeLimit - state.FreeRevealsUsed
+	if freeRemaining < 0 {
+		freeRemaining = 0
+	}
+
+	cooldownActive := false
+	cooldownRemainingSec := 0
+	if state.LastAdRevealAt != nil && time.Since(*state.LastAdRevealAt) < cooldownDuration {
+		cooldownActive = true
+		cooldownRemainingSec = int((cooldownDuration - time.Since(*state.LastAdRevealAt)).Seconds())
+	}
+
+	revealedCount := 0
+	unrevealedCount := 0
+
+	for i := range likes {
+		like := &likes[i]
+		if isPremium || like.IsRevealed {
+			like.IsRevealed = true
+			revealedCount++
+			if s.mediaSvc != nil {
+				gallery, err := s.mediaSvc.ListUserGallery(ctx, like.UserID)
+				if err == nil {
+					for _, g := range gallery {
+						cardURL := ""
+						if len(g.Derivatives) > 0 {
+							cardURL = g.Derivatives[0].URL
+						}
+						like.Photos = append(like.Photos, PhotoCard{
+							AssetID:  g.ID,
+							ThumbURL: cardURL,
+							CardURL:  cardURL,
+							FullURL:  cardURL,
+						})
+					}
+				}
+			}
+		} else {
+			like.IsRevealed = false
+			unrevealedCount++
+			runes := []rune(like.DisplayName)
+			if len(runes) > 0 {
+				like.DisplayName = string(runes[0]) + "..."
+			} else {
+				like.DisplayName = "Someone"
+			}
+			like.Bio = "Profile details revealed upon unlock"
+			like.BlurredPhotoURL = "/placeholder-blur.jpg"
+			like.Photos = []PhotoCard{}
+		}
+	}
+
+	return &LikesYouResponse{
+		TotalLikes:               total,
+		RevealedCount:            revealedCount,
+		UnrevealedCount:          unrevealedCount,
+		FreeRevealsRemaining:     freeRemaining,
+		BonusRevealsRemaining:    state.BonusRevealsRemaining,
+		CooldownActive:           cooldownActive,
+		CooldownRemainingSeconds: cooldownRemainingSec,
+		RewardedAdEnabled:        true,
+		Likes:                    likes,
+	}, nil
+}
+
+func (s *Service) RevealLike(ctx context.Context, actorID, targetUserID string) (*IncomingLikeCard, string, error) {
+	likes, _, err := s.repo.GetIncomingLikes(ctx, actorID, 100, 0)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var targetLike *IncomingLikeCard
+	for i := range likes {
+		if likes[i].UserID == targetUserID {
+			targetLike = &likes[i]
+			break
+		}
+	}
+	if targetLike == nil {
+		return nil, "", fmt.Errorf("no incoming like from user %s", targetUserID)
+	}
+
+	if targetLike.IsRevealed {
+		return targetLike, "ALREADY_REVEALED", nil
+	}
+
+	state, err := s.repo.GetUserLikesUnlockState(ctx, actorID)
+	if err != nil {
+		state = &UserLikesUnlockState{UserID: actorID}
+	}
+
+	source := ""
+	if state.FreeRevealsUsed < 1 {
+		source = "FREE"
+		state.FreeRevealsUsed++
+	} else if state.BonusRevealsRemaining > 0 {
+		source = "REWARDED_AD"
+		state.BonusRevealsRemaining--
+	} else {
+		if s.entitlementChecker != nil && s.entitlementChecker(ctx, actorID, "SEE_WHO_LIKED_YOU") {
+			source = "PREMIUM"
+		} else {
+			return nil, "", errors.New("no reveal credits available; complete a rewarded ad to unlock 2 likes or upgrade to NDP Plus")
+		}
+	}
+
+	if err := s.repo.RecordLikeReveal(ctx, actorID, targetUserID, source); err != nil {
+		return nil, "", err
+	}
+	_ = s.repo.SaveUserLikesUnlockState(ctx, state)
+
+	targetLike.IsRevealed = true
+	prof, err := s.identRepo.GetProfile(ctx, targetUserID)
+	if err == nil && prof != nil {
+		targetLike.DisplayName = prof.DisplayName
+		targetLike.Bio = prof.Bio
+		targetLike.IsPhotoVerified = prof.IsPhotoVerified
+		if s.mediaSvc != nil {
+			if gallery, err := s.mediaSvc.ListUserGallery(ctx, targetUserID); err == nil {
+				for _, g := range gallery {
+					cardURL := ""
+					if len(g.Derivatives) > 0 {
+						cardURL = g.Derivatives[0].URL
+					}
+					targetLike.Photos = append(targetLike.Photos, PhotoCard{
+						AssetID:  g.ID,
+						ThumbURL: cardURL,
+						CardURL:  cardURL,
+						FullURL:  cardURL,
+					})
+				}
+			}
+		}
+	}
+
+	return targetLike, source, nil
+}
+
+func (s *Service) SendMessageRequest(ctx context.Context, senderID string, req SendMessageRequestPayload) (*MessageRequest, error) {
+	if strings.TrimSpace(req.RecipientUserID) == "" || strings.TrimSpace(req.Body) == "" {
+		return nil, errors.New("recipient_user_id and body are required")
+	}
+	if senderID == req.RecipientUserID {
+		return nil, errors.New("cannot send message request to yourself")
+	}
+
+	mr := &MessageRequest{
+		ID:              generateUUIDv4(),
+		SenderUserID:    senderID,
+		RecipientUserID: req.RecipientUserID,
+		Body:            req.Body,
+		Status:          "PENDING",
+		CreatedAt:       time.Now().UTC(),
+	}
+
+	if err := s.repo.CreateMessageRequest(ctx, mr); err != nil {
+		return nil, err
+	}
+	return mr, nil
+}
+
+func (s *Service) ListMessageRequests(ctx context.Context, userID, folder string) ([]MessageRequest, error) {
+	return s.repo.ListMessageRequests(ctx, userID, folder)
+}
+
+func (s *Service) RespondMessageRequest(ctx context.Context, recipientID, requestID, action string) error {
+	action = strings.ToUpper(strings.TrimSpace(action))
+	if action != "ACCEPTED" && action != "DECLINED" && action != "BLOCKED" {
+		return errors.New("action must be ACCEPTED, DECLINED, or BLOCKED")
+	}
+	return s.repo.UpdateMessageRequestStatus(ctx, requestID, recipientID, action)
+}
+
+func generateUUIDv4() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

@@ -15,6 +15,7 @@ import { useRouter, useLocalSearchParams } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { ApiError } from '../../src/services/api/client';
+import { GoogleSignInButton } from '../../src/components/GoogleSignInButton';
 
 export default function LoginScreen() {
   const router = useRouter();
@@ -115,6 +116,22 @@ export default function LoginScreen() {
               <Text style={styles.submitBtnText}>Sign In to Aura</Text>
             )}
           </TouchableOpacity>
+
+          <View style={styles.dividerRow}>
+            <View style={styles.dividerLine} />
+            <Text style={styles.dividerText}>OR</Text>
+            <View style={styles.dividerLine} />
+          </View>
+
+          <GoogleSignInButton
+            onSuccess={() => {
+              if (params.redirect && typeof params.redirect === 'string' && !params.redirect.includes('(auth)')) {
+                router.replace(params.redirect as any);
+              } else {
+                router.replace('/(tabs)');
+              }
+            }}
+          />
 
           <View style={styles.footerRow}>
             <Text style={styles.footerText}>Not a member yet?</Text>
@@ -221,11 +238,28 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     marginTop: spacing.md,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.sm,
   },
   submitBtnText: {
     ...typography.button,
     color: colors.textInverse,
+  },
+  dividerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginVertical: spacing.md,
+  },
+  dividerLine: {
+    flex: 1,
+    height: 1,
+    backgroundColor: colors.border,
+  },
+  dividerText: {
+    ...typography.caption,
+    color: colors.textMuted,
+    marginHorizontal: spacing.md,
+    fontWeight: '600',
+    letterSpacing: 1,
   },
   footerRow: {
     flexDirection: 'row',

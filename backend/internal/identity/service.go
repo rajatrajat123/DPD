@@ -79,6 +79,8 @@ type RegisterRequest struct {
 	Pronouns              []string              `json:"pronouns,omitempty"`
 	RelationshipIntents   []string              `json:"relationship_intents,omitempty"`
 	RelationshipStructure RelationshipStructure `json:"relationship_structure,omitempty"`
+	HeightCm              *int                  `json:"height_cm,omitempty"`
+	WeightKg              *int                  `json:"weight_kg,omitempty"`
 }
 
 type LoginRequest struct {
@@ -112,6 +114,10 @@ type UpdateProfileRequest struct {
 	SmokingPreference     *SmokingHabit          `json:"smoking_preference,omitempty"`
 	NonSmokerDealbreaker  *bool                  `json:"non_smoker_dealbreaker,omitempty"`
 	DrinkingHabit         *DrinkingHabit         `json:"drinking_habit,omitempty"`
+	HeightCm              *int                   `json:"height_cm,omitempty"`
+	WeightKg              *int                   `json:"weight_kg,omitempty"`
+	Languages             []string               `json:"languages,omitempty"`
+	Interests             []string               `json:"interests,omitempty"`
 }
 
 type UpdateLocationRequest struct {
@@ -127,9 +133,16 @@ type UpdatePreferencesRequest struct {
 	MaxDistanceKm           *int                     `json:"max_distance_km,omitempty"`
 	PreferredGenders        []string                 `json:"preferred_genders,omitempty"`
 	PreferredIntents        []string                 `json:"preferred_intents,omitempty"`
+	PreferredOrientations   []string                 `json:"preferred_orientations,omitempty"`
+	PreferredLanguages      []string                 `json:"preferred_languages,omitempty"`
+	PreferredInterests      []string                 `json:"preferred_interests,omitempty"`
 	VerifiedProfilesOnly    *bool                    `json:"verified_profiles_only,omitempty"`
 	VerifiedOnly            *bool                    `json:"verified_only,omitempty"`
 	DealbreakerNonSmoker    *bool                    `json:"dealbreaker_non_smoker,omitempty"`
+	MinHeightCm             *int                     `json:"min_height_cm,omitempty"`
+	MaxHeightCm             *int                     `json:"max_height_cm,omitempty"`
+	MinWeightKg             *int                     `json:"min_weight_kg,omitempty"`
+	MaxWeightKg             *int                     `json:"max_weight_kg,omitempty"`
 	Dealbreakers            *LifestyleDealbreakers   `json:"dealbreakers,omitempty"`
 	NotificationPreferences *NotificationPreferences `json:"notification_preferences,omitempty"`
 }
@@ -139,6 +152,7 @@ type FullProfileResponse struct {
 	Profile     Profile            `json:"profile"`
 	Location    *ProfileLocation   `json:"location,omitempty"`
 	Preferences *DatingPreferences `json:"preferences,omitempty"`
+	IsComplete  bool               `json:"is_complete"`
 }
 
 type Service struct {
@@ -152,6 +166,7 @@ type Service struct {
 	notificationSink NotificationDeliverySink
 	resetLimiter     *ResetRateLimiter
 	logger           *slog.Logger
+	googleVerifier   GoogleTokenVerifier
 }
 
 // ResetRateLimiter enforces resend throttling per email and rate limits per IP
@@ -365,6 +380,16 @@ func (s *Service) SetNotificationSink(sink NotificationDeliverySink) {
 	s.notificationSink = sink
 }
 
+func WithGoogleTokenVerifier(verifier GoogleTokenVerifier) ServiceOption {
+	return func(s *Service) {
+		s.googleVerifier = verifier
+	}
+}
+
+func (s *Service) SetGoogleTokenVerifier(verifier GoogleTokenVerifier) {
+	s.googleVerifier = verifier
+}
+
 func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Service {
 	s := &Service{
 		repo:         repo,
@@ -376,6 +401,9 @@ func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Servi
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	if s.googleVerifier == nil {
+		s.googleVerifier = NewHTTPGoogleTokenVerifier(nil)
 	}
 	return s
 }
@@ -408,6 +436,17 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest, clientInfo 
 	}
 	if err := ValidateTaxonomy(req.GenderIdentities, req.SexualOrientations, req.Pronouns, req.RelationshipIntents); err != nil {
 		return nil, err
+	}
+
+	if req.HeightCm != nil {
+		if *req.HeightCm < 90 || *req.HeightCm > 250 {
+			return nil, fmt.Errorf("height must be between 90 cm and 250 cm")
+		}
+	}
+	if req.WeightKg != nil {
+		if *req.WeightKg < 30 || *req.WeightKg > 300 {
+			return nil, fmt.Errorf("weight must be between 30 kg and 300 kg")
+		}
 	}
 
 	pwHash, err := HashPasswordWithParams(req.Password, s.argonParams)
@@ -443,6 +482,8 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest, clientInfo 
 		SexualOrientations:    req.SexualOrientations,
 		RelationshipIntents:   req.RelationshipIntents,
 		RelationshipStructure: req.RelationshipStructure,
+		HeightCm:              req.HeightCm,
+		WeightKg:              req.WeightKg,
 		VisibilitySettings:    DefaultVisibilitySettings(),
 		CreatedAt:             now,
 		UpdatedAt:             now,
@@ -542,6 +583,166 @@ func (s *Service) Login(ctx context.Context, req LoginRequest, clientInfo Client
 
 	profile, _ := s.repo.GetProfile(ctx, user.ID)
 	return s.issueAuthSession(ctx, user, profile, clientInfo)
+}
+
+func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequest, clientInfo ClientInfo) (*AuthResponse, error) {
+	if s.googleVerifier == nil {
+		s.googleVerifier = NewHTTPGoogleTokenVerifier(nil)
+	}
+
+	claims, err := s.googleVerifier.VerifyToken(ctx, req.IDToken)
+	if err != nil {
+		return nil, fmt.Errorf("failed to verify google token: %w", err)
+	}
+
+	if !claims.EmailVerified {
+		return nil, ErrOAuthEmailNotVerified
+	}
+
+	now := time.Now().UTC()
+	normEmail := strings.ToLower(strings.TrimSpace(claims.Email))
+
+	// 1. Check if this Google identity is already linked to a user account
+	existingIdent, err := s.repo.GetOAuthIdentity(ctx, "google", claims.Subject)
+	if err == nil && existingIdent != nil {
+		user, err := s.repo.GetUserByID(ctx, existingIdent.UserID)
+		if err != nil {
+			return nil, fmt.Errorf("linked user not found: %w", err)
+		}
+		if user.Status != StatusActive {
+			return nil, ErrAccountNotActive
+		}
+
+		_ = s.repo.UpdateOAuthIdentityLastLogin(ctx, existingIdent.ID)
+		user.LastActiveAt = &now
+		_ = s.repo.UpdateUser(ctx, user)
+
+		profile, _ := s.repo.GetProfile(ctx, user.ID)
+		return s.issueAuthSession(ctx, user, profile, clientInfo)
+	}
+
+	// 2. Check if a user with this email already exists (Account Linking)
+	existingUser, err := s.repo.GetUserByEmail(ctx, normEmail)
+	if err == nil && existingUser != nil {
+		if existingUser.Status != StatusActive {
+			return nil, ErrAccountNotActive
+		}
+
+		// Ensure no other Google identity is already bound to this email
+		if linkedIdent, err := s.repo.GetOAuthIdentityByEmail(ctx, "google", normEmail); err == nil && linkedIdent != nil {
+			if linkedIdent.ProviderSubject != claims.Subject {
+				return nil, fmt.Errorf("this email is already linked to another Google identity")
+			}
+		}
+
+		// Link Google identity to existing user account
+		ident := &OAuthIdentity{
+			ID:              generateUUIDv4(),
+			UserID:          existingUser.ID,
+			Provider:        "google",
+			ProviderSubject: claims.Subject,
+			Email:           normEmail,
+			EmailVerified:   true,
+			LinkedAt:        now,
+			LastLoginAt:     now,
+		}
+		if err := s.repo.CreateOAuthIdentity(ctx, ident); err != nil {
+			return nil, fmt.Errorf("failed to link Google identity to existing account: %w", err)
+		}
+
+		if existingUser.EmailVerifiedAt == nil {
+			existingUser.EmailVerifiedAt = &now
+		}
+		existingUser.LastActiveAt = &now
+		_ = s.repo.UpdateUser(ctx, existingUser)
+
+		profile, _ := s.repo.GetProfile(ctx, existingUser.ID)
+		return s.issueAuthSession(ctx, existingUser, profile, clientInfo)
+	}
+
+	// 3. New user registration via Google Sign-In
+	displayName := strings.TrimSpace(req.DisplayName)
+	if displayName == "" {
+		if claims.Name != "" {
+			displayName = claims.Name
+		} else if claims.GivenName != "" {
+			displayName = claims.GivenName
+		} else {
+			displayName = strings.Split(normEmail, "@")[0]
+		}
+	}
+
+	var birthdate time.Time
+	if strings.TrimSpace(req.Birthdate) != "" {
+		b, err := time.Parse("2006-01-02", strings.TrimSpace(req.Birthdate))
+		if err != nil {
+			return nil, fmt.Errorf("invalid birthdate format, expected YYYY-MM-DD: %w", err)
+		}
+		if err := ValidateAge(b, now); err != nil {
+			return nil, err
+		}
+		birthdate = b
+	} else {
+		// Default adult age (26 years) to enable instant exploring while profile setup prompts for exact date
+		birthdate = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+	}
+
+	userID := generateUUIDv4()
+	newUser := &User{
+		ID:              userID,
+		Email:           normEmail,
+		PasswordHash:    "",
+		Status:          StatusActive,
+		Role:            RoleMember,
+		EmailVerifiedAt: &now,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := s.repo.CreateUser(ctx, newUser); err != nil {
+		return nil, fmt.Errorf("failed to create user account: %w", err)
+	}
+
+	ident := &OAuthIdentity{
+		ID:              generateUUIDv4(),
+		UserID:          userID,
+		Provider:        "google",
+		ProviderSubject: claims.Subject,
+		Email:           normEmail,
+		EmailVerified:   true,
+		LinkedAt:        now,
+		LastLoginAt:     now,
+	}
+	if err := s.repo.CreateOAuthIdentity(ctx, ident); err != nil {
+		return nil, fmt.Errorf("failed to persist Google identity: %w", err)
+	}
+
+	profile := &Profile{
+		UserID:                userID,
+		DisplayName:           displayName,
+		Birthdate:             birthdate,
+		Bio:                   "",
+		Pronouns:              req.Pronouns,
+		GenderIdentities:      req.GenderIdentities,
+		SexualOrientations:    req.SexualOrientations,
+		RelationshipIntents:   req.RelationshipIntents,
+		RelationshipStructure: req.RelationshipStructure,
+		HeightCm:              req.HeightCm,
+		WeightKg:              req.WeightKg,
+		VisibilitySettings:    DefaultVisibilitySettings(),
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	_ = s.repo.UpsertProfile(ctx, profile)
+
+	pref := DefaultDatingPreferences(userID)
+	if len(req.PreferredGenders) > 0 {
+		pref.PreferredGenders = req.PreferredGenders
+	} else if len(req.LookingFor) > 0 {
+		pref.PreferredGenders = req.LookingFor
+	}
+	_ = s.repo.UpsertPreferences(ctx, &pref)
+
+	return s.issueAuthSession(ctx, newUser, profile, clientInfo)
 }
 
 func (s *Service) RefreshToken(ctx context.Context, refreshToken string, clientInfo ClientInfo) (*AuthResponse, error) {
@@ -831,6 +1032,7 @@ func (s *Service) GetMyProfile(ctx context.Context, userID string) (*FullProfile
 		Profile:     *profile,
 		Location:    location,
 		Preferences: prefs,
+		IsComplete:  profile.IsComplete(),
 	}, nil
 }
 
@@ -923,6 +1125,24 @@ func (s *Service) UpdateMyProfile(ctx context.Context, userID string, req Update
 	}
 	if req.DrinkingHabit != nil {
 		profile.DrinkingHabit = *req.DrinkingHabit
+	}
+	if req.HeightCm != nil {
+		if *req.HeightCm < 90 || *req.HeightCm > 250 {
+			return nil, fmt.Errorf("height must be between 90 cm and 250 cm")
+		}
+		profile.HeightCm = req.HeightCm
+	}
+	if req.WeightKg != nil {
+		if *req.WeightKg < 30 || *req.WeightKg > 300 {
+			return nil, fmt.Errorf("weight must be between 30 kg and 300 kg")
+		}
+		profile.WeightKg = req.WeightKg
+	}
+	if req.Languages != nil {
+		profile.Languages = req.Languages
+	}
+	if req.Interests != nil {
+		profile.Interests = req.Interests
 	}
 	if req.NonSmokerDealbreaker != nil {
 		pref, prefErr := s.repo.GetPreferences(ctx, userID)
@@ -1030,8 +1250,44 @@ func (s *Service) UpdateMyPreferences(ctx context.Context, userID string, req Up
 	if req.Dealbreakers != nil {
 		pref.Dealbreakers = *req.Dealbreakers
 	}
-	if req.DealbreakerNonSmoker != nil {
-		pref.Dealbreakers.NonSmokerOnly = *req.DealbreakerNonSmoker
+	if req.PreferredOrientations != nil {
+		pref.PreferredOrientations = req.PreferredOrientations
+	}
+	if req.PreferredLanguages != nil {
+		pref.PreferredLanguages = req.PreferredLanguages
+	}
+	if req.PreferredInterests != nil {
+		pref.PreferredInterests = req.PreferredInterests
+	}
+	if req.MinHeightCm != nil {
+		if *req.MinHeightCm < 90 || *req.MinHeightCm > 250 {
+			return nil, fmt.Errorf("minimum height must be between 90 cm and 250 cm")
+		}
+		pref.MinHeightCm = req.MinHeightCm
+	}
+	if req.MaxHeightCm != nil {
+		if *req.MaxHeightCm < 90 || *req.MaxHeightCm > 250 {
+			return nil, fmt.Errorf("maximum height must be between 90 cm and 250 cm")
+		}
+		if pref.MinHeightCm != nil && *req.MaxHeightCm < *pref.MinHeightCm {
+			return nil, fmt.Errorf("maximum height cannot be less than minimum height")
+		}
+		pref.MaxHeightCm = req.MaxHeightCm
+	}
+	if req.MinWeightKg != nil {
+		if *req.MinWeightKg < 30 || *req.MinWeightKg > 300 {
+			return nil, fmt.Errorf("minimum weight must be between 30 kg and 300 kg")
+		}
+		pref.MinWeightKg = req.MinWeightKg
+	}
+	if req.MaxWeightKg != nil {
+		if *req.MaxWeightKg < 30 || *req.MaxWeightKg > 300 {
+			return nil, fmt.Errorf("maximum weight must be between 30 kg and 300 kg")
+		}
+		if pref.MinWeightKg != nil && *req.MaxWeightKg < *pref.MinWeightKg {
+			return nil, fmt.Errorf("maximum weight cannot be less than minimum weight")
+		}
+		pref.MaxWeightKg = req.MaxWeightKg
 	}
 	if req.NotificationPreferences != nil {
 		pref.NotificationPreferences = *req.NotificationPreferences

@@ -71,6 +71,8 @@ type VisibilitySettings struct {
 	Distance          VisibilityLevel `json:"distance"`
 	OnlineStatus      VisibilityLevel `json:"online_status"`
 	TravelerSafety    bool            `json:"traveler_safety"` // Auto-hide profile in restrictive legal zones
+	Height            VisibilityLevel `json:"height,omitempty"`
+	Weight            VisibilityLevel `json:"weight,omitempty"`
 }
 
 func DefaultVisibilitySettings() VisibilitySettings {
@@ -81,6 +83,8 @@ func DefaultVisibilitySettings() VisibilitySettings {
 		Distance:          VisibilityPublicCommunity,
 		OnlineStatus:      VisibilityPublicCommunity,
 		TravelerSafety:    true,
+		Height:            VisibilityPublicCommunity,
+		Weight:            VisibilityPublicCommunity,
 	}
 }
 
@@ -130,8 +134,32 @@ type Profile struct {
 	IsPhotoVerified       bool                  `json:"is_photo_verified"`
 	DiscreteModeEnabled   bool                  `json:"discrete_mode_enabled"`
 	IncognitoEnabled      bool                  `json:"incognito_enabled"`
+	HeightCm              *int                  `json:"height_cm,omitempty"`
+	WeightKg              *int                  `json:"weight_kg,omitempty"`
+	Languages             []string              `json:"languages"`
+	Interests             []string              `json:"interests"`
 	CreatedAt             time.Time             `json:"created_at"`
 	UpdatedAt             time.Time             `json:"updated_at"`
+}
+
+// IsComplete checks if the profile has all required fields including height (weight is optional).
+func (p *Profile) IsComplete() bool {
+	if p == nil {
+		return false
+	}
+	if strings.TrimSpace(p.DisplayName) == "" || p.Birthdate.IsZero() {
+		return false
+	}
+	if len(p.GenderIdentities) == 0 || len(p.SexualOrientations) == 0 {
+		return false
+	}
+	if p.HeightCm == nil || *p.HeightCm < 90 || *p.HeightCm > 250 {
+		return false
+	}
+	if p.WeightKg != nil && (*p.WeightKg < 30 || *p.WeightKg > 300) {
+		return false
+	}
+	return true
 }
 
 type ProfileLocation struct {
@@ -183,7 +211,14 @@ type DatingPreferences struct {
 	MaxDistanceKm           int                     `json:"max_distance_km"`
 	PreferredGenders        []string                `json:"preferred_genders"`
 	PreferredIntents        []string                `json:"preferred_intents"`
+	PreferredOrientations   []string                `json:"preferred_orientations,omitempty"`
+	PreferredLanguages      []string                `json:"preferred_languages,omitempty"`
+	PreferredInterests      []string                `json:"preferred_interests,omitempty"`
 	VerifiedProfilesOnly    bool                    `json:"verified_profiles_only"`
+	MinHeightCm             *int                    `json:"min_height_cm,omitempty"`
+	MaxHeightCm             *int                    `json:"max_height_cm,omitempty"`
+	MinWeightKg             *int                    `json:"min_weight_kg,omitempty"`
+	MaxWeightKg             *int                    `json:"max_weight_kg,omitempty"`
 	Dealbreakers            LifestyleDealbreakers   `json:"dealbreakers"`
 	NotificationPreferences NotificationPreferences `json:"notification_preferences"`
 	UpdatedAt               time.Time               `json:"updated_at"`
@@ -197,6 +232,9 @@ func DefaultDatingPreferences(userID string) DatingPreferences {
 		MaxDistanceKm:           50,
 		PreferredGenders:        []string{},
 		PreferredIntents:        []string{},
+		PreferredOrientations:   []string{},
+		PreferredLanguages:      []string{},
+		PreferredInterests:      []string{},
 		VerifiedProfilesOnly:    false,
 		Dealbreakers:            LifestyleDealbreakers{},
 		NotificationPreferences: DefaultNotificationPreferences(),
@@ -334,4 +372,15 @@ func (vs *VisibilitySettings) Scan(value any) error {
 		return fmt.Errorf("type assertion to []byte failed")
 	}
 	return json.Unmarshal(bytes, vs)
+}
+
+type OAuthIdentity struct {
+	ID              string    `json:"id"`
+	UserID          string    `json:"user_id"`
+	Provider        string    `json:"provider"`
+	ProviderSubject string    `json:"provider_subject"`
+	Email           string    `json:"email"`
+	EmailVerified   bool      `json:"email_verified"`
+	LinkedAt        time.Time `json:"linked_at"`
+	LastLoginAt     time.Time `json:"last_login_at"`
 }

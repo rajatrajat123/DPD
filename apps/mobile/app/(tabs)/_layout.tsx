@@ -1,14 +1,38 @@
 import React from 'react';
 import { Tabs } from 'expo-router';
 import { Text, Platform, StyleSheet } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing } from '../../src/theme';
 
 export default function TabLayout() {
+  const insets = useSafeAreaInsets();
+
+  // Dynamic bottom inset: on Android adapt to 3-button nav, gesture nav, or curved screens
+  const bottomInset = Platform.OS === 'android'
+    ? Math.max(insets.bottom, 16)
+    : (insets.bottom > 0 ? insets.bottom : 12);
+
+  // Tab content area height (icon + label + spacing) is ~52dp, guaranteeing >= 48dp touch targets
+  const tabContentHeight = 52;
+  const tabBarHeight = tabContentHeight + bottomInset;
+
+  // Horizontal insets prevent edge tabs (Discover and Profile) from clipping on curved displays
+  const horizontalInset = Math.max(insets.left, insets.right, 6);
+
   return (
     <Tabs
       screenOptions={{
         headerShown: false,
-        tabBarStyle: styles.tabBar,
+        tabBarHideOnKeyboard: true,
+        tabBarStyle: [
+          styles.tabBar,
+          {
+            height: tabBarHeight,
+            paddingBottom: bottomInset + 4,
+            paddingHorizontal: horizontalInset,
+          },
+        ],
+        tabBarItemStyle: styles.tabBarItem,
         tabBarActiveTintColor: colors.gold,
         tabBarInactiveTintColor: colors.textSubtle,
         tabBarLabelStyle: styles.tabBarLabel,
@@ -78,14 +102,24 @@ const styles = StyleSheet.create({
     backgroundColor: '#0E1017',
     borderTopWidth: 1,
     borderTopColor: colors.borderSubtle,
-    height: Platform.OS === 'ios' ? 88 : 66,
-    paddingBottom: Platform.OS === 'ios' ? 26 : 10,
-    paddingTop: 8,
+    paddingTop: 6,
+    elevation: 8,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: -2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+  },
+  tabBarItem: {
+    minHeight: 48,
+    paddingVertical: 2,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   tabBarLabel: {
     ...typography.caption,
     fontSize: 10,
     fontWeight: '700',
     letterSpacing: 0.5,
+    marginTop: 2,
   },
 });

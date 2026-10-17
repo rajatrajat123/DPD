@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -28,6 +29,12 @@ type Repository interface {
 	CheckActiveMatchEligibility(ctx context.Context, conversationID, userID string) (bool, error)
 	RegisterPushToken(ctx context.Context, userID, token, platform, deviceID string) error
 	LogNotification(ctx context.Context, userID, notifType, channel, title, bodyPreview, status, errReason string) error
+	CreateMessageRequest(ctx context.Context, senderID, recipientID, body string) (*MessageRequest, error)
+	ListMessageRequests(ctx context.Context, recipientID string) ([]*MessageRequest, error)
+	GetMessageRequest(ctx context.Context, requestID string) (*MessageRequest, error)
+	AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (conversationID, matchID string, err error)
+	DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error
+	BlockMessageRequest(ctx context.Context, requestID, recipientID string) error
 }
 
 // -----------------------------------------------------------------------------
@@ -529,6 +536,226 @@ func (r *PostgresRepository) LogNotification(ctx context.Context, userID, notifT
 	return err
 }
 
+func (r *PostgresRepository) CreateMessageRequest(ctx context.Context, senderID, recipientID, body string) (*MessageRequest, error) {
+	query := `
+		INSERT INTO message_requests (sender_user_id, recipient_user_id, body, status, created_at)
+		VALUES ($1, $2, $3, 'PENDING', NOW())
+		RETURNING id, created_at
+	`
+	req := &MessageRequest{
+		SenderUserID:    senderID,
+		RecipientUserID: recipientID,
+		Body:            body,
+		Status:          RequestPending,
+	}
+	err := r.pool.QueryRow(ctx, query, senderID, recipientID, body).Scan(&req.ID, &req.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+func (r *PostgresRepository) ListMessageRequests(ctx context.Context, recipientID string) ([]*MessageRequest, error) {
+	query := `
+		SELECT mr.id, mr.sender_user_id, mr.recipient_user_id, mr.body, mr.status, mr.created_at, mr.responded_at,
+		       p.display_name, EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate))::INT AS age, p.is_photo_verified
+		FROM message_requests mr
+		JOIN profiles p ON p.user_id = mr.sender_user_id
+		WHERE mr.recipient_user_id = $1 AND mr.status = 'PENDING'
+		ORDER BY mr.created_at DESC
+	`
+	rows, err := r.pool.Query(ctx, query, recipientID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var reqs []*MessageRequest
+	for rows.Next() {
+		var mr MessageRequest
+		var displayName string
+		var age int
+		var isPhotoVerified bool
+		if err := rows.Scan(
+			&mr.ID, &mr.SenderUserID, &mr.RecipientUserID, &mr.Body, &mr.Status, &mr.CreatedAt, &mr.RespondedAt,
+			&displayName, &age, &isPhotoVerified,
+		); err != nil {
+			return nil, err
+		}
+		mr.Sender = &ConversationPartner{
+			UserID:          mr.SenderUserID,
+			DisplayName:     displayName,
+			Age:             age,
+			IsPhotoVerified: isPhotoVerified,
+		}
+		reqs = append(reqs, &mr)
+	}
+	return reqs, rows.Err()
+}
+
+func (r *PostgresRepository) GetMessageRequest(ctx context.Context, requestID string) (*MessageRequest, error) {
+	query := `
+		SELECT id, sender_user_id, recipient_user_id, body, status, created_at, responded_at
+		FROM message_requests
+		WHERE id = $1
+	`
+	var mr MessageRequest
+	err := r.pool.QueryRow(ctx, query, requestID).Scan(
+		&mr.ID, &mr.SenderUserID, &mr.RecipientUserID, &mr.Body, &mr.Status, &mr.CreatedAt, &mr.RespondedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, errors.New("message request not found")
+		}
+		return nil, err
+	}
+	return &mr, nil
+}
+
+func (r *PostgresRepository) AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (string, string, error) {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return "", "", err
+	}
+	defer tx.Rollback(ctx)
+
+	var mr MessageRequest
+	err = tx.QueryRow(ctx, `
+		SELECT id, sender_user_id, recipient_user_id, body, status
+		FROM message_requests
+		WHERE id = $1 AND recipient_user_id = $2 FOR UPDATE
+	`, requestID, recipientID).Scan(&mr.ID, &mr.SenderUserID, &mr.RecipientUserID, &mr.Body, &mr.Status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", "", errors.New("message request not found or unauthorized")
+		}
+		return "", "", err
+	}
+
+	_, err = tx.Exec(ctx, `UPDATE message_requests SET status = 'ACCEPTED', responded_at = NOW() WHERE id = $1`, requestID)
+	if err != nil {
+		return "", "", err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO swipes (actor_user_id, target_user_id, direction)
+		VALUES ($1, $2, 'LIKE')
+		ON CONFLICT (actor_user_id, target_user_id) DO UPDATE SET direction = 'LIKE', undone_at = NULL
+	`, recipientID, mr.SenderUserID)
+	if err != nil {
+		return "", "", err
+	}
+	_, err = tx.Exec(ctx, `
+		INSERT INTO swipes (actor_user_id, target_user_id, direction)
+		VALUES ($1, $2, 'LIKE')
+		ON CONFLICT (actor_user_id, target_user_id) DO UPDATE SET direction = 'LIKE', undone_at = NULL
+	`, mr.SenderUserID, recipientID)
+	if err != nil {
+		return "", "", err
+	}
+
+	low, high := canonicalPair(recipientID, mr.SenderUserID)
+	var matchID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO matches (user_low_id, user_high_id, status, matched_at)
+		VALUES ($1, $2, 'ACTIVE', NOW())
+		ON CONFLICT (user_low_id, user_high_id) DO UPDATE SET status = 'ACTIVE', matched_at = NOW(), unmatched_at = NULL
+		RETURNING id
+	`, low, high).Scan(&matchID)
+	if err != nil {
+		return "", "", err
+	}
+
+	var convID string
+	err = tx.QueryRow(ctx, `
+		INSERT INTO conversations (match_id, created_at, last_message_at)
+		VALUES ($1, NOW(), NOW())
+		ON CONFLICT (match_id) DO UPDATE SET match_id = EXCLUDED.match_id
+		RETURNING id
+	`, matchID).Scan(&convID)
+	if err != nil {
+		return "", "", err
+	}
+
+	clientMsgID := fmt.Sprintf("req-%s", requestID)
+	_, _ = tx.Exec(ctx, `
+		INSERT INTO messages (conversation_id, sender_user_id, client_message_id, body, message_type)
+		VALUES ($1, $2, $3, $4, 'TEXT')
+		ON CONFLICT (conversation_id, client_message_id) DO NOTHING
+	`, convID, mr.SenderUserID, clientMsgID, mr.Body)
+
+	_, _ = tx.Exec(ctx, `
+		INSERT INTO user_entitlements (user_id, entitlement_code, source, granted_at, expires_at)
+		VALUES ($1, 'UNLIMITED_SWIPES', 'MATCH_REWARD', NOW(), NOW() + INTERVAL '24 hours'),
+		       ($2, 'UNLIMITED_SWIPES', 'MATCH_REWARD', NOW(), NOW() + INTERVAL '24 hours')
+	`, recipientID, mr.SenderUserID)
+
+	if err := tx.Commit(ctx); err != nil {
+		return "", "", err
+	}
+	return convID, matchID, nil
+}
+
+func (r *PostgresRepository) DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var senderID string
+	err = tx.QueryRow(ctx, `
+		UPDATE message_requests
+		SET status = 'DECLINED', responded_at = NOW()
+		WHERE id = $1 AND recipient_user_id = $2
+		RETURNING sender_user_id
+	`, requestID, recipientID).Scan(&senderID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("message request not found")
+		}
+		return err
+	}
+
+	_, _ = tx.Exec(ctx, `
+		INSERT INTO swipes (actor_user_id, target_user_id, direction)
+		VALUES ($1, $2, 'PASS')
+		ON CONFLICT (actor_user_id, target_user_id) DO UPDATE SET direction = 'PASS', undone_at = NULL
+	`, recipientID, senderID)
+
+	return tx.Commit(ctx)
+}
+
+func (r *PostgresRepository) BlockMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var senderID string
+	err = tx.QueryRow(ctx, `
+		UPDATE message_requests
+		SET status = 'BLOCKED', responded_at = NOW()
+		WHERE id = $1 AND recipient_user_id = $2
+		RETURNING sender_user_id
+	`, requestID, recipientID).Scan(&senderID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return errors.New("message request not found")
+		}
+		return err
+	}
+
+	_, _ = tx.Exec(ctx, `
+		INSERT INTO user_blocks (blocker_user_id, blocked_user_id, reason)
+		VALUES ($1, $2, 'MESSAGE_REQUEST_BLOCKED')
+		ON CONFLICT DO NOTHING
+	`, recipientID, senderID)
+
+	return tx.Commit(ctx)
+}
+
 // -----------------------------------------------------------------------------
 // MemoryRepository
 // -----------------------------------------------------------------------------
@@ -543,6 +770,7 @@ type MemoryRepository struct {
 	matches      map[string]*discovery.Match
 	blocks       map[string]struct{}      // key: blocker:blocked
 	pushTokens   map[string][]string      // key: userID -> list of tokens
+	requests     map[string]*MessageRequest
 	notifLogs    []map[string]any
 	outboxEvents []events.Envelope
 	identRepo    identity.Repository
@@ -557,6 +785,7 @@ func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 		matches:      make(map[string]*discovery.Match),
 		blocks:       make(map[string]struct{}),
 		pushTokens:   make(map[string][]string),
+		requests:     make(map[string]*MessageRequest),
 		notifLogs:    make([]map[string]any, 0),
 		outboxEvents: make([]events.Envelope, 0),
 		identRepo:    identRepo,
@@ -949,4 +1178,145 @@ func (m *MemoryRepository) GetOutboxEvents() []events.Envelope {
 	res := make([]events.Envelope, len(m.outboxEvents))
 	copy(res, m.outboxEvents)
 	return res
+}
+
+func (m *MemoryRepository) CreateMessageRequest(ctx context.Context, senderID, recipientID, body string) (*MessageRequest, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	reqID := fmt.Sprintf("req_%d", time.Now().UnixNano())
+	now := time.Now().UTC()
+	req := &MessageRequest{
+		ID:              reqID,
+		SenderUserID:    senderID,
+		RecipientUserID: recipientID,
+		Body:            body,
+		Status:          RequestPending,
+		CreatedAt:       now,
+	}
+	m.requests[reqID] = req
+	return req, nil
+}
+
+func (m *MemoryRepository) ListMessageRequests(ctx context.Context, recipientID string) ([]*MessageRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var reqs []*MessageRequest
+	for _, req := range m.requests {
+		if req.RecipientUserID == recipientID && req.Status == RequestPending {
+			c := *req
+			if m.identRepo != nil {
+				if prof, err := m.identRepo.GetProfile(ctx, req.SenderUserID); err == nil && prof != nil {
+					c.Sender = &ConversationPartner{
+						UserID:          req.SenderUserID,
+						DisplayName:     prof.DisplayName,
+						Age:             calculateAge(prof.Birthdate, time.Now().UTC()),
+						IsPhotoVerified: prof.IsPhotoVerified,
+					}
+				}
+			}
+			reqs = append(reqs, &c)
+		}
+	}
+	return reqs, nil
+}
+
+func (m *MemoryRepository) GetMessageRequest(ctx context.Context, requestID string) (*MessageRequest, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	req, ok := m.requests[requestID]
+	if !ok {
+		return nil, errors.New("message request not found")
+	}
+	c := *req
+	return &c, nil
+}
+
+func (m *MemoryRepository) AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (string, string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	req, ok := m.requests[requestID]
+	if !ok || req.RecipientUserID != recipientID {
+		return "", "", errors.New("message request not found or unauthorized")
+	}
+	now := time.Now().UTC()
+	req.Status = RequestAccepted
+	req.RespondedAt = &now
+
+	low, high := canonicalPair(recipientID, req.SenderUserID)
+	matchID := fmt.Sprintf("match_%s_%s", low, high)
+	match := &discovery.Match{
+		ID:         matchID,
+		UserLowID:  low,
+		UserHighID: high,
+		Status:     discovery.MatchActive,
+		MatchedAt:  now,
+	}
+	m.matches[matchID] = match
+
+	convID := fmt.Sprintf("conv_%s", matchID)
+	conv := &Conversation{
+		ID:                convID,
+		MatchID:           matchID,
+		ParticipantLowID:  low,
+		ParticipantHighID: high,
+		LastMessageAt:     &now,
+		CreatedAt:         now,
+	}
+	m.convs[convID] = conv
+	m.convByMatch[matchID] = convID
+
+	msg := &Message{
+		ID:              fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		ConversationID:  convID,
+		SenderUserID:    req.SenderUserID,
+		ClientMessageID: fmt.Sprintf("req-%s", requestID),
+		Body:            req.Body,
+		MessageType:     MessageTypeText,
+		CreatedAt:       now,
+	}
+	m.messages[convID] = append(m.messages[convID], msg)
+
+	return convID, matchID, nil
+}
+
+func (m *MemoryRepository) DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	req, ok := m.requests[requestID]
+	if !ok || req.RecipientUserID != recipientID {
+		return errors.New("message request not found")
+	}
+	now := time.Now().UTC()
+	req.Status = RequestDeclined
+	req.RespondedAt = &now
+	return nil
+}
+
+func (m *MemoryRepository) BlockMessageRequest(ctx context.Context, requestID, recipientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	req, ok := m.requests[requestID]
+	if !ok || req.RecipientUserID != recipientID {
+		return errors.New("message request not found")
+	}
+	now := time.Now().UTC()
+	req.Status = RequestBlocked
+	req.RespondedAt = &now
+	m.blocks[recipientID+":"+req.SenderUserID] = struct{}{}
+	return nil
+}
+
+func canonicalPair(u1, u2 string) (low, high string) {
+	if strings.Compare(u1, u2) < 0 {
+		return u1, u2
+	}
+	return u2, u1
+}
+
+func calculateAge(birthdate time.Time, now time.Time) int {
+	years := now.Year() - birthdate.Year()
+	if now.YearDay() < birthdate.YearDay() {
+		years--
+	}
+	return years
 }

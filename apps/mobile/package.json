@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "expo": "~57.0.28",
+    "expo-auth-session": "~57.0.16",
     "expo-constants": "~57.0.21",
     "expo-image-manipulator": "~57.0.21",
     "expo-image-picker": "~57.0.20",
@@ -22,6 +23,7 @@
     "expo-screen-capture": "~57.0.4",
     "expo-secure-store": "~57.0.4",
     "expo-status-bar": "~57.0.1",
+    "expo-web-browser": "~57.0.3",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "react-native": "0.86.3",

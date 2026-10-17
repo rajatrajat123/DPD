@@ -14,11 +14,25 @@ export interface RegisterPayload {
   preferred_genders?: string[];
   looking_for?: string[];
   referral_code?: string;
+  height_cm?: number;
+  weight_kg?: number;
 }
 
 export interface LoginPayload {
   email: string;
   password: string;
+}
+
+export interface GoogleAuthPayload {
+  id_token: string;
+  display_name?: string;
+  birthdate?: string;
+  gender_identities?: string[];
+  sexual_orientations?: string[];
+  looking_for?: string[];
+  preferred_genders?: string[];
+  height_cm?: number;
+  weight_kg?: number;
 }
 
 export interface AuthResponse {
@@ -111,6 +125,16 @@ export const authService = {
   },
 
   /**
+   * Authenticates via Google OAuth ID token, supporting instant signup and safe account linking
+   */
+  async loginWithGoogle(payload: GoogleAuthPayload): Promise<AuthResponse> {
+    const res = await api.post<AuthResponse>('/api/v1/auth/google', payload);
+    await secureStorage.saveTokens(res.access_token, res.refresh_token);
+    await secureStorage.saveUserData(res.user as unknown as Record<string, unknown>);
+    return res;
+  },
+
+  /**
    * Securely revokes session tokens on server and clears device keychain
    */
   async logout(): Promise<void> {
@@ -166,6 +190,8 @@ export const authService = {
       rawProfile.non_smoker_dealbreaker = true;
     }
 
+    rawProfile.is_complete = (res as any).is_complete ?? (Boolean(rawProfile.height_cm) && Boolean(rawProfile.weight_kg));
+
     // Populate profile gallery photos from media service
     try {
       const photos = await mediaUploader.getMyGallery();
@@ -183,7 +209,7 @@ export const authService = {
   },
 
   /**
-   * Updates display name, bio, pronouns, intents, and habits with strict backend DTO alignment
+   * Updates display name, bio, pronouns, intents, habits, height, and weight with strict backend DTO alignment
    */
   async updateMyProfile(updates: Partial<Profile>): Promise<Profile> {
     const payload: Record<string, unknown> = {};
@@ -212,6 +238,15 @@ export const authService = {
     }
     if (updates.relationship_intents !== undefined) {
       payload.relationship_intents = updates.relationship_intents;
+    }
+    if (updates.height_cm !== undefined) {
+      payload.height_cm = updates.height_cm;
+    }
+    if (updates.weight_kg !== undefined) {
+      payload.weight_kg = updates.weight_kg;
+    }
+    if (updates.visibility_settings !== undefined) {
+      payload.visibility_settings = updates.visibility_settings;
     }
 
     // Map smoking preference to backend smoking_habit

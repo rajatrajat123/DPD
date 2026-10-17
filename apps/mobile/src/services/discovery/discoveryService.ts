@@ -53,6 +53,8 @@ export function normalizeCandidate(raw: any): DiscoveryCandidate {
     compatibility_score: raw.compatibility_score || 0,
     is_verified: Boolean(raw.is_photo_verified || raw.is_verified),
     relationship_structure: raw.relationship_structure,
+    height_cm: raw.height_cm,
+    weight_kg: raw.weight_kg,
   };
 }
 
@@ -165,6 +167,11 @@ export const discoveryService = {
     if (prefs.max_distance_km !== undefined) payload.max_distance_km = prefs.max_distance_km;
     if (prefs.preferred_genders !== undefined) payload.preferred_genders = prefs.preferred_genders;
     if (prefs.preferred_intents !== undefined) payload.preferred_intents = prefs.preferred_intents;
+    if (prefs.preferred_orientations !== undefined) payload.preferred_orientations = prefs.preferred_orientations;
+    if (prefs.min_height_cm !== undefined) payload.min_height_cm = prefs.min_height_cm;
+    if (prefs.max_height_cm !== undefined) payload.max_height_cm = prefs.max_height_cm;
+    if (prefs.min_weight_kg !== undefined) payload.min_weight_kg = prefs.min_weight_kg;
+    if (prefs.max_weight_kg !== undefined) payload.max_weight_kg = prefs.max_weight_kg;
     if (prefs.verified_only !== undefined) payload.verified_profiles_only = prefs.verified_only;
 
     if (prefs.dealbreakers) {
@@ -185,6 +192,11 @@ export const discoveryService = {
       max_distance_km: res.max_distance_km ?? 50,
       preferred_genders: res.preferred_genders ?? [],
       preferred_intents: res.preferred_intents ?? [],
+      preferred_orientations: res.preferred_orientations ?? [],
+      min_height_cm: res.min_height_cm,
+      max_height_cm: res.max_height_cm,
+      min_weight_kg: res.min_weight_kg,
+      max_weight_kg: res.max_weight_kg,
       dealbreaker_non_smoker: Boolean(res.dealbreakers?.non_smoker_only),
       verified_only: Boolean(res.verified_profiles_only),
       dealbreakers: res.dealbreakers,

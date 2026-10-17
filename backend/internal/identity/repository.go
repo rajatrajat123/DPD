@@ -22,6 +22,7 @@ var (
 	ErrPreferencesNotFound   = errors.New("preferences not found")
 	ErrVerificationNotFound  = errors.New("verification record not found")
 	ErrPasswordResetNotFound = errors.New("password reset token not found")
+	ErrOAuthIdentityNotFound = errors.New("oauth identity not found")
 )
 
 type Repository interface {
@@ -57,36 +58,44 @@ type Repository interface {
 
 	UpsertPreferences(ctx context.Context, pref *DatingPreferences) error
 	GetPreferences(ctx context.Context, userID string) (*DatingPreferences, error)
+
+	CreateOAuthIdentity(ctx context.Context, ident *OAuthIdentity) error
+	GetOAuthIdentity(ctx context.Context, provider, providerSubject string) (*OAuthIdentity, error)
+	GetOAuthIdentityByEmail(ctx context.Context, provider, email string) (*OAuthIdentity, error)
+	UpdateOAuthIdentityLastLogin(ctx context.Context, id string) error
+	ListOAuthIdentitiesForUser(ctx context.Context, userID string) ([]*OAuthIdentity, error)
 }
 
 // MemoryRepository provides a concurrent, in-memory implementation of Repository.
 type MemoryRepository struct {
-	mu            sync.RWMutex
-	usersByID     map[string]*User
-	usersByEmail  map[string]*User
-	usersByPhone  map[string]*User
-	sessions      map[string]*UserSession
-	verifications map[string]*AccountVerification
-	verifSeq      map[string]int64
-	seqCounter    int64
-	resets        map[string]*PasswordReset
-	profiles      map[string]*Profile
-	locations     map[string]*ProfileLocation
-	preferences   map[string]*DatingPreferences
+	mu              sync.RWMutex
+	usersByID       map[string]*User
+	usersByEmail    map[string]*User
+	usersByPhone    map[string]*User
+	sessions        map[string]*UserSession
+	verifications   map[string]*AccountVerification
+	verifSeq        map[string]int64
+	seqCounter      int64
+	resets          map[string]*PasswordReset
+	profiles        map[string]*Profile
+	locations       map[string]*ProfileLocation
+	preferences     map[string]*DatingPreferences
+	oauthIdentities map[string]*OAuthIdentity
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		usersByID:     make(map[string]*User),
-		usersByEmail:  make(map[string]*User),
-		usersByPhone:  make(map[string]*User),
-		sessions:      make(map[string]*UserSession),
-		verifications: make(map[string]*AccountVerification),
-		verifSeq:      make(map[string]int64),
-		resets:        make(map[string]*PasswordReset),
-		profiles:      make(map[string]*Profile),
-		locations:     make(map[string]*ProfileLocation),
-		preferences:   make(map[string]*DatingPreferences),
+		usersByID:       make(map[string]*User),
+		usersByEmail:    make(map[string]*User),
+		usersByPhone:    make(map[string]*User),
+		sessions:        make(map[string]*UserSession),
+		verifications:   make(map[string]*AccountVerification),
+		verifSeq:        make(map[string]int64),
+		resets:          make(map[string]*PasswordReset),
+		profiles:        make(map[string]*Profile),
+		locations:       make(map[string]*ProfileLocation),
+		preferences:     make(map[string]*DatingPreferences),
+		oauthIdentities: make(map[string]*OAuthIdentity),
 	}
 }
 
@@ -482,6 +491,74 @@ func (m *MemoryRepository) GetPreferences(_ context.Context, userID string) (*Da
 	return &cloned, nil
 }
 
+func (m *MemoryRepository) CreateOAuthIdentity(_ context.Context, ident *OAuthIdentity) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	key := strings.ToLower(ident.Provider) + ":" + ident.ProviderSubject
+	if _, exists := m.oauthIdentities[key]; exists {
+		return errors.New("oauth identity already exists")
+	}
+	cp := *ident
+	m.oauthIdentities[key] = &cp
+	return nil
+}
+
+func (m *MemoryRepository) GetOAuthIdentity(_ context.Context, provider, providerSubject string) (*OAuthIdentity, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	key := strings.ToLower(provider) + ":" + providerSubject
+	ident, exists := m.oauthIdentities[key]
+	if !exists {
+		return nil, ErrOAuthIdentityNotFound
+	}
+	cp := *ident
+	return &cp, nil
+}
+
+func (m *MemoryRepository) GetOAuthIdentityByEmail(_ context.Context, provider, email string) (*OAuthIdentity, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	normProvider := strings.ToLower(provider)
+	for _, ident := range m.oauthIdentities {
+		if strings.ToLower(ident.Provider) == normProvider && strings.ToLower(ident.Email) == normEmail {
+			cp := *ident
+			return &cp, nil
+		}
+	}
+	return nil, ErrOAuthIdentityNotFound
+}
+
+func (m *MemoryRepository) UpdateOAuthIdentityLastLogin(_ context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, ident := range m.oauthIdentities {
+		if ident.ID == id {
+			ident.LastLoginAt = time.Now().UTC()
+			return nil
+		}
+	}
+	return ErrOAuthIdentityNotFound
+}
+
+func (m *MemoryRepository) ListOAuthIdentitiesForUser(_ context.Context, userID string) ([]*OAuthIdentity, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []*OAuthIdentity
+	for _, ident := range m.oauthIdentities {
+		if ident.UserID == userID {
+			cp := *ident
+			result = append(result, &cp)
+		}
+	}
+	return result, nil
+}
+
 // PostgresRepository implements Repository using live PostgreSQL connection pool.
 type PostgresRepository struct {
 	pool *pgxpool.Pool
@@ -825,6 +902,12 @@ func (p *PostgresRepository) UpsertProfile(ctx context.Context, pr *Profile) err
 	if pr.RelationshipIntents == nil {
 		pr.RelationshipIntents = []string{}
 	}
+	if pr.Languages == nil {
+		pr.Languages = []string{}
+	}
+	if pr.Interests == nil {
+		pr.Interests = []string{}
+	}
 
 	query := `
 		INSERT INTO profiles (
@@ -832,8 +915,8 @@ func (p *PostgresRepository) UpsertProfile(ctx context.Context, pr *Profile) err
 			sexual_orientations, relationship_intents, relationship_structure,
 			smoking_habit, drinking_habit,
 			visibility_settings, is_photo_verified, discrete_mode_enabled,
-			incognito_enabled, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			incognito_enabled, height_cm, weight_kg, languages, interests, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		ON CONFLICT (user_id) DO UPDATE SET
 			display_name = EXCLUDED.display_name,
 			bio = EXCLUDED.bio,
@@ -847,6 +930,10 @@ func (p *PostgresRepository) UpsertProfile(ctx context.Context, pr *Profile) err
 			visibility_settings = EXCLUDED.visibility_settings,
 			discrete_mode_enabled = EXCLUDED.discrete_mode_enabled,
 			incognito_enabled = EXCLUDED.incognito_enabled,
+			height_cm = EXCLUDED.height_cm,
+			weight_kg = EXCLUDED.weight_kg,
+			languages = EXCLUDED.languages,
+			interests = EXCLUDED.interests,
 			updated_at = NOW()
 	`
 
@@ -860,7 +947,7 @@ func (p *PostgresRepository) UpsertProfile(ctx context.Context, pr *Profile) err
 		pr.SexualOrientations, pr.RelationshipIntents, relStruct,
 		pr.SmokingHabit, pr.DrinkingHabit,
 		visJSON, pr.IsPhotoVerified, pr.DiscreteModeEnabled,
-		pr.IncognitoEnabled, pr.CreatedAt, pr.UpdatedAt,
+		pr.IncognitoEnabled, pr.HeightCm, pr.WeightKg, pr.Languages, pr.Interests, pr.CreatedAt, pr.UpdatedAt,
 	)
 	return err
 }
@@ -871,7 +958,7 @@ func (p *PostgresRepository) GetProfile(ctx context.Context, userID string) (*Pr
 		       sexual_orientations, relationship_intents, relationship_structure,
 		       smoking_habit, drinking_habit,
 		       visibility_settings, is_photo_verified, discrete_mode_enabled,
-		       incognito_enabled, created_at, updated_at
+		       incognito_enabled, height_cm, weight_kg, languages, interests, created_at, updated_at
 		FROM profiles WHERE user_id = $1
 	`
 	var pr Profile
@@ -883,7 +970,7 @@ func (p *PostgresRepository) GetProfile(ctx context.Context, userID string) (*Pr
 		&pr.SexualOrientations, &pr.RelationshipIntents, &relStructure,
 		&pr.SmokingHabit, &pr.DrinkingHabit,
 		&visBytes, &pr.IsPhotoVerified, &pr.DiscreteModeEnabled,
-		&pr.IncognitoEnabled, &pr.CreatedAt, &pr.UpdatedAt,
+		&pr.IncognitoEnabled, &pr.HeightCm, &pr.WeightKg, &pr.Languages, &pr.Interests, &pr.CreatedAt, &pr.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrProfileNotFound
@@ -951,12 +1038,22 @@ func (p *PostgresRepository) UpsertPreferences(ctx context.Context, pref *Dating
 	if pref.PreferredIntents == nil {
 		pref.PreferredIntents = []string{}
 	}
+	if pref.PreferredOrientations == nil {
+		pref.PreferredOrientations = []string{}
+	}
+	if pref.PreferredLanguages == nil {
+		pref.PreferredLanguages = []string{}
+	}
+	if pref.PreferredInterests == nil {
+		pref.PreferredInterests = []string{}
+	}
 
 	query := `
 		INSERT INTO dating_preferences (
 			user_id, min_age, max_age, max_distance_km, preferred_genders, preferred_intents, verified_profiles_only,
-			dealbreakers, notification_preferences, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+			dealbreakers, notification_preferences, min_height_cm, max_height_cm, min_weight_kg, max_weight_kg,
+			preferred_orientations, preferred_languages, preferred_interests, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
 		ON CONFLICT (user_id) DO UPDATE SET
 			min_age = EXCLUDED.min_age,
 			max_age = EXCLUDED.max_age,
@@ -966,12 +1063,21 @@ func (p *PostgresRepository) UpsertPreferences(ctx context.Context, pref *Dating
 			verified_profiles_only = EXCLUDED.verified_profiles_only,
 			dealbreakers = EXCLUDED.dealbreakers,
 			notification_preferences = EXCLUDED.notification_preferences,
+			min_height_cm = EXCLUDED.min_height_cm,
+			max_height_cm = EXCLUDED.max_height_cm,
+			min_weight_kg = EXCLUDED.min_weight_kg,
+			max_weight_kg = EXCLUDED.max_weight_kg,
+			preferred_orientations = EXCLUDED.preferred_orientations,
+			preferred_languages = EXCLUDED.preferred_languages,
+			preferred_interests = EXCLUDED.preferred_interests,
 			updated_at = NOW()
 	`
 	_, err = p.pool.Exec(ctx, query,
 		pref.UserID, pref.MinAge, pref.MaxAge, pref.MaxDistanceKm,
 		pref.PreferredGenders, pref.PreferredIntents, pref.VerifiedProfilesOnly,
 		dealbreakersJSON, notifJSON,
+		pref.MinHeightCm, pref.MaxHeightCm, pref.MinWeightKg, pref.MaxWeightKg,
+		pref.PreferredOrientations, pref.PreferredLanguages, pref.PreferredInterests,
 	)
 	return err
 }
@@ -979,7 +1085,8 @@ func (p *PostgresRepository) UpsertPreferences(ctx context.Context, pref *Dating
 func (p *PostgresRepository) GetPreferences(ctx context.Context, userID string) (*DatingPreferences, error) {
 	query := `
 		SELECT user_id, min_age, max_age, max_distance_km, preferred_genders, preferred_intents, verified_profiles_only,
-		       dealbreakers, notification_preferences, updated_at
+		       dealbreakers, notification_preferences, min_height_cm, max_height_cm, min_weight_kg, max_weight_kg,
+		       preferred_orientations, preferred_languages, preferred_interests, updated_at
 		FROM dating_preferences WHERE user_id = $1
 	`
 	var pref DatingPreferences
@@ -989,7 +1096,10 @@ func (p *PostgresRepository) GetPreferences(ctx context.Context, userID string) 
 	err := p.pool.QueryRow(ctx, query, userID).Scan(
 		&pref.UserID, &pref.MinAge, &pref.MaxAge, &pref.MaxDistanceKm,
 		&pref.PreferredGenders, &pref.PreferredIntents, &pref.VerifiedProfilesOnly,
-		&dealbreakersBytes, &notifBytes, &pref.UpdatedAt,
+		&dealbreakersBytes, &notifBytes,
+		&pref.MinHeightCm, &pref.MaxHeightCm, &pref.MinWeightKg, &pref.MaxWeightKg,
+		&pref.PreferredOrientations, &pref.PreferredLanguages, &pref.PreferredInterests,
+		&pref.UpdatedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrPreferencesNotFound
@@ -1006,4 +1116,120 @@ func (p *PostgresRepository) GetPreferences(ctx context.Context, userID string) 
 		pref.NotificationPreferences = DefaultNotificationPreferences()
 	}
 	return &pref, nil
+}
+
+func (p *PostgresRepository) CreateOAuthIdentity(ctx context.Context, ident *OAuthIdentity) error {
+	query := `
+		INSERT INTO user_oauth_identities (id, user_id, provider, provider_subject, email, email_verified, linked_at, last_login_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+	`
+	_, err := p.pool.Exec(ctx, query,
+		ident.ID,
+		ident.UserID,
+		ident.Provider,
+		ident.ProviderSubject,
+		ident.Email,
+		ident.EmailVerified,
+		ident.LinkedAt,
+		ident.LastLoginAt,
+	)
+	return err
+}
+
+func (p *PostgresRepository) GetOAuthIdentity(ctx context.Context, provider, providerSubject string) (*OAuthIdentity, error) {
+	query := `
+		SELECT id, user_id, provider, provider_subject, email, email_verified, linked_at, last_login_at
+		FROM user_oauth_identities
+		WHERE provider = $1 AND provider_subject = $2
+	`
+	var ident OAuthIdentity
+	err := p.pool.QueryRow(ctx, query, provider, providerSubject).Scan(
+		&ident.ID,
+		&ident.UserID,
+		&ident.Provider,
+		&ident.ProviderSubject,
+		&ident.Email,
+		&ident.EmailVerified,
+		&ident.LinkedAt,
+		&ident.LastLoginAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrOAuthIdentityNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ident, nil
+}
+
+func (p *PostgresRepository) GetOAuthIdentityByEmail(ctx context.Context, provider, email string) (*OAuthIdentity, error) {
+	query := `
+		SELECT id, user_id, provider, provider_subject, email, email_verified, linked_at, last_login_at
+		FROM user_oauth_identities
+		WHERE provider = $1 AND email = $2
+		LIMIT 1
+	`
+	var ident OAuthIdentity
+	err := p.pool.QueryRow(ctx, query, provider, email).Scan(
+		&ident.ID,
+		&ident.UserID,
+		&ident.Provider,
+		&ident.ProviderSubject,
+		&ident.Email,
+		&ident.EmailVerified,
+		&ident.LinkedAt,
+		&ident.LastLoginAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrOAuthIdentityNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ident, nil
+}
+
+func (p *PostgresRepository) UpdateOAuthIdentityLastLogin(ctx context.Context, id string) error {
+	query := `UPDATE user_oauth_identities SET last_login_at = $1 WHERE id = $2`
+	tag, err := p.pool.Exec(ctx, query, time.Now().UTC(), id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrOAuthIdentityNotFound
+	}
+	return nil
+}
+
+func (p *PostgresRepository) ListOAuthIdentitiesForUser(ctx context.Context, userID string) ([]*OAuthIdentity, error) {
+	query := `
+		SELECT id, user_id, provider, provider_subject, email, email_verified, linked_at, last_login_at
+		FROM user_oauth_identities
+		WHERE user_id = $1
+		ORDER BY linked_at ASC
+	`
+	rows, err := p.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var idents []*OAuthIdentity
+	for rows.Next() {
+		var ident OAuthIdentity
+		if err := rows.Scan(
+			&ident.ID,
+			&ident.UserID,
+			&ident.Provider,
+			&ident.ProviderSubject,
+			&ident.Email,
+			&ident.EmailVerified,
+			&ident.LinkedAt,
+			&ident.LastLoginAt,
+		); err != nil {
+			return nil, err
+		}
+		idents = append(idents, &ident)
+	}
+	return idents, rows.Err()
 }

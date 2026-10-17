@@ -386,3 +386,159 @@ func (h *Handler) Rewind(w http.ResponseWriter, r *http.Request) {
 
 	apperror.WriteJSON(w, http.StatusOK, resp)
 }
+
+// LikesYou handles GET /api/v1/discovery/likes-you.
+func (h *Handler) LikesYou(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	limit := 20
+	offset := 0
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 50 {
+			limit = v
+		}
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
+			offset = v
+		}
+	}
+
+	resp, err := h.svc.GetLikesYou(r.Context(), authUser.ID, limit, offset)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, resp)
+}
+
+// RevealLike handles POST /api/v1/discovery/likes-you/reveal.
+func (h *Handler) RevealLike(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	var req RevealLikeRequest
+	if apiErr := validator.DecodeAndValidate(w, r, 16*1024, &req); apiErr != nil {
+		apperror.WriteError(w, reqID, apiErr)
+		return
+	}
+
+	card, source, err := h.svc.RevealLike(r.Context(), authUser.ID, req.TargetUserID)
+	if err != nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, RevealLikeResponse{
+		Status: "REVEALED",
+		Card:   *card,
+		Source: source,
+	})
+}
+
+// MessageRequests handles GET and POST for /api/v1/discovery/message-requests.
+func (h *Handler) MessageRequests(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		folder := r.URL.Query().Get("folder")
+		if folder == "" {
+			folder = "received"
+		}
+		requests, err := h.svc.ListMessageRequests(r.Context(), authUser.ID, folder)
+		if err != nil {
+			h.handleServiceError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, map[string]any{
+			"folder":   folder,
+			"count":    len(requests),
+			"requests": requests,
+		})
+
+	case http.MethodPost:
+		var req SendMessageRequestPayload
+		if apiErr := validator.DecodeAndValidate(w, r, 32*1024, &req); apiErr != nil {
+			apperror.WriteError(w, reqID, apiErr)
+			return
+		}
+
+		created, err := h.svc.SendMessageRequest(r.Context(), authUser.ID, req)
+		if err != nil {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
+			return
+		}
+
+		apperror.WriteJSON(w, http.StatusCreated, created)
+
+	default:
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+	}
+}
+
+// RespondMessageRequest handles POST /api/v1/discovery/message-requests/{id}/respond.
+func (h *Handler) RespondMessageRequest(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	pathRem := strings.TrimPrefix(r.URL.Path, "/api/v1/discovery/message-requests/")
+	parts := strings.Split(pathRem, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Message request ID required in path"))
+		return
+	}
+	requestID := parts[0]
+
+	var body struct {
+		Action string `json:"action"`
+	}
+	if apiErr := validator.DecodeAndValidate(w, r, 8*1024, &body); apiErr != nil {
+		apperror.WriteError(w, reqID, apiErr)
+		return
+	}
+
+	if err := h.svc.RespondMessageRequest(r.Context(), authUser.ID, requestID, body.Action); err != nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"id":     requestID,
+		"status": strings.ToUpper(strings.TrimSpace(body.Action)),
+	})
+}

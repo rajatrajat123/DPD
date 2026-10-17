@@ -300,29 +300,34 @@ func SeedDevProfiles(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 			isPhotoVerified := (i%2 == 0)
 
 			bio := fmt.Sprintf("Hi, I'm %s. Queer creative exploring local coffee, community art, and good conversation. (%s)", name, SeedMarkerTag)
+			heightCm := 155 + (i % 40)
+			weightKg := 50 + (i % 45)
 
 			profileQuery := `
 				INSERT INTO profiles (
 					user_id, display_name, birthdate, bio, pronouns, gender_identities,
 					sexual_orientations, relationship_intents, relationship_structure,
 					visibility_settings, is_photo_verified, discrete_mode_enabled,
-					incognito_enabled, smoking_habit, drinking_habit, created_at, updated_at
+					incognito_enabled, smoking_habit, drinking_habit, height_cm, weight_kg, created_at, updated_at
 				) VALUES (
 					$1, $2, $3, $4, $5, $6,
 					$7, $8, $9,
-					'{"pronouns":"PUBLIC","gender_identity":"PUBLIC","sexual_orientation":"PUBLIC"}',
-					$10, FALSE, FALSE, $11, $12, NOW(), NOW()
+					'{"pronouns":"PUBLIC","gender_identity":"PUBLIC","sexual_orientation":"PUBLIC","height":"PUBLIC","weight":"PUBLIC"}',
+					$10, FALSE, FALSE, $11, $12, $13, $14, NOW(), NOW()
 				)
 				ON CONFLICT (user_id) DO UPDATE SET
 					display_name = EXCLUDED.display_name,
 					bio = EXCLUDED.bio,
 					is_photo_verified = EXCLUDED.is_photo_verified,
 					smoking_habit = EXCLUDED.smoking_habit,
-					drinking_habit = EXCLUDED.drinking_habit;
+					drinking_habit = EXCLUDED.drinking_habit,
+					height_cm = EXCLUDED.height_cm,
+					weight_kg = EXCLUDED.weight_kg;
 			`
 			_, err = tx.Exec(ctx, profileQuery,
 				userID, name, birthdate, bio, []string{"they/them"}, genders,
 				orientations, intents, structure, isPhotoVerified, smoking, drinking,
+				heightCm, weightKg,
 			)
 			if err != nil {
 				_ = tx.Rollback(ctx)

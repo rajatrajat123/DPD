@@ -1,0 +1,170 @@
+import React, { useState, useEffect } from 'react';
+import {
+  View,
+  TextInput,
+  TouchableOpacity,
+  Text,
+  StyleSheet,
+  ActivityIndicator,
+  Platform,
+  Keyboard,
+} from 'react-native';
+import { colors, typography, spacing, borderRadius } from '../theme';
+
+interface QuickMessageComposerProps {
+  recipientId?: string;
+  recipientName: string;
+  onSend: (message: string) => Promise<void> | void;
+  disabled?: boolean;
+  onFocus?: () => void;
+  onBlur?: () => void;
+}
+
+export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
+  recipientId,
+  recipientName,
+  onSend,
+  disabled = false,
+  onFocus,
+  onBlur,
+}) => {
+  const [text, setText] = useState('');
+  const [isSending, setIsSending] = useState(false);
+
+  // Clear draft only when active recipient changes
+  useEffect(() => {
+    setText('');
+  }, [recipientId || recipientName]);
+
+  const trimmed = text.trim();
+  const charLimit = 500;
+  const canSend = trimmed.length > 0 && trimmed.length <= charLimit && !isSending && !disabled;
+
+  const handleSend = async () => {
+    if (!canSend) return;
+    setIsSending(true);
+    const draftText = trimmed;
+    try {
+      await onSend(draftText);
+      setText('');
+      Keyboard.dismiss();
+    } catch (err) {
+      // Strictly preserve draft on network or quota send failures
+      setText(draftText);
+      console.warn('Failed to send intro note, draft preserved:', err);
+    } finally {
+      setIsSending(false);
+    }
+  };
+
+  return (
+    <View style={styles.container}>
+      <View style={styles.inputWrapper}>
+        <TextInput
+          style={styles.input}
+          value={text}
+          onChangeText={setText}
+          onFocus={onFocus}
+          onBlur={onBlur}
+          placeholder={`Intro note for ${recipientName || 'Member'}...`}
+          placeholderTextColor={colors.textSubtle}
+          maxLength={charLimit}
+          multiline={false}
+          returnKeyType="send"
+          onSubmitEditing={handleSend}
+          editable={!isSending && !disabled}
+          testID="quick-message-input"
+        />
+        {text.length > 0 && (
+          <Text style={styles.charCount}>
+            {text.length}/{charLimit}
+          </Text>
+        )}
+      </View>
+
+      <TouchableOpacity
+        style={[styles.sendButton, canSend ? styles.sendButtonActive : styles.sendButtonDisabled]}
+        onPress={handleSend}
+        disabled={!canSend}
+        activeOpacity={0.8}
+        testID="quick-message-send-btn"
+        accessibilityRole="button"
+        accessibilityLabel="Send Intro Note"
+      >
+        {isSending ? (
+          <ActivityIndicator size="small" color="#FFFFFF" />
+        ) : (
+          <Text style={[styles.sendIcon, canSend ? styles.sendIconActive : styles.sendIconDisabled]}>
+            ➤
+          </Text>
+        )}
+      </TouchableOpacity>
+    </View>
+  );
+};
+
+const styles = StyleSheet.create({
+  container: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.xs,
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+  },
+  inputWrapper: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#1E232B',
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+    paddingHorizontal: spacing.md,
+    height: 42,
+  },
+  input: {
+    flex: 1,
+    color: colors.textPrimary,
+    fontSize: 13,
+    paddingVertical: Platform.OS === 'ios' ? 8 : 4,
+  },
+  charCount: {
+    fontSize: 10,
+    color: colors.textSubtle,
+    marginLeft: spacing.xs,
+  },
+  sendButton: {
+    width: 44,
+    height: 44,
+    minWidth: 44,
+    minHeight: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginLeft: spacing.sm,
+  },
+  sendButtonActive: {
+    backgroundColor: colors.gold,
+    shadowColor: colors.gold,
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  sendButtonDisabled: {
+    backgroundColor: '#1E232B',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.06)',
+  },
+  sendIcon: {
+    fontSize: 16,
+  },
+  sendIconActive: {
+    color: '#090A0E',
+  },
+  sendIconDisabled: {
+    color: colors.textSubtle,
+  },
+});
