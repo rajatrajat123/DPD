@@ -45,6 +45,9 @@ export interface Profile {
   relationship_intents: string[];
   smoking_preference: SmokingPreference;
   smoking_habit?: SmokingPreference;
+  drinking_habit?: 'NEVER' | 'SOCIALLY' | 'FREQUENTLY' | 'SOBER' | 'PREFER_NOT_TO_SAY' | string;
+  relationship_structure?: 'MONOGAMOUS' | 'ENM' | 'POLYAMOROUS' | 'OPEN' | 'EXPLORING' | string;
+  interests?: string[];
   non_smoker_dealbreaker: boolean;
   height_cm?: number;
   weight_kg?: number;

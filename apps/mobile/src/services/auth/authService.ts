@@ -254,6 +254,15 @@ export const authService = {
     if (habit !== undefined) {
       payload.smoking_habit = habit;
     }
+    if (updates.drinking_habit !== undefined) {
+      payload.drinking_habit = updates.drinking_habit;
+    }
+    if (updates.relationship_structure !== undefined) {
+      payload.relationship_structure = updates.relationship_structure;
+    }
+    if (updates.interests !== undefined) {
+      payload.interests = updates.interests;
+    }
 
     const updated = await api.put<Profile>('/api/v1/profiles/me', payload);
 

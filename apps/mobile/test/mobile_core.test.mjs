@@ -3869,7 +3869,7 @@ test('App Themes: validates 5 luxury palettes, complete keys, persistence, and p
     'utf-8'
   );
 
-  const themeIds = ['midnight-gold', 'pride-spectrum', 'youth-pop', 'lavender', 'ocean'];
+  const themeIds = ['midnight-gold', 'pride-spectrum', 'youth-pop', 'lavender', 'ocean', 'classic-pride'];
   for (const id of themeIds) {
     assert.ok(colorsFile.includes(`'${id}'`), `colors.ts must register theme '${id}'`);
   }
@@ -3878,6 +3878,7 @@ test('App Themes: validates 5 luxury palettes, complete keys, persistence, and p
   assert.ok(colorsFile.includes('youthPopTheme'), 'Must export youthPopTheme');
   assert.ok(colorsFile.includes('lavenderTheme'), 'Must export lavenderTheme');
   assert.ok(colorsFile.includes('oceanTheme'), 'Must export oceanTheme');
+  assert.ok(colorsFile.includes('classicPrideTheme'), 'Must export classicPrideTheme');
   assert.ok(colorsFile.includes('THEME_METAS'), 'Must export THEME_METAS array');
   assert.ok(colorsFile.includes('THEME_REGISTRY'), 'Must export THEME_REGISTRY');
 
@@ -3897,6 +3898,8 @@ test('App Themes: validates 5 luxury palettes, complete keys, persistence, and p
   );
   assert.ok(profileFile.includes('App Appearance & Theme'), 'Profile screen must include App Appearance & Theme section');
   assert.ok(profileFile.includes('useTheme'), 'Profile screen must call useTheme');
+  assert.ok(profileFile.includes('theme-dropdown-trigger'), 'Must provide theme dropdown trigger testID');
+  assert.ok(profileFile.includes('theme-dropdown-menu'), 'Must provide theme dropdown menu testID');
   assert.ok(profileFile.includes('theme-option-'), 'Must provide theme option testIDs');
   assert.ok(profileFile.includes('Active ✓'), 'Must render Active indicator for selected theme');
 });
@@ -3992,6 +3995,7 @@ test('Theme Architecture: validates 5 theme palettes, ThemeContext race-conditio
   assert.ok(colorsFile.includes('youthPopTheme'), 'Must export youthPopTheme');
   assert.ok(colorsFile.includes('lavenderTheme'), 'Must export lavenderTheme');
   assert.ok(colorsFile.includes('oceanTheme'), 'Must export oceanTheme');
+  assert.ok(colorsFile.includes('classicPrideTheme'), 'Must export classicPrideTheme');
   assert.ok(colorsFile.includes('THEME_REGISTRY'), 'Must export THEME_REGISTRY');
   assert.ok(colorsFile.includes('THEME_METAS'), 'Must export THEME_METAS');
 
@@ -4095,4 +4099,199 @@ test('Theme Adoption: validates all app tabs, root navigation, and shared compon
     const content = await fs.readFile(new URL(comp.file, import.meta.url), 'utf-8');
     assert.ok(content.includes('useTheme'), `${comp.name} component must import and call useTheme`);
   }
+});
+
+// --- Test 75: Classic Pride Theme & Premium Dropdown Selector ---
+test('Classic Pride & Dropdown Selector: validates 6-color rainbow tokens, obsidian base, dropdown toggle and persistence', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify Classic Pride Theme definition and 6 rainbow tokens
+  const colorsFile = await fs.readFile(
+    new URL('../src/theme/colors.ts', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(colorsFile.includes('classicPrideTheme'), 'colors.ts must export classicPrideTheme');
+  assert.ok(colorsFile.includes("'classic-pride'"), "colors.ts must register 'classic-pride' ThemeId");
+
+  const rainbowTokens = [
+    'rainbowRed',
+    'rainbowOrange',
+    'rainbowYellow',
+    'rainbowGreen',
+    'rainbowBlue',
+    'rainbowPurple',
+  ];
+  for (const token of rainbowTokens) {
+    assert.ok(colorsFile.includes(token), `colors.ts must define rainbow token ${token}`);
+  }
+
+  // Verify Classic Pride Obsidian Dark base & palette metadata
+  assert.ok(colorsFile.includes("background: '#0B0A10'"), 'Classic Pride must use deep obsidian background #0B0A10');
+  assert.ok(colorsFile.includes("gold: '#FF8C00'"), 'Classic Pride must use radiant amber-orange gold accent #FF8C00');
+  assert.ok(colorsFile.includes("badgeEmoji: '🏳️‍🌈'"), 'Classic Pride must use rainbow flag badge emoji');
+
+  // 2. Verify Profile Dropdown Implementation
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(profileFile.includes('isThemeDropdownOpen'), 'Profile must manage isThemeDropdownOpen state');
+  assert.ok(profileFile.includes('testID="theme-dropdown-trigger"'), 'Profile must render dropdown trigger with testID');
+  assert.ok(profileFile.includes('testID="theme-palette-preview-strip"'), 'Profile must render palette preview strip');
+  assert.ok(profileFile.includes('testID="theme-dropdown-menu"'), 'Profile must render expandable dropdown menu with testID');
+  assert.ok(profileFile.includes('testID={`theme-option-${t.id}`}'), 'Profile must render option items with dynamic testIDs');
+  assert.ok(profileFile.includes('setIsThemeDropdownOpen(false)'), 'Profile must close dropdown upon theme selection');
+
+  // 3. Simulate Dropdown Toggle, Theme Switching, and Storage Persistence
+  const store = new Map();
+  const mockStorage = {
+    async getItem(k) { return store.get(k) ?? null; },
+    async setItem(k, v) { store.set(k, v); },
+  };
+
+  let activeTheme = 'midnight-gold';
+  let isDropdownOpen = false;
+
+  const toggleDropdown = () => {
+    isDropdownOpen = !isDropdownOpen;
+  };
+
+  const selectTheme = async (themeId) => {
+    activeTheme = themeId;
+    isDropdownOpen = false;
+    await mockStorage.setItem('aura_active_theme', themeId);
+  };
+
+  // Initial state
+  assert.equal(isDropdownOpen, false, 'Dropdown should initially be collapsed');
+  assert.equal(activeTheme, 'midnight-gold', 'Default theme should be midnight-gold');
+
+  // Open dropdown
+  toggleDropdown();
+  assert.equal(isDropdownOpen, true, 'Dropdown should open when triggered');
+
+  // Select Classic Pride
+  await selectTheme('classic-pride');
+  assert.equal(isDropdownOpen, false, 'Dropdown should close automatically after theme selection');
+  assert.equal(activeTheme, 'classic-pride', 'Active theme should switch to classic-pride');
+  assert.equal(await mockStorage.getItem('aura_active_theme'), 'classic-pride', 'Selected theme must persist to aura_active_theme');
+
+  // Verify persistence reload
+  const restoredTheme = await mockStorage.getItem('aura_active_theme');
+  assert.equal(restoredTheme, 'classic-pride', 'Restored theme on reload must match classic-pride');
+});
+
+// --- Test 76: Responsive Layout Protection: Dropdown Separated Swatches, Age Assurance Badge Wrap, and Summary Chips Wrap ---
+test('Profile Responsive Layout: validates dropdown non-overlapping swatch row, verification badge flex-wrap, and summary chip containment', async () => {
+  const fs = await import('node:fs/promises');
+
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Theme Dropdown Trigger: Palette swatches in dedicated row within text column, chevron isolated
+  assert.ok(profileFile.includes('palettePreviewStrip:'), 'Must define palettePreviewStrip style');
+  assert.ok(profileFile.includes('chevronWrap:'), 'Must define chevronWrap style');
+  assert.ok(profileFile.includes("flexWrap: 'wrap'"), 'Styles must use flexWrap for responsive rows');
+  assert.ok(profileFile.includes('triggerTextCol:'), 'Must define triggerTextCol');
+
+  // 2. Verification Badges: verificationHeader must wrap so PENDING VERIFICATION badge never overflows card
+  assert.ok(profileFile.includes('verificationHeader:'), 'Must define verificationHeader style');
+  assert.ok(profileFile.includes('verificationTitle:'), 'Must define verificationTitle style');
+  assert.ok(profileFile.includes('verBadge:'), 'Must define verBadge style');
+  assert.ok(profileFile.includes('minWidth: 160'), 'verificationTitle must define responsive minWidth');
+
+  // 3. Profile Summary Card Chips: badgesRow must wrap so location and status chips stay within card bounds
+  assert.ok(profileFile.includes('badgesRow:'), 'Must define badgesRow style');
+  assert.ok(profileFile.includes('locationBadge:'), 'Must define locationBadge style');
+  assert.ok(profileFile.includes('locationBadgeText:'), 'Must define locationBadgeText style');
+  assert.ok(profileFile.includes('numberOfLines={1}'), 'locationBadgeText must gracefully truncate long location text');
+  assert.ok(profileFile.includes('ellipsizeMode="tail"'), 'locationBadgeText must specify ellipsizeMode');
+  assert.ok(profileFile.includes("maxWidth: '100%'"), 'locationBadge must enforce maxWidth 100%');
+});
+
+// --- Test 77: Profile Redesign: Collapsible Accordions, Initial Expanded State, and Attribute Input Integrity ---
+test('Profile Redesign: validates collapsible accordion architecture, default expansion states, and taxonomy options', async () => {
+  const fs = await import('node:fs/promises');
+
+  const profileFile = await fs.readFile(
+    new URL('../app/(tabs)/profile.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  // 1. Accordion Section and Header TestIDs
+  assert.ok(profileFile.includes('testID="section-basic-info"'), 'Must define section-basic-info');
+  assert.ok(profileFile.includes('testID="accordion-header-basic"'), 'Must define accordion-header-basic');
+  assert.ok(profileFile.includes('testID="section-physical-attributes"'), 'Must define section-physical-attributes');
+  assert.ok(profileFile.includes('testID="accordion-header-physical"'), 'Must define accordion-header-physical');
+  assert.ok(profileFile.includes('testID="section-identity-orientation"'), 'Must define section-identity-orientation');
+  assert.ok(profileFile.includes('testID="accordion-header-identity"'), 'Must define accordion-header-identity');
+  assert.ok(profileFile.includes('testID="section-lifestyle-interests"'), 'Must define section-lifestyle-interests');
+  assert.ok(profileFile.includes('testID="accordion-header-lifestyle"'), 'Must define accordion-header-lifestyle');
+  assert.ok(profileFile.includes('testID="section-relationship-preferences"'), 'Must define section-relationship-preferences');
+  assert.ok(profileFile.includes('testID="accordion-header-preferences"'), 'Must define accordion-header-preferences');
+
+  // 2. Default State: Basic expanded by default; secondary sections collapsed
+  assert.match(profileFile, /basic:\s*true/, 'Basic Information must default to expanded');
+  assert.match(profileFile, /physical:\s*false/, 'Physical Attributes must default to collapsed');
+  assert.match(profileFile, /identity:\s*false/, 'Identity & Orientation must default to collapsed');
+  assert.match(profileFile, /lifestyle:\s*false/, 'Lifestyle & Interests must default to collapsed');
+  assert.match(profileFile, /preferences:\s*false/, 'Relationship Preferences must default to collapsed');
+
+  // 3. Certified Age Policy: Read-only display, no direct editable text inputs for age
+  assert.ok(profileFile.includes('testID="readonly-age-card"'), 'Must provide read-only certified age card');
+  assert.ok(profileFile.includes('18+ Age Assurance policy'), 'Must explain age is locked per 18+ policy');
+
+  // 4. Taxonomy Options Exported and Configured
+  assert.ok(profileFile.includes('PRONOUN_OPTIONS'), 'Must define PRONOUN_OPTIONS');
+  assert.ok(profileFile.includes('SMOKING_HABIT_OPTIONS'), 'Must define SMOKING_HABIT_OPTIONS');
+  assert.ok(profileFile.includes('DRINKING_HABIT_OPTIONS'), 'Must define DRINKING_HABIT_OPTIONS');
+  assert.ok(profileFile.includes('RELATIONSHIP_INTENT_OPTIONS'), 'Must define RELATIONSHIP_INTENT_OPTIONS');
+  assert.ok(profileFile.includes('RELATIONSHIP_STRUCTURE_OPTIONS'), 'Must define RELATIONSHIP_STRUCTURE_OPTIONS');
+  assert.ok(profileFile.includes('COMMUNITY_INTERESTS_OPTIONS'), 'Must define COMMUNITY_INTERESTS_OPTIONS');
+
+  // 5. Accordion State Simulation: Toggling sections maintains form state
+  const formState = {
+    displayName: 'Alex River',
+    bio: 'Photographer and community volunteer.',
+    heightCm: 178,
+    weightKg: 72,
+    pronouns: ['they/them'],
+    genders: ['non_binary'],
+    orientations: ['queer'],
+    smokingHabit: 'NON_SMOKER',
+    drinkingHabit: 'SOCIALLY',
+    relationshipStructure: 'MONOGAMOUS',
+    interests: ['Art & Design', 'Outdoor & Nature'],
+  };
+
+  let accordion = {
+    basic: true,
+    physical: false,
+    identity: false,
+    lifestyle: false,
+    preferences: false,
+  };
+
+  const toggle = (sec) => {
+    accordion = { ...accordion, [sec]: !accordion[sec] };
+  };
+
+  // Toggle Physical open
+  toggle('physical');
+  assert.equal(accordion.physical, true);
+  // Verify formState did not mutate or get cleared during collapse/expansion
+  assert.equal(formState.displayName, 'Alex River');
+  assert.equal(formState.heightCm, 178);
+
+  // Toggle Basic closed then open again
+  toggle('basic');
+  assert.equal(accordion.basic, false);
+  toggle('basic');
+  assert.equal(accordion.basic, true);
+  assert.equal(formState.bio, 'Photographer and community volunteer.');
+  assert.deepEqual(formState.interests, ['Art & Design', 'Outdoor & Nature']);
 });

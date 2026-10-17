@@ -1,9 +1,15 @@
 /**
  * Aura Luxury Mobile Palette & Multi-Theme System
- * Supported themes: Midnight Gold, Pride Spectrum, Youth Pop, Lavender, and Ocean.
+ * Supported themes: Midnight Gold, Classic Pride, Pride Spectrum, Youth Pop, Lavender, and Ocean.
  */
 
-export type ThemeId = 'midnight-gold' | 'pride-spectrum' | 'youth-pop' | 'lavender' | 'ocean';
+export type ThemeId =
+  | 'midnight-gold'
+  | 'pride-spectrum'
+  | 'youth-pop'
+  | 'lavender'
+  | 'ocean'
+  | 'classic-pride';
 
 export interface ThemeMeta {
   id: ThemeId;
@@ -14,6 +20,7 @@ export interface ThemeMeta {
   secondaryColor: string;
   backgroundColor: string;
   cardColor: string;
+  palettePreview: string[];
 }
 
 export const midnightGoldTheme = {
@@ -65,6 +72,14 @@ export const midnightGoldTheme = {
   // Aliases
   textPrimary: '#F5EFE6',
   primaryRed: '#E53935',
+
+  // Rainbow Spectrum Tokens
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
 } as const;
 
 export const prideSpectrumTheme = {
@@ -109,6 +124,14 @@ export const prideSpectrumTheme = {
 
   textPrimary: '#FDF2F8',
   primaryRed: '#EC4899',
+
+  // Rainbow Spectrum Tokens
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
 } as const;
 
 export const youthPopTheme = {
@@ -153,6 +176,14 @@ export const youthPopTheme = {
 
   textPrimary: '#F0F4FF',
   primaryRed: '#FF5376',
+
+  // Rainbow Spectrum Tokens
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
 } as const;
 
 export const lavenderTheme = {
@@ -197,6 +228,14 @@ export const lavenderTheme = {
 
   textPrimary: '#F5F3FF',
   primaryRed: '#E879F9',
+
+  // Rainbow Spectrum Tokens
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
 } as const;
 
 export const oceanTheme = {
@@ -241,6 +280,73 @@ export const oceanTheme = {
 
   textPrimary: '#F0FDF4',
   primaryRed: '#06B6D4',
+
+  // Rainbow Spectrum Tokens
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
+} as const;
+
+export const classicPrideTheme = {
+  // Primary Backgrounds - Deep Obsidian with refined pride warmth
+  background: '#0B0A10',
+  backgroundElevated: '#14121C',
+  card: '#1A1724',
+  cardElevated: '#242033',
+  cardMuted: '#13111C',
+  overlay: 'rgba(11, 10, 16, 0.90)',
+
+  // Borders & Dividers
+  border: '#332E44',
+  borderSubtle: '#221E2E',
+  borderFocus: '#FF8C00',
+
+  // Text Hierarchy
+  text: '#FDFBF7',
+  textMuted: '#BBB5CA',
+  textSubtle: '#787288',
+  textInverse: '#0B0A10',
+
+  // Luxury Accents - Radiant Pride Amber-Orange & Golden Yellow highlights
+  gold: '#FF8C00',
+  goldLight: '#FFA834',
+  goldDark: '#D97300',
+  goldMuted: 'rgba(255, 140, 0, 0.18)',
+
+  // Semantic & Rainbow Spectrum Accents
+  oxblood: '#8B1E28',
+  oxbloodMuted: 'rgba(139, 30, 40, 0.25)',
+  emerald: '#008026',
+  emeraldMuted: 'rgba(0, 128, 38, 0.18)',
+  amber: '#FFED00',
+  amberMuted: 'rgba(255, 237, 0, 0.18)',
+  ruby: '#E40303',
+  rubyMuted: 'rgba(228, 3, 3, 0.18)',
+  purple: '#732982',
+  purpleMuted: 'rgba(115, 41, 130, 0.22)',
+
+  // Swipe Action Colors
+  pass: '#242033',
+  passIcon: '#BBB5CA',
+  like: '#E40303',
+  likeMuted: 'rgba(228, 3, 3, 0.18)',
+  superSpark: '#004CFF',
+  rewind: '#FF8C00',
+
+  // Aliases
+  textPrimary: '#FDFBF7',
+  primaryRed: '#E40303',
+
+  // Distinctive 6 Rainbow Colors
+  rainbowRed: '#E40303',
+  rainbowOrange: '#FF8C00',
+  rainbowYellow: '#FFED00',
+  rainbowGreen: '#008026',
+  rainbowBlue: '#004CFF',
+  rainbowPurple: '#732982',
 } as const;
 
 export type ColorTheme = {
@@ -292,10 +398,19 @@ export type ColorTheme = {
   // Aliases
   textPrimary: string;
   primaryRed: string;
+
+  // Distinctive 6 Rainbow Colors
+  rainbowRed: string;
+  rainbowOrange: string;
+  rainbowYellow: string;
+  rainbowGreen: string;
+  rainbowBlue: string;
+  rainbowPurple: string;
 };
 
 export const THEME_REGISTRY: Record<ThemeId, ColorTheme> = {
   'midnight-gold': midnightGoldTheme,
+  'classic-pride': classicPrideTheme,
   'pride-spectrum': prideSpectrumTheme,
   'youth-pop': youthPopTheme,
   'lavender': lavenderTheme,
@@ -312,6 +427,18 @@ export const THEME_METAS: ThemeMeta[] = [
     secondaryColor: '#E8CA6B',
     backgroundColor: '#090A0E',
     cardColor: '#161922',
+    palettePreview: ['#D4AF37', '#E8CA6B', '#242835', '#090A0E'],
+  },
+  {
+    id: 'classic-pride',
+    name: 'Classic Pride',
+    tagline: 'Historic Six-Color Rainbow on Obsidian',
+    badgeEmoji: '🏳️‍🌈',
+    primaryColor: '#FF8C00',
+    secondaryColor: '#E40303',
+    backgroundColor: '#0B0A10',
+    cardColor: '#1A1724',
+    palettePreview: ['#E40303', '#FF8C00', '#FFED00', '#008026', '#004CFF', '#732982'],
   },
   {
     id: 'pride-spectrum',
@@ -322,6 +449,7 @@ export const THEME_METAS: ThemeMeta[] = [
     secondaryColor: '#A855F7',
     backgroundColor: '#0D0B18',
     cardColor: '#1F1936',
+    palettePreview: ['#EC4899', '#A855F7', '#35295C', '#0D0B18'],
   },
   {
     id: 'youth-pop',
@@ -332,6 +460,7 @@ export const THEME_METAS: ThemeMeta[] = [
     secondaryColor: '#FFE066',
     backgroundColor: '#0C0E1A',
     cardColor: '#1A2038',
+    palettePreview: ['#FF5376', '#FFE066', '#1A2038', '#0C0E1A'],
   },
   {
     id: 'lavender',
@@ -342,6 +471,7 @@ export const THEME_METAS: ThemeMeta[] = [
     secondaryColor: '#E9D5FF',
     backgroundColor: '#110D1B',
     cardColor: '#221B36',
+    palettePreview: ['#C084FC', '#E9D5FF', '#221B36', '#110D1B'],
   },
   {
     id: 'ocean',
@@ -352,6 +482,7 @@ export const THEME_METAS: ThemeMeta[] = [
     secondaryColor: '#38BDF8',
     backgroundColor: '#07131E',
     cardColor: '#132B42',
+    palettePreview: ['#06B6D4', '#38BDF8', '#132B42', '#07131E'],
   },
 ];
 

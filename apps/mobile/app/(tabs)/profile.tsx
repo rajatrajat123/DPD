@@ -10,6 +10,8 @@ import {
   Switch,
   ActivityIndicator,
   Alert,
+  Platform,
+  LayoutAnimation,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -24,6 +26,60 @@ import {
   LOOKING_FOR_OPTIONS,
   SEXUAL_ORIENTATION_OPTIONS,
 } from '../(auth)/register';
+
+export const PRONOUN_OPTIONS = [
+  { value: 'they/them', label: 'they/them' },
+  { value: 'she/her', label: 'she/her' },
+  { value: 'he/him', label: 'he/him' },
+  { value: 'ze/zir', label: 'ze/zir' },
+  { value: 'custom', label: 'Custom' },
+];
+
+export const SMOKING_HABIT_OPTIONS: { value: SmokingPreference; label: string }[] = [
+  { value: 'NON_SMOKER', label: 'Non-smoker' },
+  { value: 'SOCIAL_SMOKER', label: 'Social smoker' },
+  { value: 'REGULAR_SMOKER', label: 'Regular smoker' },
+];
+
+export const DRINKING_HABIT_OPTIONS = [
+  { value: 'NEVER', label: 'Never' },
+  { value: 'SOCIALLY', label: 'Socially' },
+  { value: 'FREQUENTLY', label: 'Frequently' },
+  { value: 'SOBER', label: 'Sober' },
+  { value: 'PREFER_NOT_TO_SAY', label: 'Prefer not to say' },
+];
+
+export const RELATIONSHIP_INTENT_OPTIONS = [
+  { value: 'long-term partner', label: 'Long-term partner' },
+  { value: 'serious dating', label: 'Serious dating' },
+  { value: 'casual dating', label: 'Casual dating' },
+  { value: 'queer platonic', label: 'Queer platonic' },
+  { value: 'community / friends', label: 'Community & friends' },
+  { value: 'exploring', label: 'Exploring' },
+];
+
+export const RELATIONSHIP_STRUCTURE_OPTIONS = [
+  { value: 'MONOGAMOUS', label: 'Monogamous' },
+  { value: 'ENM', label: 'Ethically Non-Monogamous' },
+  { value: 'POLYAMOROUS', label: 'Polyamorous' },
+  { value: 'OPEN', label: 'Open relationship' },
+  { value: 'EXPLORING', label: 'Exploring' },
+];
+
+export const COMMUNITY_INTERESTS_OPTIONS = [
+  'Art & Design',
+  'Music & Concerts',
+  'Film & Cinema',
+  'Books & Writing',
+  'Travel & Outdoors',
+  'Fitness & Yoga',
+  'Cooking & Foodie',
+  'Gaming & Tech',
+  'Activism & Queer Culture',
+  'Nightlife & Dancing',
+  'Pets & Animals',
+  'Coffee & Cafes',
+];
 
 function parseInitialTaxonomy(items?: string[]): { selected: string[]; customText: string } {
   if (!items || items.length === 0) return { selected: [], customText: '' };
@@ -59,25 +115,41 @@ export default function ProfileScreen() {
   const router = useRouter();
   const { profile, refreshProfile } = useAuth();
   const { themeId, setTheme, themes, colors } = useTheme();
+  const [isThemeDropdownOpen, setIsThemeDropdownOpen] = useState(false);
+  const currentThemeMeta = themes.find((t) => t.id === themeId) || themes[0];
 
+  // Collapsible Accordion Sections (Basic expanded by default; secondary collapsed)
+  const [expandedSections, setExpandedSections] = useState<{
+    basic: boolean;
+    physical: boolean;
+    identity: boolean;
+    lifestyle: boolean;
+    preferences: boolean;
+  }>({
+    basic: true,       // Expanded by default
+    physical: false,    // Collapsed by default
+    identity: false,    // Collapsed by default
+    lifestyle: false,   // Collapsed by default
+    preferences: false, // Collapsed by default
+  });
+
+  const toggleSection = (key: keyof typeof expandedSections) => {
+    if (Platform.OS === 'ios' || Platform.OS === 'android') {
+      LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+    }
+    setExpandedSections((prev) => ({
+      ...prev,
+      [key]: !prev[key],
+    }));
+  };
+
+  // Section A: Basic Information
   const [displayName, setDisplayName] = useState(profile?.display_name || '');
   const [bio, setBio] = useState(profile?.bio || '');
-  const [smokingPref, setSmokingPref] = useState<SmokingPreference>(profile?.smoking_preference || 'NON_SMOKER');
-  const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
+  const [selectedPronouns, setSelectedPronouns] = useState<string[]>(['they/them']);
+  const [customPronounText, setCustomPronounText] = useState('');
 
-  // 1. I am a — Gender identity
-  const [selectedGenders, setSelectedGenders] = useState<string[]>([]);
-  const [customGenderText, setCustomGenderText] = useState('');
-
-  // 2. Looking for — Gender preferences
-  const [selectedLookingFor, setSelectedLookingFor] = useState<string[]>([]);
-  const [customLookingForText, setCustomLookingForText] = useState('');
-
-  // 3. Sexual orientation
-  const [selectedOrientations, setSelectedOrientations] = useState<string[]>([]);
-  const [customOrientationText, setCustomOrientationText] = useState('');
-
-  // Physical Attributes (Required for Discovery completion)
+  // Section B: Physical Attributes (Required for Discovery completion)
   const [heightUnit, setHeightUnit] = useState<'metric' | 'imperial'>('metric');
   const [weightUnit, setWeightUnit] = useState<'metric' | 'imperial'>('metric');
   const [heightCmInput, setHeightCmInput] = useState('');
@@ -89,6 +161,30 @@ export default function ProfileScreen() {
   const [weightVisibility, setWeightVisibility] = useState<'PUBLIC' | 'MATCHES_ONLY' | 'HIDDEN'>('PUBLIC');
   const [heightError, setHeightError] = useState<string | null>(null);
   const [weightError, setWeightError] = useState<string | null>(null);
+
+  // Section C: Identity & Orientation
+  const [selectedGenders, setSelectedGenders] = useState<string[]>([]);
+  const [customGenderText, setCustomGenderText] = useState('');
+  const [selectedOrientations, setSelectedOrientations] = useState<string[]>([]);
+  const [customOrientationText, setCustomOrientationText] = useState('');
+
+  // Section D: Lifestyle & Interests
+  const [smokingPref, setSmokingPref] = useState<SmokingPreference>(profile?.smoking_preference || 'NON_SMOKER');
+  const [drinkingHabit, setDrinkingHabit] = useState<string>(profile?.drinking_habit || 'SOCIALLY');
+  const [selectedIntents, setSelectedIntents] = useState<string[]>(profile?.relationship_intents || []);
+  const [relationshipStructure, setRelationshipStructure] = useState<string>(profile?.relationship_structure || 'MONOGAMOUS');
+  const [selectedInterests, setSelectedInterests] = useState<string[]>(profile?.interests || []);
+
+  // Section E: Relationship Preferences & Dealbreakers
+  const [selectedLookingFor, setSelectedLookingFor] = useState<string[]>([]);
+  const [customLookingForText, setCustomLookingForText] = useState('');
+  const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
+  const [requireVerifiedDealbreaker, setRequireVerifiedDealbreaker] = useState<boolean>(
+    profile?.visibility_settings?.require_verified ?? false
+  );
+  const [requireMonogamousDealbreaker, setRequireMonogamousDealbreaker] = useState<boolean>(
+    profile?.visibility_settings?.require_monogamous ?? false
+  );
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -132,6 +228,10 @@ export default function ProfileScreen() {
       setSmokingPref(profile.smoking_preference || 'NON_SMOKER');
       setNonSmokerDealbreaker(profile.non_smoker_dealbreaker ?? true);
 
+      const parsedPronouns = parseInitialTaxonomy(profile.pronouns);
+      setSelectedPronouns(parsedPronouns.selected.length > 0 ? parsedPronouns.selected : ['they/them']);
+      setCustomPronounText(parsedPronouns.customText);
+
       const parsedGenders = parseInitialTaxonomy(profile.gender_identities);
       setSelectedGenders(parsedGenders.selected);
       setCustomGenderText(parsedGenders.customText);
@@ -144,6 +244,25 @@ export default function ProfileScreen() {
       const parsedOrientations = parseInitialTaxonomy(profile.sexual_orientations);
       setSelectedOrientations(parsedOrientations.selected);
       setCustomOrientationText(parsedOrientations.customText);
+
+      if (profile.drinking_habit) {
+        setDrinkingHabit(profile.drinking_habit);
+      }
+      if (profile.relationship_intents && Array.isArray(profile.relationship_intents)) {
+        setSelectedIntents(profile.relationship_intents);
+      }
+      if (profile.relationship_structure) {
+        setRelationshipStructure(profile.relationship_structure);
+      }
+      if (profile.interests && Array.isArray(profile.interests)) {
+        setSelectedInterests(profile.interests);
+      }
+      if (profile.visibility_settings?.require_verified !== undefined) {
+        setRequireVerifiedDealbreaker(Boolean(profile.visibility_settings.require_verified));
+      }
+      if (profile.visibility_settings?.require_monogamous !== undefined) {
+        setRequireMonogamousDealbreaker(Boolean(profile.visibility_settings.require_monogamous));
+      }
 
       if (profile.height_cm) {
         setHeightCmInput(String(profile.height_cm));
@@ -166,6 +285,12 @@ export default function ProfileScreen() {
     }
   }, [profile]);
 
+  const togglePronoun = (p: string) => {
+    setSelectedPronouns((prev) =>
+      prev.includes(p) ? (prev.length > 1 ? prev.filter((item) => item !== p) : prev) : [...prev, p]
+    );
+  };
+
   const toggleGender = (g: string) => {
     setSelectedGenders((prev) =>
       prev.includes(g) ? prev.filter((item) => item !== g) : [...prev, g]
@@ -181,6 +306,18 @@ export default function ProfileScreen() {
   const toggleOrientation = (o: string) => {
     setSelectedOrientations((prev) =>
       prev.includes(o) ? prev.filter((item) => item !== o) : [...prev, o]
+    );
+  };
+
+  const toggleIntent = (intent: string) => {
+    setSelectedIntents((prev) =>
+      prev.includes(intent) ? prev.filter((i) => i !== intent) : [...prev, intent]
+    );
+  };
+
+  const toggleInterest = (interest: string) => {
+    setSelectedInterests((prev) =>
+      prev.includes(interest) ? prev.filter((i) => i !== interest) : [...prev, interest]
     );
   };
 
@@ -301,6 +438,7 @@ export default function ProfileScreen() {
   };
 
   const handleSaveChanges = async () => {
+    const finalPronouns = buildFinalList(selectedPronouns, customPronounText);
     const finalGenders = buildFinalList(selectedGenders, customGenderText);
     const finalLookingFor = buildFinalList(selectedLookingFor, customLookingForText);
     const finalOrientations = buildFinalList(selectedOrientations, customOrientationText);
@@ -373,28 +511,36 @@ export default function ProfileScreen() {
       await authService.updateMyProfile({
         display_name: displayName.trim(),
         bio: bio.trim(),
+        pronouns: finalPronouns,
         gender_identities: finalGenders,
         preferred_genders: finalLookingFor,
         looking_for: finalLookingFor,
         sexual_orientations: finalOrientations,
         smoking_habit: smokingPref,
         smoking_preference: smokingPref,
+        drinking_habit: drinkingHabit,
+        relationship_intents: selectedIntents,
+        relationship_structure: relationshipStructure,
+        interests: selectedInterests,
         height_cm: finalHeightCm,
         weight_kg: finalWeightKg,
         visibility_settings: {
           ...(profile?.visibility_settings || {}),
           height: heightVisibility,
           weight: weightVisibility,
+          require_verified: requireVerifiedDealbreaker,
+          require_monogamous: requireMonogamousDealbreaker,
         },
       });
 
       // 2. Update discovery preferences dealbreaker and preferred genders on backend
       await discoveryService.updatePreferences({
         preferred_genders: finalLookingFor,
+        preferred_intents: selectedIntents,
         dealbreakers: {
           non_smoker_only: nonSmokerDealbreaker,
-          require_verified: false,
-          require_monogamous: false,
+          require_verified: requireVerifiedDealbreaker,
+          require_monogamous: requireMonogamousDealbreaker,
         },
       });
 
@@ -492,7 +638,11 @@ export default function ProfileScreen() {
                 </View>
               )}
               <View style={[styles.locationBadge, { backgroundColor: colors.cardElevated, borderColor: colors.borderSubtle }]}>
-                <Text style={[styles.locationBadgeText, { color: colors.textMuted }]}>
+                <Text
+                  style={[styles.locationBadgeText, { color: colors.textMuted }]}
+                  numberOfLines={1}
+                  ellipsizeMode="tail"
+                >
                   📍 {profile?.city || 'Local Member'}
                 </Text>
               </View>
@@ -620,538 +770,1441 @@ export default function ProfileScreen() {
           )}
         </View>
 
-        {/* Basic Details Section */}
-        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>About You</Text>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Display Name</Text>
-            <TextInput
-              style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-              value={displayName}
-              onChangeText={setDisplayName}
-              placeholder="Your display name"
-              placeholderTextColor={colors.textSubtle}
-            />
-          </View>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Bio</Text>
-            <TextInput
-              style={[styles.input, styles.bioInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-              value={bio}
-              onChangeText={setBio}
-              placeholder="Tell other members what you are passionate about..."
-              placeholderTextColor={colors.textSubtle}
-              multiline
-              numberOfLines={4}
-            />
-          </View>
-        </View>
-
-        {/* Physical Attributes Section (Required for Discovery) */}
-        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <View style={styles.sectionTitleRow}>
-            <Text style={[styles.sectionTitle, { color: colors.text }]}>Physical Attributes</Text>
-            <View style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadge : styles.incompleteBadge}>
-              <Text style={Boolean(profile?.height_cm && profile?.weight_kg) ? styles.completedBadgeText : styles.incompleteBadgeText}>
-                {Boolean(profile?.height_cm && profile?.weight_kg) ? '✓ Completed' : 'Required'}
-              </Text>
-            </View>
-          </View>
-          <Text style={styles.sectionDesc}>
-            Height and weight are required before your profile can appear in Discovery. Choose your preferred display units and card privacy.
-          </Text>
-
-          {/* Height Input */}
-          <View style={styles.inputGroup}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.inputLabel}>Height (90–250 cm)</Text>
-              <View style={[styles.unitToggleGroup, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                <TouchableOpacity
-                  style={[styles.unitToggleBtn, heightUnit === 'metric' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
-                  onPress={() => {
-                    setHeightUnit('metric');
-                    if (!heightCmInput && heightFtInput) {
-                      const ft = parseInt(heightFtInput, 10) || 0;
-                      const inc = parseInt(heightInInput, 10) || 0;
-                      setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
-                    }
-                  }}
+        {/* SECTION A: Basic Information */}
+        <View
+          testID="section-basic-info"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-basic"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('basic')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Basic Information section"
+            accessibilityState={{ expanded: expandedSections.basic }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>👤</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Basic Information</Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor: displayName ? `${colors.emerald}20` : `${colors.amber}20`,
+                      borderColor: displayName ? colors.emerald : colors.amber,
+                    },
+                  ]}
                 >
-                  <Text style={[styles.unitToggleText, heightUnit === 'metric' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>cm</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.unitToggleBtn, heightUnit === 'imperial' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
-                  onPress={() => {
-                    setHeightUnit('imperial');
-                    if (!heightFtInput && heightCmInput) {
-                      const cm = parseInt(heightCmInput, 10) || 0;
-                      const totalIn = Math.round(cm / 2.54);
-                      setHeightFtInput(String(Math.floor(totalIn / 12)));
-                      setHeightInInput(String(totalIn % 12));
-                    }
-                  }}
-                >
-                  <Text style={[styles.unitToggleText, heightUnit === 'imperial' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>ft / in</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {heightUnit === 'metric' ? (
-              <View style={styles.numericInputWrapper}>
-                <TextInput
-                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
-                  value={heightCmInput}
-                  onChangeText={(val) => {
-                    setHeightCmInput(val);
-                    setHeightError(null);
-                    const cm = parseInt(val, 10);
-                    if (!isNaN(cm) && cm > 0) {
-                      const totIn = Math.round(cm / 2.54);
-                      setHeightFtInput(String(Math.floor(totIn / 12)));
-                      setHeightInInput(String(totIn % 12));
-                    }
-                  }}
-                  placeholder="175"
-                  placeholderTextColor={colors.textSubtle}
-                  keyboardType="numeric"
-                  maxLength={3}
-                />
-                <Text style={styles.unitSuffix}>cm</Text>
-              </View>
-            ) : (
-              <View style={styles.dualInputRow}>
-                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
-                  <TextInput
-                    style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
-                    value={heightFtInput}
-                    onChangeText={(val) => {
-                      setHeightFtInput(val);
-                      setHeightError(null);
-                      const ft = parseInt(val, 10) || 0;
-                      const inc = parseInt(heightInInput, 10) || 0;
-                      if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
-                    }}
-                    placeholder="5"
-                    placeholderTextColor={colors.textSubtle}
-                    keyboardType="numeric"
-                    maxLength={1}
-                  />
-                  <Text style={styles.unitSuffix}>ft</Text>
-                </View>
-                <View style={[styles.numericInputWrapper, { flex: 1 }]}>
-                  <TextInput
-                    style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, heightError ? styles.inputError : null]}
-                    value={heightInInput}
-                    onChangeText={(val) => {
-                      setHeightInInput(val);
-                      setHeightError(null);
-                      const ft = parseInt(heightFtInput, 10) || 0;
-                      const inc = parseInt(val, 10) || 0;
-                      if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
-                    }}
-                    placeholder="9"
-                    placeholderTextColor={colors.textSubtle}
-                    keyboardType="numeric"
-                    maxLength={2}
-                  />
-                  <Text style={styles.unitSuffix}>in</Text>
+                  <Text
+                    style={[
+                      styles.accordionBadgeText,
+                      { color: displayName ? colors.emerald : colors.amber },
+                    ]}
+                  >
+                    {displayName ? '✓ Active' : 'Required'}
+                  </Text>
                 </View>
               </View>
-            )}
-
-            {heightCmInput ? (
-              <Text style={[styles.conversionHelper, { color: colors.gold }]}>
-                ≈ {heightCmInput} cm ({heightFtInput || '0'}'{heightInInput || '0'}")
+              <Text style={styles.accordionDesc}>Display name, verified age, pronouns & bio</Text>
+            </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.basic ? '▲' : '▼'}
               </Text>
-            ) : null}
-
-            {heightError ? <Text style={styles.errorText}>{heightError}</Text> : null}
-
-            <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
-              <Text style={styles.visibilityLabel}>Card Visibility:</Text>
-              <View style={styles.visibilityPills}>
-                {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
-                  <TouchableOpacity
-                    key={vis}
-                    style={[
-                      styles.visPill,
-                      { backgroundColor: colors.card, borderColor: colors.border },
-                      heightVisibility === vis && [styles.visPillActive, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
-                    ]}
-                    onPress={() => setHeightVisibility(vis)}
-                  >
-                    <Text
-                      style={[
-                        styles.visPillText,
-                        { color: colors.textMuted },
-                        heightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
-                      ]}
-                    >
-                      {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
-                    </Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
             </View>
-          </View>
+          </TouchableOpacity>
 
-          {/* Weight Input */}
-          <View style={styles.inputGroup}>
-            <View style={styles.sectionHeaderRow}>
-              <Text style={styles.inputLabel}>Weight (30–300 kg)</Text>
-              <View style={[styles.unitToggleGroup, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                <TouchableOpacity
-                  style={[styles.unitToggleBtn, weightUnit === 'metric' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
-                  onPress={() => {
-                    setWeightUnit('metric');
-                    if (!weightKgInput && weightLbInput) {
-                      const lb = parseInt(weightLbInput, 10) || 0;
-                      setWeightKgInput(String(Math.round(lb * 0.45359237)));
-                    }
-                  }}
-                >
-                  <Text style={[styles.unitToggleText, weightUnit === 'metric' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>kg</Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.unitToggleBtn, weightUnit === 'imperial' && [styles.unitToggleBtnActive, { backgroundColor: colors.gold }]]}
-                  onPress={() => {
-                    setWeightUnit('imperial');
-                    if (!weightLbInput && weightKgInput) {
-                      const kg = parseInt(weightKgInput, 10) || 0;
-                      setWeightLbInput(String(Math.round(kg * 2.20462)));
-                    }
-                  }}
-                >
-                  <Text style={[styles.unitToggleText, weightUnit === 'imperial' && [styles.unitToggleTextActive, { color: colors.textInverse }]]}>lb</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {weightUnit === 'metric' ? (
-              <View style={styles.numericInputWrapper}>
+          {expandedSections.basic && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {/* Display Name */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Display Name</Text>
                 <TextInput
-                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, weightError ? styles.inputError : null]}
-                  value={weightKgInput}
-                  onChangeText={(val) => {
-                    setWeightKgInput(val);
-                    setWeightError(null);
-                    const kg = parseInt(val, 10);
-                    if (!isNaN(kg) && kg > 0) {
-                      setWeightLbInput(String(Math.round(kg * 2.20462)));
-                    }
-                  }}
-                  placeholder="70"
+                  testID="input-display-name"
+                  style={[
+                    styles.input,
+                    {
+                      backgroundColor: colors.backgroundElevated,
+                      borderColor: colors.border,
+                      color: colors.text,
+                    },
+                  ]}
+                  value={displayName}
+                  onChangeText={setDisplayName}
+                  placeholder="Your display name"
                   placeholderTextColor={colors.textSubtle}
-                  keyboardType="numeric"
-                  maxLength={3}
                 />
-                <Text style={styles.unitSuffix}>kg</Text>
               </View>
-            ) : (
-              <View style={styles.numericInputWrapper}>
-                <TextInput
-                  style={[styles.input, styles.numericInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }, weightError ? styles.inputError : null]}
-                  value={weightLbInput}
-                  onChangeText={(val) => {
-                    setWeightLbInput(val);
-                    setWeightError(null);
-                    const lb = parseInt(val, 10);
-                    if (!isNaN(lb) && lb > 0) {
-                      setWeightKgInput(String(Math.round(lb * 0.45359237)));
-                    }
-                  }}
-                  placeholder="154"
-                  placeholderTextColor={colors.textSubtle}
-                  keyboardType="numeric"
-                  maxLength={3}
-                />
-                <Text style={styles.unitSuffix}>lb</Text>
-              </View>
-            )}
 
-            {weightKgInput ? (
-              <Text style={[styles.conversionHelper, { color: colors.gold }]}>
-                ≈ {weightKgInput} kg (~{weightLbInput || '0'} lb)
-              </Text>
-            ) : null}
-
-            {weightError ? <Text style={styles.errorText}>{weightError}</Text> : null}
-
-            <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
-              <Text style={styles.visibilityLabel}>Card Visibility:</Text>
-              <View style={styles.visibilityPills}>
-                {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
-                  <TouchableOpacity
-                    key={vis}
-                    style={[
-                      styles.visPill,
-                      { backgroundColor: colors.card, borderColor: colors.border },
-                      weightVisibility === vis && [styles.visPillActive, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
-                    ]}
-                    onPress={() => setWeightVisibility(vis)}
-                  >
-                    <Text
-                      style={[
-                        styles.visPillText,
-                        { color: colors.textMuted },
-                        weightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
-                      ]}
-                    >
-                      {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
+              {/* Certified Age / Birthdate (Read-only Display) */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Age & Birthdate (Certified)</Text>
+                <View
+                  testID="readonly-age-card"
+                  style={[
+                    styles.readOnlyFieldCard,
+                    {
+                      backgroundColor: colors.backgroundElevated,
+                      borderColor: colors.borderSubtle,
+                    },
+                  ]}
+                >
+                  <View style={styles.readOnlyFieldRow}>
+                    <Text style={[styles.readOnlyFieldMain, { color: colors.text }]}>
+                      {profile?.age ? `${profile.age} years old` : 'Age pending verification'}
                     </Text>
-                  </TouchableOpacity>
-                ))}
+                    {profile?.birthdate ? (
+                      <Text style={[styles.readOnlyFieldSub, { color: colors.textMuted }]}>
+                        Born: {profile.birthdate}
+                      </Text>
+                    ) : null}
+                  </View>
+                  <Text style={[styles.readOnlyFieldNotice, { color: colors.textSubtle }]}>
+                    🔒 Age and birthdate are permanently certified according to Aura's 18+ Age Assurance policy. Contact member support to request a correction.
+                  </Text>
+                  {!profile?.is_age_verified && (
+                    <TouchableOpacity
+                      style={[
+                        styles.miniVerifyBtn,
+                        { backgroundColor: colors.goldMuted, borderColor: colors.gold },
+                      ]}
+                      onPress={() => router.push('/(auth)/verify-age')}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[styles.miniVerifyBtnText, { color: colors.gold }]}>
+                        Complete 18+ Verification →
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+
+              {/* Pronouns */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>Pronouns</Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
+                <View style={styles.chipsRow}>
+                  {PRONOUN_OPTIONS.map((p) => {
+                    const selected = selectedPronouns.includes(p.value);
+                    return (
+                      <TouchableOpacity
+                        key={p.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          selected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => togglePronoun(p.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            selected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {p.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {selectedPronouns.includes('custom') && (
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.customInput,
+                      {
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                        color: colors.text,
+                      },
+                    ]}
+                    value={customPronounText}
+                    onChangeText={setCustomPronounText}
+                    placeholder="Enter custom pronouns (e.g. fae/faer)..."
+                    placeholderTextColor={colors.textSubtle}
+                    maxLength={30}
+                  />
+                )}
+              </View>
+
+              {/* Bio with Character Counter */}
+              <View style={styles.inputGroup}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.inputLabel}>Bio</Text>
+                  <Text
+                    style={[
+                      styles.bioCharCount,
+                      {
+                        color:
+                          bio.length > 450
+                            ? colors.amber
+                            : bio.length === 500
+                            ? colors.ruby
+                            : colors.textSubtle,
+                      },
+                    ]}
+                  >
+                    {bio.length}/500
+                  </Text>
+                </View>
+                <TextInput
+                  testID="input-bio"
+                  style={[
+                    styles.input,
+                    styles.bioInput,
+                    {
+                      backgroundColor: colors.backgroundElevated,
+                      borderColor: colors.border,
+                      color: colors.text,
+                    },
+                  ]}
+                  value={bio}
+                  onChangeText={setBio}
+                  placeholder="Tell other members what you are passionate about..."
+                  placeholderTextColor={colors.textSubtle}
+                  multiline
+                  numberOfLines={4}
+                  maxLength={500}
+                />
               </View>
             </View>
-          </View>
+          )}
         </View>
 
-        {/* Identity & Dating Preferences Section */}
-        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Identity & Dating Preferences</Text>
-          <Text style={styles.sectionDesc}>
-            Customizable identity and preference settings used for discovery and matching.
-          </Text>
-
-          {/* SECTION 1: I am a — Gender identity */}
-          <View style={styles.inputGroup}>
-            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>1. I am a — Gender identity</Text>
-            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
-            <View style={styles.chipsRow}>
-              {GENDER_IDENTITY_OPTIONS.map((g) => {
-                const selected = selectedGenders.includes(g.value);
-                return (
-                  <TouchableOpacity
-                    key={g.value}
+        {/* SECTION B: Physical Attributes */}
+        <View
+          testID="section-physical-attributes"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-physical"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('physical')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Physical Attributes section"
+            accessibilityState={{ expanded: expandedSections.physical }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>📏</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Physical Attributes</Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor: Boolean(profile?.height_cm && profile?.weight_kg)
+                        ? `${colors.emerald}20`
+                        : `${colors.amber}20`,
+                      borderColor: Boolean(profile?.height_cm && profile?.weight_kg)
+                        ? colors.emerald
+                        : colors.amber,
+                    },
+                  ]}
+                >
+                  <Text
                     style={[
-                      styles.chip,
-                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
+                      styles.accordionBadgeText,
+                      {
+                        color: Boolean(profile?.height_cm && profile?.weight_kg)
+                          ? colors.emerald
+                          : colors.amber,
+                      },
                     ]}
-                    onPress={() => toggleGender(g.value)}
-                    activeOpacity={0.7}
                   >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        { color: colors.textMuted },
-                        selected && [styles.chipTextSelected, { color: colors.gold }],
-                      ]}
-                    >
-                      {g.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {selectedGenders.includes('custom') && (
-              <TextInput
-                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-                value={customGenderText}
-                onChangeText={setCustomGenderText}
-                placeholder="Enter your gender identity..."
-                placeholderTextColor={colors.textSubtle}
-                maxLength={40}
-              />
-            )}
-          </View>
-
-          {/* SECTION 2: Looking for — Gender preferences */}
-          <View style={styles.inputGroup}>
-            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>2. Looking for — Gender preferences</Text>
-            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
-            <View style={styles.chipsRow}>
-              {LOOKING_FOR_OPTIONS.map((item) => {
-                const selected = selectedLookingFor.includes(item.value);
-                return (
-                  <TouchableOpacity
-                    key={item.value}
-                    style={[
-                      styles.chip,
-                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
-                    ]}
-                    onPress={() => toggleLookingFor(item.value)}
-                    activeOpacity={0.7}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        { color: colors.textMuted },
-                        selected && [styles.chipTextSelected, { color: colors.gold }],
-                      ]}
-                    >
-                      {item.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {selectedLookingFor.includes('custom') && (
-              <TextInput
-                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-                value={customLookingForText}
-                onChangeText={setCustomLookingForText}
-                placeholder="Enter gender preference..."
-                placeholderTextColor={colors.textSubtle}
-                maxLength={40}
-              />
-            )}
-          </View>
-
-          {/* SECTION 3: Sexual orientation */}
-          <View style={styles.inputGroup}>
-            <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>3. Sexual orientation</Text>
-            <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>Select all that apply</Text>
-            <View style={styles.chipsRow}>
-              {SEXUAL_ORIENTATION_OPTIONS.map((o) => {
-                const selected = selectedOrientations.includes(o.value);
-                return (
-                  <TouchableOpacity
-                    key={o.value}
-                    style={[
-                      styles.chip,
-                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                      selected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
-                    ]}
-                    onPress={() => toggleOrientation(o.value)}
-                    activeOpacity={0.7}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        { color: colors.textMuted },
-                        selected && [styles.chipTextSelected, { color: colors.gold }],
-                      ]}
-                    >
-                      {o.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-            {selectedOrientations.includes('custom') && (
-              <TextInput
-                style={[styles.input, styles.customInput, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-                value={customOrientationText}
-                onChangeText={setCustomOrientationText}
-                placeholder="Enter your sexual orientation..."
-                placeholderTextColor={colors.textSubtle}
-                maxLength={40}
-              />
-            )}
-          </View>
-        </View>
-
-        {/* Lifestyle & Dealbreakers Section */}
-        <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
-          <Text style={[styles.sectionTitle, { color: colors.text }]}>Lifestyle & Dealbreakers</Text>
-
-          <View style={styles.inputGroup}>
-            <Text style={styles.inputLabel}>Smoking Habit</Text>
-            <View style={styles.chipsRow}>
-              {(['NON_SMOKER', 'SOCIAL_SMOKER', 'REGULAR_SMOKER'] as SmokingPreference[]).map((pref) => {
-                const isSelected = smokingPref === pref;
-                const label =
-                  pref === 'NON_SMOKER' ? 'Non-smoker' : pref === 'SOCIAL_SMOKER' ? 'Social smoker' : 'Regular smoker';
-                return (
-                  <TouchableOpacity
-                    key={pref}
-                    style={[
-                      styles.chip,
-                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                      isSelected && [styles.chipSelected, { borderColor: colors.gold, backgroundColor: colors.goldMuted }],
-                    ]}
-                    onPress={() => setSmokingPref(pref)}
-                    activeOpacity={0.7}
-                  >
-                    <Text
-                      style={[
-                        styles.chipText,
-                        { color: colors.textMuted },
-                        isSelected && [styles.chipTextSelected, { color: colors.gold }],
-                      ]}
-                    >
-                      {label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
-          </View>
-
-          {/* Dealbreaker Switch */}
-          <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
-            <View style={styles.switchTextContainer}>
-              <Text style={[styles.switchTitle, { color: colors.text }]}>Non-Smoker Dealbreaker</Text>
-              <Text style={styles.switchDesc}>
-                Strictly exclude smokers from your discovery deck. Aura never compromises this rule.
+                    {Boolean(profile?.height_cm && profile?.weight_kg) ? '✓ Completed' : 'Required'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.accordionDesc}>
+                Height & weight metrics for Discovery filtering with card visibility controls
               </Text>
             </View>
-            <Switch
-              value={nonSmokerDealbreaker}
-              onValueChange={setNonSmokerDealbreaker}
-              trackColor={{ false: colors.border, true: colors.gold }}
-              thumbColor={colors.text}
-            />
-          </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.physical ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {expandedSections.physical && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {/* Informative Body Neutrality Note */}
+              <View
+                style={[
+                  styles.noticeBox,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+                ]}
+              >
+                <Text style={[styles.noticeBoxText, { color: colors.textMuted }]}>
+                  ✨ Aura promotes body neutrality and size diversity across all identities. Height and weight inputs are used strictly for member preference filtering and can be set to Public, Matches Only, or Hidden.
+                </Text>
+              </View>
+
+              {/* Height Input */}
+              <View style={styles.inputGroup}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.inputLabel}>Height (90–250 cm)</Text>
+                  <View
+                    style={[
+                      styles.unitToggleGroup,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                    ]}
+                  >
+                    <TouchableOpacity
+                      style={[
+                        styles.unitToggleBtn,
+                        heightUnit === 'metric' && [
+                          styles.unitToggleBtnActive,
+                          { backgroundColor: colors.gold },
+                        ],
+                      ]}
+                      onPress={() => {
+                        setHeightUnit('metric');
+                        if (!heightCmInput && heightFtInput) {
+                          const ft = parseInt(heightFtInput, 10) || 0;
+                          const inc = parseInt(heightInInput, 10) || 0;
+                          setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                        }
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.unitToggleText,
+                          heightUnit === 'metric' && [
+                            styles.unitToggleTextActive,
+                            { color: colors.textInverse },
+                          ],
+                        ]}
+                      >
+                        cm
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.unitToggleBtn,
+                        heightUnit === 'imperial' && [
+                          styles.unitToggleBtnActive,
+                          { backgroundColor: colors.gold },
+                        ],
+                      ]}
+                      onPress={() => {
+                        setHeightUnit('imperial');
+                        if (!heightFtInput && heightCmInput) {
+                          const cm = parseInt(heightCmInput, 10) || 0;
+                          const totalIn = Math.round(cm / 2.54);
+                          setHeightFtInput(String(Math.floor(totalIn / 12)));
+                          setHeightInInput(String(totalIn % 12));
+                        }
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.unitToggleText,
+                          heightUnit === 'imperial' && [
+                            styles.unitToggleTextActive,
+                            { color: colors.textInverse },
+                          ],
+                        ]}
+                      >
+                        ft / in
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {heightUnit === 'metric' ? (
+                  <View style={styles.numericInputWrapper}>
+                    <TextInput
+                      style={[
+                        styles.input,
+                        styles.numericInput,
+                        {
+                          backgroundColor: colors.backgroundElevated,
+                          borderColor: colors.border,
+                          color: colors.text,
+                        },
+                        heightError ? styles.inputError : null,
+                      ]}
+                      value={heightCmInput}
+                      onChangeText={(val) => {
+                        setHeightCmInput(val);
+                        setHeightError(null);
+                        const cm = parseInt(val, 10);
+                        if (!isNaN(cm) && cm > 0) {
+                          const totIn = Math.round(cm / 2.54);
+                          setHeightFtInput(String(Math.floor(totIn / 12)));
+                          setHeightInInput(String(totIn % 12));
+                        }
+                      }}
+                      placeholder="175"
+                      placeholderTextColor={colors.textSubtle}
+                      keyboardType="numeric"
+                      maxLength={3}
+                    />
+                    <Text style={styles.unitSuffix}>cm</Text>
+                  </View>
+                ) : (
+                  <View style={styles.dualInputRow}>
+                    <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                      <TextInput
+                        style={[
+                          styles.input,
+                          styles.numericInput,
+                          {
+                            backgroundColor: colors.backgroundElevated,
+                            borderColor: colors.border,
+                            color: colors.text,
+                          },
+                          heightError ? styles.inputError : null,
+                        ]}
+                        value={heightFtInput}
+                        onChangeText={(val) => {
+                          setHeightFtInput(val);
+                          setHeightError(null);
+                          const ft = parseInt(val, 10) || 0;
+                          const inc = parseInt(heightInInput, 10) || 0;
+                          if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                        }}
+                        placeholder="5"
+                        placeholderTextColor={colors.textSubtle}
+                        keyboardType="numeric"
+                        maxLength={1}
+                      />
+                      <Text style={styles.unitSuffix}>ft</Text>
+                    </View>
+                    <View style={[styles.numericInputWrapper, { flex: 1 }]}>
+                      <TextInput
+                        style={[
+                          styles.input,
+                          styles.numericInput,
+                          {
+                            backgroundColor: colors.backgroundElevated,
+                            borderColor: colors.border,
+                            color: colors.text,
+                          },
+                          heightError ? styles.inputError : null,
+                        ]}
+                        value={heightInInput}
+                        onChangeText={(val) => {
+                          setHeightInInput(val);
+                          setHeightError(null);
+                          const ft = parseInt(heightFtInput, 10) || 0;
+                          const inc = parseInt(val, 10) || 0;
+                          if (ft > 0) setHeightCmInput(String(Math.round((ft * 12 + inc) * 2.54)));
+                        }}
+                        placeholder="9"
+                        placeholderTextColor={colors.textSubtle}
+                        keyboardType="numeric"
+                        maxLength={2}
+                      />
+                      <Text style={styles.unitSuffix}>in</Text>
+                    </View>
+                  </View>
+                )}
+
+                {heightCmInput ? (
+                  <Text style={[styles.conversionHelper, { color: colors.gold }]}>
+                    ≈ {heightCmInput} cm ({heightFtInput || '0'}'{heightInInput || '0'}")
+                  </Text>
+                ) : null}
+
+                {heightError ? <Text style={styles.errorText}>{heightError}</Text> : null}
+
+                <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
+                  <Text style={styles.visibilityLabel}>Card Visibility:</Text>
+                  <View style={styles.visibilityPills}>
+                    {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
+                      <TouchableOpacity
+                        key={vis}
+                        style={[
+                          styles.visPill,
+                          { backgroundColor: colors.card, borderColor: colors.border },
+                          heightVisibility === vis && [
+                            styles.visPillActive,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => setHeightVisibility(vis)}
+                      >
+                        <Text
+                          style={[
+                            styles.visPillText,
+                            { color: colors.textMuted },
+                            heightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
+                          ]}
+                        >
+                          {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              </View>
+
+              {/* Weight Input */}
+              <View style={styles.inputGroup}>
+                <View style={styles.sectionHeaderRow}>
+                  <Text style={styles.inputLabel}>Weight (30–300 kg)</Text>
+                  <View
+                    style={[
+                      styles.unitToggleGroup,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                    ]}
+                  >
+                    <TouchableOpacity
+                      style={[
+                        styles.unitToggleBtn,
+                        weightUnit === 'metric' && [
+                          styles.unitToggleBtnActive,
+                          { backgroundColor: colors.gold },
+                        ],
+                      ]}
+                      onPress={() => {
+                        setWeightUnit('metric');
+                        if (!weightKgInput && weightLbInput) {
+                          const lb = parseInt(weightLbInput, 10) || 0;
+                          setWeightKgInput(String(Math.round(lb * 0.45359237)));
+                        }
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.unitToggleText,
+                          weightUnit === 'metric' && [
+                            styles.unitToggleTextActive,
+                            { color: colors.textInverse },
+                          ],
+                        ]}
+                      >
+                        kg
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.unitToggleBtn,
+                        weightUnit === 'imperial' && [
+                          styles.unitToggleBtnActive,
+                          { backgroundColor: colors.gold },
+                        ],
+                      ]}
+                      onPress={() => {
+                        setWeightUnit('imperial');
+                        if (!weightLbInput && weightKgInput) {
+                          const kg = parseInt(weightKgInput, 10) || 0;
+                          setWeightLbInput(String(Math.round(kg * 2.20462)));
+                        }
+                      }}
+                    >
+                      <Text
+                        style={[
+                          styles.unitToggleText,
+                          weightUnit === 'imperial' && [
+                            styles.unitToggleTextActive,
+                            { color: colors.textInverse },
+                          ],
+                        ]}
+                      >
+                        lb
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+
+                {weightUnit === 'metric' ? (
+                  <View style={styles.numericInputWrapper}>
+                    <TextInput
+                      style={[
+                        styles.input,
+                        styles.numericInput,
+                        {
+                          backgroundColor: colors.backgroundElevated,
+                          borderColor: colors.border,
+                          color: colors.text,
+                        },
+                        weightError ? styles.inputError : null,
+                      ]}
+                      value={weightKgInput}
+                      onChangeText={(val) => {
+                        setWeightKgInput(val);
+                        setWeightError(null);
+                        const kg = parseInt(val, 10);
+                        if (!isNaN(kg) && kg > 0) {
+                          setWeightLbInput(String(Math.round(kg * 2.20462)));
+                        }
+                      }}
+                      placeholder="70"
+                      placeholderTextColor={colors.textSubtle}
+                      keyboardType="numeric"
+                      maxLength={3}
+                    />
+                    <Text style={styles.unitSuffix}>kg</Text>
+                  </View>
+                ) : (
+                  <View style={styles.numericInputWrapper}>
+                    <TextInput
+                      style={[
+                        styles.input,
+                        styles.numericInput,
+                        {
+                          backgroundColor: colors.backgroundElevated,
+                          borderColor: colors.border,
+                          color: colors.text,
+                        },
+                        weightError ? styles.inputError : null,
+                      ]}
+                      value={weightLbInput}
+                      onChangeText={(val) => {
+                        setWeightLbInput(val);
+                        setWeightError(null);
+                        const lb = parseInt(val, 10);
+                        if (!isNaN(lb) && lb > 0) {
+                          setWeightKgInput(String(Math.round(lb * 0.45359237)));
+                        }
+                      }}
+                      placeholder="154"
+                      placeholderTextColor={colors.textSubtle}
+                      keyboardType="numeric"
+                      maxLength={3}
+                    />
+                    <Text style={styles.unitSuffix}>lb</Text>
+                  </View>
+                )}
+
+                {weightKgInput ? (
+                  <Text style={[styles.conversionHelper, { color: colors.gold }]}>
+                    ≈ {weightKgInput} kg (~{weightLbInput || '0'} lb)
+                  </Text>
+                ) : null}
+
+                {weightError ? <Text style={styles.errorText}>{weightError}</Text> : null}
+
+                <View style={[styles.visibilityRow, { backgroundColor: colors.backgroundElevated }]}>
+                  <Text style={styles.visibilityLabel}>Card Visibility:</Text>
+                  <View style={styles.visibilityPills}>
+                    {(['PUBLIC', 'MATCHES_ONLY', 'HIDDEN'] as const).map((vis) => (
+                      <TouchableOpacity
+                        key={vis}
+                        style={[
+                          styles.visPill,
+                          { backgroundColor: colors.card, borderColor: colors.border },
+                          weightVisibility === vis && [
+                            styles.visPillActive,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => setWeightVisibility(vis)}
+                      >
+                        <Text
+                          style={[
+                            styles.visPillText,
+                            { color: colors.textMuted },
+                            weightVisibility === vis && [styles.visPillTextActive, { color: colors.gold }],
+                          ]}
+                        >
+                          {vis === 'PUBLIC' ? 'Public' : vis === 'MATCHES_ONLY' ? 'Matches Only' : 'Hidden'}
+                        </Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* SECTION C: Identity & Orientation */}
+        <View
+          testID="section-identity-orientation"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-identity"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('identity')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Identity and Orientation section"
+            accessibilityState={{ expanded: expandedSections.identity }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>🏳️‍🌈</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Identity & Orientation</Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor:
+                        selectedGenders.length > 0 && selectedOrientations.length > 0
+                          ? `${colors.emerald}20`
+                          : `${colors.amber}20`,
+                      borderColor:
+                        selectedGenders.length > 0 && selectedOrientations.length > 0
+                          ? colors.emerald
+                          : colors.amber,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.accordionBadgeText,
+                      {
+                        color:
+                          selectedGenders.length > 0 && selectedOrientations.length > 0
+                            ? colors.emerald
+                            : colors.amber,
+                      },
+                    ]}
+                  >
+                    {selectedGenders.length > 0 && selectedOrientations.length > 0
+                      ? '✓ Set'
+                      : 'Required'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.accordionDesc}>
+                Gender identity & sexual orientation taxonomy for queer matchmaking
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.identity ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {expandedSections.identity && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {/* Note on Pronouns */}
+              <View
+                style={[
+                  styles.noticeBox,
+                  { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+                ]}
+              >
+                <Text style={[styles.noticeBoxText, { color: colors.textMuted }]}>
+                  💡 Pronouns are configured under Basic Information to ensure seamless visibility on your public member card.
+                </Text>
+              </View>
+
+              {/* Gender Identity */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
+                  Gender Identity
+                </Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
+                  Select all that apply
+                </Text>
+                <View style={styles.chipsRow}>
+                  {GENDER_IDENTITY_OPTIONS.map((g) => {
+                    const selected = selectedGenders.includes(g.value);
+                    return (
+                      <TouchableOpacity
+                        key={g.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          selected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => toggleGender(g.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            selected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {g.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {selectedGenders.includes('custom') && (
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.customInput,
+                      {
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                        color: colors.text,
+                      },
+                    ]}
+                    value={customGenderText}
+                    onChangeText={setCustomGenderText}
+                    placeholder="Enter your gender identity..."
+                    placeholderTextColor={colors.textSubtle}
+                    maxLength={40}
+                  />
+                )}
+              </View>
+
+              {/* Sexual Orientation */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
+                  Sexual Orientation
+                </Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
+                  Select all that apply
+                </Text>
+                <View style={styles.chipsRow}>
+                  {SEXUAL_ORIENTATION_OPTIONS.map((o) => {
+                    const selected = selectedOrientations.includes(o.value);
+                    return (
+                      <TouchableOpacity
+                        key={o.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          selected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => toggleOrientation(o.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            selected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {o.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {selectedOrientations.includes('custom') && (
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.customInput,
+                      {
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                        color: colors.text,
+                      },
+                    ]}
+                    value={customOrientationText}
+                    onChangeText={setCustomOrientationText}
+                    placeholder="Enter your sexual orientation..."
+                    placeholderTextColor={colors.textSubtle}
+                    maxLength={40}
+                  />
+                )}
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* SECTION D: Lifestyle & Interests */}
+        <View
+          testID="section-lifestyle-interests"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-lifestyle"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('lifestyle')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Lifestyle and Interests section"
+            accessibilityState={{ expanded: expandedSections.lifestyle }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>✨</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>Lifestyle & Interests</Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor: `${colors.gold}20`,
+                      borderColor: colors.gold,
+                    },
+                  ]}
+                >
+                  <Text style={[styles.accordionBadgeText, { color: colors.gold }]}>
+                    {selectedInterests.length > 0 ? `${selectedInterests.length} Selected` : 'Optional'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.accordionDesc}>
+                Habits, intentions, relationship structure & community passions
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.lifestyle ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {expandedSections.lifestyle && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {/* Smoking Habit */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Smoking Habit</Text>
+                <View style={styles.chipsRow}>
+                  {SMOKING_HABIT_OPTIONS.map((opt) => {
+                    const isSelected = smokingPref === opt.value;
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          isSelected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => setSmokingPref(opt.value as SmokingPreference)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Drinking Habit */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Drinking Habit</Text>
+                <View style={styles.chipsRow}>
+                  {DRINKING_HABIT_OPTIONS.map((opt) => {
+                    const isSelected = drinkingHabit === opt.value;
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          isSelected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => setDrinkingHabit(opt.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Relationship Intentions */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
+                  Relationship Intentions
+                </Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
+                  Select all that apply
+                </Text>
+                <View style={styles.chipsRow}>
+                  {RELATIONSHIP_INTENT_OPTIONS.map((opt) => {
+                    const isSelected = selectedIntents.includes(opt.value);
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          isSelected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => toggleIntent(opt.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Relationship Structure */}
+              <View style={styles.inputGroup}>
+                <Text style={styles.inputLabel}>Relationship Structure</Text>
+                <View style={styles.chipsRow}>
+                  {RELATIONSHIP_STRUCTURE_OPTIONS.map((opt) => {
+                    const isSelected = relationshipStructure === opt.value;
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          isSelected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => setRelationshipStructure(opt.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+
+              {/* Community Interests / Passions */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
+                  Community Interests & Passions
+                </Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
+                  Select passions to highlight on your profile
+                </Text>
+                <View style={styles.chipsRow}>
+                  {COMMUNITY_INTERESTS_OPTIONS.map((opt) => {
+                    const isSelected = selectedInterests.includes(opt);
+                    return (
+                      <TouchableOpacity
+                        key={opt}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          isSelected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => toggleInterest(opt)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            isSelected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {opt}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            </View>
+          )}
+        </View>
+
+        {/* SECTION E: Relationship Preferences */}
+        <View
+          testID="section-relationship-preferences"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-preferences"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('preferences')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Relationship Preferences section"
+            accessibilityState={{ expanded: expandedSections.preferences }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>🎯</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>
+                  Relationship Preferences
+                </Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor:
+                        selectedLookingFor.length > 0 ? `${colors.emerald}20` : `${colors.amber}20`,
+                      borderColor: selectedLookingFor.length > 0 ? colors.emerald : colors.amber,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.accordionBadgeText,
+                      { color: selectedLookingFor.length > 0 ? colors.emerald : colors.amber },
+                    ]}
+                  >
+                    {selectedLookingFor.length > 0 ? '✓ Configured' : 'Required'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.accordionDesc}>
+                Discovery partner preferences & hard dealbreaker filters
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.preferences ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {expandedSections.preferences && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {/* Looking for — Gender preferences */}
+              <View style={styles.inputGroup}>
+                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
+                  Looking for — Gender preferences
+                </Text>
+                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
+                  Select all that apply
+                </Text>
+                <View style={styles.chipsRow}>
+                  {LOOKING_FOR_OPTIONS.map((item) => {
+                    const selected = selectedLookingFor.includes(item.value);
+                    return (
+                      <TouchableOpacity
+                        key={item.value}
+                        style={[
+                          styles.chip,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          selected && [
+                            styles.chipSelected,
+                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
+                          ],
+                        ]}
+                        onPress={() => toggleLookingFor(item.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text
+                          style={[
+                            styles.chipText,
+                            { color: colors.textMuted },
+                            selected && [styles.chipTextSelected, { color: colors.gold }],
+                          ]}
+                        >
+                          {item.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+                {selectedLookingFor.includes('custom') && (
+                  <TextInput
+                    style={[
+                      styles.input,
+                      styles.customInput,
+                      {
+                        backgroundColor: colors.backgroundElevated,
+                        borderColor: colors.border,
+                        color: colors.text,
+                      },
+                    ]}
+                    value={customLookingForText}
+                    onChangeText={setCustomLookingForText}
+                    placeholder="Enter gender preference..."
+                    placeholderTextColor={colors.textSubtle}
+                    maxLength={40}
+                  />
+                )}
+              </View>
+
+              {/* Dealbreaker: Non-Smoker */}
+              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
+                <View style={styles.switchTextContainer}>
+                  <Text style={[styles.switchTitle, { color: colors.text }]}>
+                    Non-Smoker Dealbreaker
+                  </Text>
+                  <Text style={styles.switchDesc}>
+                    Strictly exclude smokers from your discovery deck. Aura never compromises this rule.
+                  </Text>
+                </View>
+                <Switch
+                  value={nonSmokerDealbreaker}
+                  onValueChange={setNonSmokerDealbreaker}
+                  trackColor={{ false: colors.border, true: colors.gold }}
+                  thumbColor={colors.text}
+                />
+              </View>
+
+              {/* Dealbreaker: 18+ Age Verified Required */}
+              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
+                <View style={styles.switchTextContainer}>
+                  <Text style={[styles.switchTitle, { color: colors.text }]}>
+                    18+ Verified Only
+                  </Text>
+                  <Text style={styles.switchDesc}>
+                    Only receive discovery likes and deck cards from members verified 18+.
+                  </Text>
+                </View>
+                <Switch
+                  value={requireVerifiedDealbreaker}
+                  onValueChange={setRequireVerifiedDealbreaker}
+                  trackColor={{ false: colors.border, true: colors.gold }}
+                  thumbColor={colors.text}
+                />
+              </View>
+
+              {/* Dealbreaker: Monogamous Required */}
+              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
+                <View style={styles.switchTextContainer}>
+                  <Text style={[styles.switchTitle, { color: colors.text }]}>
+                    Monogamous Intentions Only
+                  </Text>
+                  <Text style={styles.switchDesc}>
+                    Filter out non-monogamous profiles from your discovery deck matches.
+                  </Text>
+                </View>
+                <Switch
+                  value={requireMonogamousDealbreaker}
+                  onValueChange={setRequireMonogamousDealbreaker}
+                  trackColor={{ false: colors.border, true: colors.gold }}
+                  thumbColor={colors.text}
+                />
+              </View>
+            </View>
+          )}
         </View>
 
         {/* App Appearance & Themes Section */}
         <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.sectionTitleRow}>
             <Text style={[styles.sectionTitle, { color: colors.text }]}>App Appearance & Theme</Text>
-            <Text style={[styles.sectionSubtitle, { color: colors.gold }]}>5 Custom Palettes</Text>
+            <Text style={[styles.sectionSubtitle, { color: colors.gold }]}>6 Signature Palettes</Text>
           </View>
           <Text style={styles.themeSectionDesc}>
             Choose your signature Aura aesthetic. Themes switch reactively and persist across restarts.
           </Text>
 
-          <View style={styles.themesList}>
-            {themes.map((t) => {
-              const isActive = themeId === t.id;
-              return (
-                <TouchableOpacity
-                  key={t.id}
-                  style={[
-                    styles.themeCard,
-                    { backgroundColor: colors.backgroundElevated, borderColor: isActive ? t.primaryColor : colors.border },
-                    isActive && [styles.themeCardActive, { backgroundColor: colors.cardElevated }],
-                  ]}
-                  onPress={() => setTheme(t.id)}
-                  activeOpacity={0.8}
-                  accessibilityRole="button"
-                  accessibilityLabel={`Select theme ${t.name}`}
-                  testID={`theme-option-${t.id}`}
-                >
-                  {/* Swatch & Emoji */}
-                  <View style={[styles.themeSwatchContainer, { backgroundColor: t.backgroundColor }]}>
-                    <View style={[styles.themeSwatchAccent, { backgroundColor: t.primaryColor }]}>
-                      <Text style={styles.themeSwatchEmoji}>{t.badgeEmoji}</Text>
-                    </View>
-                    <View style={[styles.themeSwatchSecondary, { backgroundColor: t.secondaryColor }]} />
+          {/* Compact Dropdown Trigger */}
+          <TouchableOpacity
+            style={[
+              styles.themeDropdownTrigger,
+              {
+                backgroundColor: colors.backgroundElevated,
+                borderColor: isThemeDropdownOpen ? colors.gold : colors.border,
+              },
+            ]}
+            onPress={() => setIsThemeDropdownOpen((prev) => !prev)}
+            activeOpacity={0.8}
+            accessibilityRole="combobox"
+            accessibilityState={{ expanded: isThemeDropdownOpen }}
+            accessibilityLabel={`Select theme, current theme is ${currentThemeMeta.name}`}
+            testID="theme-dropdown-trigger"
+          >
+            <View style={styles.dropdownTriggerLeft}>
+              <View
+                style={[
+                  styles.triggerSwatchBadge,
+                  { backgroundColor: currentThemeMeta.backgroundColor, borderColor: currentThemeMeta.primaryColor },
+                ]}
+              >
+                <Text style={styles.triggerBadgeEmoji}>{currentThemeMeta.badgeEmoji}</Text>
+              </View>
+              <View style={styles.triggerTextCol}>
+                <View style={styles.triggerNameRow}>
+                  <Text style={[styles.triggerThemeName, { color: colors.text }]}>
+                    {currentThemeMeta.name}
+                  </Text>
+                  <View style={[styles.activePill, { backgroundColor: currentThemeMeta.primaryColor }]}>
+                    <Text style={styles.activePillText}>Active ✓</Text>
                   </View>
+                </View>
+                <Text style={[styles.triggerThemeTagline, { color: colors.textSubtle }]} numberOfLines={1}>
+                  {currentThemeMeta.tagline}
+                </Text>
 
-                  {/* Theme Info */}
-                  <View style={styles.themeDetails}>
-                    <View style={styles.themeNameRow}>
-                      <Text style={[styles.themeName, { color: colors.text }, isActive && { color: t.primaryColor }]}>
-                        {t.name}
-                      </Text>
-                      {isActive && (
-                        <View style={[styles.activePill, { backgroundColor: t.primaryColor }]}>
-                          <Text style={styles.activePillText}>Active ✓</Text>
+                {/* Palette Preview Swatches Strip - Dedicated Row */}
+                <View style={styles.palettePreviewStrip} testID="theme-palette-preview-strip">
+                  {currentThemeMeta.palettePreview.map((hex, idx) => (
+                    <View
+                      key={idx}
+                      style={[
+                        styles.paletteDot,
+                        {
+                          backgroundColor: hex,
+                          borderColor: colors.borderSubtle,
+                        },
+                      ]}
+                    />
+                  ))}
+                </View>
+              </View>
+            </View>
+
+            {/* Trailing Dedicated Chevron Area */}
+            <View style={[styles.chevronWrap, { backgroundColor: colors.cardElevated }]}>
+              <Text style={[styles.chevronText, { color: colors.gold }]}>
+                {isThemeDropdownOpen ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {/* Expanded Dropdown Menu */}
+          {isThemeDropdownOpen && (
+            <View
+              style={[
+                styles.themeDropdownMenu,
+                {
+                  backgroundColor: colors.backgroundElevated,
+                  borderColor: colors.border,
+                },
+              ]}
+              testID="theme-dropdown-menu"
+            >
+              {themes.map((t) => {
+                const isActive = themeId === t.id;
+                return (
+                  <TouchableOpacity
+                    key={t.id}
+                    style={[
+                      styles.themeDropdownItem,
+                      { borderBottomColor: colors.borderSubtle },
+                      isActive && [
+                        styles.themeDropdownItemActive,
+                        {
+                          backgroundColor: colors.cardElevated,
+                          borderLeftColor: t.primaryColor,
+                        },
+                      ],
+                    ]}
+                    onPress={async () => {
+                      await setTheme(t.id);
+                      setIsThemeDropdownOpen(false);
+                    }}
+                    activeOpacity={0.7}
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: isActive }}
+                    accessibilityLabel={`Choose theme ${t.name}`}
+                    testID={`theme-option-${t.id}`}
+                  >
+                    <View style={styles.dropdownItemLeft}>
+                      <View
+                        style={[
+                          styles.itemSwatchBadge,
+                          { backgroundColor: t.backgroundColor, borderColor: t.primaryColor },
+                        ]}
+                      >
+                        <Text style={styles.itemBadgeEmoji}>{t.badgeEmoji}</Text>
+                      </View>
+                      <View style={styles.itemTextCol}>
+                        <View style={styles.itemNameRow}>
+                          <Text
+                            style={[
+                              styles.itemThemeName,
+                              { color: colors.text },
+                              isActive && { color: t.primaryColor, fontWeight: '700' },
+                            ]}
+                          >
+                            {t.name}
+                          </Text>
+                          {isActive && (
+                            <View style={[styles.activePill, { backgroundColor: t.primaryColor }]}>
+                              <Text style={styles.activePillText}>Active ✓</Text>
+                            </View>
+                          )}
                         </View>
-                      )}
+                        <Text style={[styles.itemThemeTagline, { color: colors.textSubtle }]} numberOfLines={1}>
+                          {t.tagline}
+                        </Text>
+                      </View>
                     </View>
-                    <Text style={styles.themeTagline}>{t.tagline}</Text>
-                  </View>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
+
+                    {/* Right side: Palette Preview Swatches */}
+                    <View style={styles.itemPaletteStrip}>
+                      {t.palettePreview.map((hex, idx) => (
+                        <View
+                          key={idx}
+                          style={[
+                            styles.paletteDotSmall,
+                            {
+                              backgroundColor: hex,
+                              borderColor: colors.borderSubtle,
+                            },
+                          ]}
+                        />
+                      ))}
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          )}
         </View>
 
         {/* Security & Privacy Shortcut */}
@@ -1351,10 +2404,12 @@ const styles = StyleSheet.create({
   },
   headerInfo: {
     flex: 1,
+    minWidth: 0,
   },
   headerNameRow: {
     flexDirection: 'row',
     alignItems: 'baseline',
+    flexWrap: 'wrap',
   },
   headerName: {
     ...typography.h2,
@@ -1369,8 +2424,10 @@ const styles = StyleSheet.create({
   },
   badgesRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     gap: 6,
     marginTop: 4,
+    alignItems: 'center',
   },
   verifiedBadge: {
     backgroundColor: colors.emeraldMuted,
@@ -1443,17 +2500,21 @@ const styles = StyleSheet.create({
     fontSize: 13,
   },
   locationBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: colors.cardElevated,
     borderRadius: borderRadius.full,
     paddingHorizontal: spacing.sm,
     paddingVertical: 2,
     borderWidth: 1,
     borderColor: colors.borderSubtle,
+    maxWidth: '100%',
   },
   locationBadgeText: {
     ...typography.caption,
     fontSize: 10,
     color: colors.textMuted,
+    flexShrink: 1,
   },
   sectionCard: {
     backgroundColor: colors.card,
@@ -1742,23 +2803,31 @@ const styles = StyleSheet.create({
     padding: spacing.lg,
     borderWidth: 1,
     borderColor: colors.border,
+    overflow: 'hidden',
   },
   verificationHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    alignItems: 'center',
+    alignItems: 'flex-start',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
     marginBottom: spacing.xs,
   },
   verificationTitle: {
     ...typography.h3,
     color: colors.text,
     fontSize: 15,
+    flex: 1,
+    minWidth: 160,
   },
   verBadge: {
-    paddingHorizontal: spacing.sm,
-    paddingVertical: 2,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 3,
     borderRadius: borderRadius.full,
     borderWidth: 1,
+    alignSelf: 'flex-start',
+    flexShrink: 0,
+    marginTop: 2,
   },
   verBadgeVerified: {
     backgroundColor: colors.emeraldMuted,
@@ -1981,71 +3050,151 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     marginBottom: spacing.md,
   },
-  themesList: {
-    gap: spacing.sm,
-  },
-  themeCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: colors.backgroundElevated,
-    borderRadius: borderRadius.lg,
-    padding: spacing.md,
-    borderWidth: 1.5,
-    borderColor: colors.border,
-  },
-  themeCardActive: {
-    backgroundColor: colors.cardElevated,
-  },
-  themeSwatchContainer: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'relative',
-    marginRight: spacing.md,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.15)',
-    overflow: 'hidden',
-  },
-  themeSwatchAccent: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  themeSwatchEmoji: {
-    fontSize: 14,
-  },
-  themeSwatchSecondary: {
-    position: 'absolute',
-    bottom: 0,
-    right: 0,
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    borderWidth: 1.5,
-    borderColor: '#000',
-  },
-  themeDetails: {
-    flex: 1,
-  },
-  themeNameRow: {
+  themeDropdownTrigger: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 2,
+    padding: spacing.md,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1.5,
+    minHeight: 64,
   },
-  themeName: {
+  dropdownTriggerLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+    marginRight: spacing.sm,
+  },
+  triggerSwatchBadge: {
+    width: 38,
+    height: 38,
+    borderRadius: borderRadius.md,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+    flexShrink: 0,
+  },
+  triggerBadgeEmoji: {
+    fontSize: 18,
+  },
+  triggerTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  triggerNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  triggerThemeName: {
     ...typography.body,
     fontWeight: '700',
-    color: colors.text,
+    fontSize: 15,
   },
-  themeTagline: {
+  triggerThemeTagline: {
     ...typography.caption,
-    color: colors.textSubtle,
-    fontSize: 12,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  palettePreviewStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 6,
+  },
+  paletteDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 0.5,
+  },
+  chevronWrap: {
+    width: 28,
+    height: 28,
+    borderRadius: borderRadius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    marginLeft: 4,
+  },
+  chevronText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  themeDropdownMenu: {
+    marginTop: spacing.sm,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    overflow: 'hidden',
+  },
+  themeDropdownItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm + 2,
+    paddingHorizontal: spacing.md,
+    borderBottomWidth: 1,
+    minHeight: 52,
+  },
+  themeDropdownItemActive: {
+    borderLeftWidth: 3,
+  },
+  dropdownItemLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    minWidth: 0,
+    marginRight: spacing.sm,
+  },
+  itemSwatchBadge: {
+    width: 32,
+    height: 32,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1.5,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: spacing.sm,
+    flexShrink: 0,
+  },
+  itemBadgeEmoji: {
+    fontSize: 15,
+  },
+  itemTextCol: {
+    flex: 1,
+    minWidth: 0,
+  },
+  itemNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  itemThemeName: {
+    ...typography.body,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  itemThemeTagline: {
+    ...typography.caption,
+    fontSize: 11,
+    marginTop: 1,
+  },
+  itemPaletteStrip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexShrink: 0,
+    gap: 3,
+    marginLeft: spacing.xs,
+  },
+  paletteDotSmall: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    borderWidth: 0.5,
   },
   activePill: {
     paddingHorizontal: spacing.sm,
@@ -2058,6 +3207,117 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     fontSize: 10,
     letterSpacing: 0.5,
+  },
+  accordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.xs,
+  },
+  accordionTitleCol: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: spacing.sm,
+  },
+  accordionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  accordionIcon: {
+    fontSize: 18,
+    marginRight: 4,
+  },
+  accordionBadge: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  accordionBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  accordionDesc: {
+    ...typography.bodySmall,
+    color: colors.textSubtle,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  accordionChevronWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: borderRadius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  accordionChevronText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  accordionBody: {
+    marginTop: spacing.md,
+    borderTopWidth: 1,
+    paddingTop: spacing.md,
+  },
+  readOnlyFieldCard: {
+    borderRadius: borderRadius.md,
+    borderWidth: 1,
+    padding: spacing.md,
+    gap: spacing.xs,
+  },
+  readOnlyFieldRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'baseline',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  readOnlyFieldMain: {
+    ...typography.bodyLarge,
+    fontWeight: '700',
+  },
+  readOnlyFieldSub: {
+    ...typography.caption,
+    fontSize: 12,
+  },
+  readOnlyFieldNotice: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  miniVerifyBtn: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 4,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    marginTop: 4,
+  },
+  miniVerifyBtnText: {
+    ...typography.caption,
+    fontWeight: '700',
+    fontSize: 11,
+  },
+  bioCharCount: {
+    ...typography.caption,
+    alignSelf: 'flex-end',
+    marginTop: 4,
+    fontSize: 11,
+  },
+  noticeBox: {
+    padding: spacing.sm,
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    marginTop: spacing.xs,
+  },
+  noticeBoxText: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 15,
   },
 });
 
