@@ -169,6 +169,9 @@ export interface Match {
     avatar_url?: string;
     is_verified: boolean;
     gender_identities?: string[];
+    bio?: string;
+    age?: number;
+    relationship_structure?: string;
   };
   matched_at: string;
 }
@@ -303,4 +306,56 @@ export interface DiscoveryMessagingQuota {
   cooldown_seconds_remaining: number;
   cooldown_expires_at?: string;
   bonus_slots_remaining: number;
+}
+
+export interface PhotoCard {
+  asset_id: string;
+  thumb_url: string;
+  card_url: string;
+  full_url: string;
+}
+
+export interface IncomingLikeCard {
+  user_id: string;
+  display_name: string;
+  age: number;
+  bio: string;
+  approximate_distance_km: number;
+  is_photo_verified: boolean;
+  is_revealed: boolean;
+  liked_at: string;
+  photos: PhotoCard[];
+  blurred_photo_url?: string;
+  interaction_type: string;
+  is_super_like: boolean;
+}
+
+export interface LikesYouResponse {
+  total_likes: number;
+  revealed_count: number;
+  unrevealed_count: number;
+  free_reveals_remaining: number;
+  bonus_reveals_remaining: number;
+  cooldown_active: boolean;
+  cooldown_remaining_seconds: number;
+  rewarded_ad_enabled: boolean;
+  likes: IncomingLikeCard[];
+  ads_watched_in_window: number;
+  max_ads_per_window: number;
+  can_watch_ad: boolean;
+  ad_reset_in_seconds: number;
+  profiles_unlocked_in_window: number;
+  max_profiles_per_window: number;
+}
+
+export interface LikesYouUnlockAdResponse {
+  success: boolean;
+  ads_watched_in_window: number;
+  max_ads_per_window: number;
+  can_watch_ad: boolean;
+  ad_reset_in_seconds: number;
+  bonus_reveals_remaining: number;
+  newly_unlocked_user_ids: string[];
+  unlocked_count: number;
+  likes_you?: LikesYouResponse;
 }

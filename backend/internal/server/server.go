@@ -337,6 +337,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/discovery/matching-summary", communityMw(http.HandlerFunc(discoHandler.MatchingSummary)))
 	mux.Handle("/api/v1/discovery/likes-you", communityMw(http.HandlerFunc(discoHandler.LikesYou)))
 	mux.Handle("/api/v1/discovery/likes-you/reveal", communityMw(http.HandlerFunc(discoHandler.RevealLike)))
+	mux.Handle("/api/v1/discovery/likes-you/unlock-ad", communityMw(http.HandlerFunc(discoHandler.UnlockLikesYouAd)))
 	mux.Handle("/api/v1/discovery/message-requests", communityMw(http.HandlerFunc(discoHandler.MessageRequests)))
 	mux.Handle("/api/v1/discovery/message-requests/", communityMw(http.HandlerFunc(discoHandler.RespondMessageRequest)))
 	mux.Handle("/api/v1/discovery/messaging-quota", communityMw(http.HandlerFunc(discoHandler.MessagingQuota)))

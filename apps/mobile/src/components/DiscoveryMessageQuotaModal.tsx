@@ -127,7 +127,7 @@ export const DiscoveryMessageQuotaModal: React.FC<DiscoveryMessageQuotaModalProp
 
   const isAdUnlocked = Boolean(quota?.ad_unlocked);
   const bonusSlots = quota?.bonus_slots_remaining ?? 0;
-  const isTrialCooldown = isInTrial && (Boolean(quota?.cooldown_active) || trialDistinct >= 20);
+  const isTrialCooldown = isInTrial && (Boolean(quota?.cooldown_active) || trialDistinct >= 12);
   const canUnlockAd = Boolean(quota?.can_unlock_with_ad) && !isTrialCooldown;
 
   return (
@@ -138,7 +138,7 @@ export const DiscoveryMessageQuotaModal: React.FC<DiscoveryMessageQuotaModalProp
           <View style={[styles.badgeWrap, { backgroundColor: 'rgba(212,175,55,0.15)', borderColor: colors.gold }]}>
             <Text style={[styles.badgeText, { color: colors.gold }]}>
               {isTrialCooldown
-                ? '3-HOUR COOLDOWN • USAGE LIMIT'
+                ? '2-HOUR COOLDOWN • USAGE LIMIT'
                 : isInTrial
                 ? '30-DAY TRIAL • DISCOVERY MESSAGING'
                 : 'DISCOVERY MESSAGE QUOTA'}
@@ -154,7 +154,7 @@ export const DiscoveryMessageQuotaModal: React.FC<DiscoveryMessageQuotaModalProp
           </Text>
           <Text style={[styles.subtitle, { color: colors.textSubtle }]}>
             {isTrialCooldown
-              ? "You've reached your usage limit. Please try again in 3 hours."
+              ? "You've reached your usage limit. Please try again in 2 hours."
               : isInTrial
               ? 'During your 30-day trial, all conversation chats and replies are 100% unlimited. Discovery profile initiations are limited to 4 distinct profiles per batch. Watch a short video to unlock the next 4 profiles.'
               : 'Free members can initiate intro messages with 2 distinct Discovery profiles per cycle. Regular chat replies in existing matches remain completely free.'}

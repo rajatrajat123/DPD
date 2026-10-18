@@ -152,7 +152,7 @@ func TestDiscoveryMessagingQuota_30DayTrialLifecycle(t *testing.T) {
 		t.Fatalf("expected batch 1 locked at 8 profiles, got %+v", qBatch1)
 	}
 
-	// Watch rewarded ad #2 (allowed becomes 12)
+	// Watch rewarded ad #2 (allowed becomes 12, max 2 ads per cycle)
 	qUnlocked2, err := repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
 	if err != nil {
 		t.Fatalf("failed to unlock ad bonus 2: %v", err)
@@ -169,78 +169,44 @@ func TestDiscoveryMessagingQuota_30DayTrialLifecycle(t *testing.T) {
 		}
 	}
 
-	// Watch rewarded ad #3 (allowed becomes 16)
-	qUnlocked3, err := repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
+	// 9. Now 12 distinct profiles reached: must lock for exactly 2 hours!
+	q12, err := repo.GetDiscoveryMessageQuota(ctx, userA)
 	if err != nil {
-		t.Fatalf("failed to unlock ad bonus 3: %v", err)
+		t.Fatalf("failed to get quota after 12 profiles: %v", err)
 	}
-	if qUnlocked3.TrialInitiationsAllowed != 16 || qUnlocked3.TrialInitiationsRemaining != 4 {
-		t.Fatalf("expected 16 allowed after ad 3, got %+v", qUnlocked3)
+	if !q12.IsLocked {
+		t.Fatalf("expected locked state after 12 profiles: %+v", q12)
 	}
-
-	// Send to profiles 13, 14, 15, 16
-	for i := 13; i <= 16; i++ {
-		target := fmt.Sprintf("user-profile-%d", i)
-		if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, target); err != nil {
-			t.Fatalf("failed to message %s: %v", target, err)
-		}
+	if !q12.CooldownActive || q12.CooldownExpiresAt == nil {
+		t.Fatalf("expected active 2-hour cooldown after 12 profiles: %+v", q12)
 	}
-
-	// Watch rewarded ad #4 (allowed becomes 20, max ads for cycle reached)
-	qUnlocked4, err := repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
-	if err != nil {
-		t.Fatalf("failed to unlock ad bonus 4: %v", err)
+	if q12.CanUnlockWithAd {
+		t.Fatalf("no further ad unlocks allowed during 2-hour cooldown: %+v", q12)
 	}
-	if qUnlocked4.TrialInitiationsAllowed != 20 || qUnlocked4.TrialInitiationsRemaining != 4 {
-		t.Fatalf("expected 20 allowed after ad 4, got %+v", qUnlocked4)
+	if q12.CooldownSecondsRemaining <= 0 || q12.CooldownSecondsRemaining > 7200 {
+		t.Fatalf("expected ~7200 seconds cooldown, got %d", q12.CooldownSecondsRemaining)
 	}
 
-	// Send to profiles 17, 18, 19, 20
-	for i := 17; i <= 20; i++ {
-		target := fmt.Sprintf("user-profile-%d", i)
-		if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, target); err != nil {
-			t.Fatalf("failed to message %s: %v", target, err)
-		}
-	}
-
-	// 9. Now 20 distinct profiles reached: must lock for exactly 3 hours!
-	q20, err := repo.GetDiscoveryMessageQuota(ctx, userA)
-	if err != nil {
-		t.Fatalf("failed to get quota after 20 profiles: %v", err)
-	}
-	if !q20.IsLocked {
-		t.Fatalf("expected locked state after 20 profiles: %+v", q20)
-	}
-	if !q20.CooldownActive || q20.CooldownExpiresAt == nil {
-		t.Fatalf("expected active 3-hour cooldown after 20 profiles: %+v", q20)
-	}
-	if q20.CanUnlockWithAd {
-		t.Fatalf("no further ad unlocks allowed during 3-hour cooldown: %+v", q20)
-	}
-	if q20.CooldownSecondsRemaining <= 0 || q20.CooldownSecondsRemaining > 10800 {
-		t.Fatalf("expected ~10800 seconds cooldown, got %d", q20.CooldownSecondsRemaining)
-	}
-
-	// 10. Attempting 21st profile must fail with ErrDiscoveryMessageUsageLimitReached
-	err = repo.ConsumeDiscoveryMessageSlot(ctx, userA, "user-profile-21")
+	// 10. Attempting 13th profile must fail with ErrDiscoveryMessageUsageLimitReached
+	err = repo.ConsumeDiscoveryMessageSlot(ctx, userA, "user-profile-13")
 	if err != ErrDiscoveryMessageUsageLimitReached {
-		t.Fatalf("expected ErrDiscoveryMessageUsageLimitReached on 21st profile, got %v", err)
+		t.Fatalf("expected ErrDiscoveryMessageUsageLimitReached on 13th profile, got %v", err)
 	}
 
-	// 11. Attempting 5th ad unlock must be rejected
+	// 11. Attempting 3rd ad unlock must be rejected
 	_, err = repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
 	if err != ErrDiscoveryMessageUsageLimitReached && err != ErrDiscoveryMessageMaxAdsReached {
-		t.Fatalf("expected ad unlock to be rejected during 3-hour cooldown, got %v", err)
+		t.Fatalf("expected ad unlock to be rejected during 2-hour cooldown, got %v", err)
 	}
 
-	// 12. Chat in existing conversations remains unlimited even during 3-hour cooldown
+	// 12. Chat in existing conversations remains unlimited even during 2-hour cooldown
 	for i := 0; i < 5; i++ {
 		if err := repo.ConsumeChatOutgoingSlot(ctx, userA); err != nil {
-			t.Fatalf("chat messages during 3-hour cooldown must remain unlimited: %v", err)
+			t.Fatalf("chat messages during 2-hour cooldown must remain unlimited: %v", err)
 		}
 	}
 
-	// 13. Simulate 3-hour cooldown expiring -> cycle resets
+	// 13. Simulate 2-hour cooldown expiring -> cycle resets
 	repo.mu.Lock()
 	expiredAt := time.Now().UTC().Add(-1 * time.Minute)
 	repo.messagingQuotas[userA].CooldownExpiresAt = &expiredAt
@@ -257,13 +223,58 @@ func TestDiscoveryMessagingQuota_30DayTrialLifecycle(t *testing.T) {
 		t.Fatalf("cycle should reset to 4 allowed and 0 distinct, got %+v", qReset)
 	}
 
-	// 14. First message of new cycle succeeds immediately
-	if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, "user-cycle2-profile-1"); err != nil {
-		t.Fatalf("failed to send message in fresh cycle after cooldown: %v", err)
+	// 14. Cycle 2 end-to-end: verify full repeating cycle
+	// First 4 messages of cycle 2
+	for i := 1; i <= 4; i++ {
+		target := fmt.Sprintf("cycle2-profile-%d", i)
+		if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, target); err != nil {
+			t.Fatalf("cycle 2 message %d failed: %v", i, err)
+		}
 	}
-	qNewCycle, _ := repo.GetDiscoveryMessageQuota(ctx, userA)
-	if qNewCycle.TrialDistinctMessaged != 1 || qNewCycle.TrialInitiationsRemaining != 3 {
-		t.Fatalf("unexpected quota in new cycle: %+v", qNewCycle)
+	qC2Batch1, _ := repo.GetDiscoveryMessageQuota(ctx, userA)
+	if !qC2Batch1.IsLocked || !qC2Batch1.CanUnlockWithAd || qC2Batch1.TrialInitiationsRemaining != 0 {
+		t.Fatalf("expected cycle 2 batch 1 to lock with ad available: %+v", qC2Batch1)
+	}
+
+	// Watch Ad 1 of cycle 2 -> unlocks 4 more (allowed = 8)
+	qC2Ad1, err := repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
+	if err != nil || qC2Ad1.TrialInitiationsAllowed != 8 || qC2Ad1.TrialInitiationsRemaining != 4 {
+		t.Fatalf("cycle 2 ad 1 failed: %+v, err: %v", qC2Ad1, err)
+	}
+	for i := 5; i <= 8; i++ {
+		target := fmt.Sprintf("cycle2-profile-%d", i)
+		if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, target); err != nil {
+			t.Fatalf("cycle 2 message %d failed: %v", i, err)
+		}
+	}
+
+	// Watch Ad 2 of cycle 2 -> unlocks 4 more (allowed = 12)
+	qC2Ad2, err := repo.UnlockDiscoveryMessageAdBonus(ctx, userA)
+	if err != nil || qC2Ad2.TrialInitiationsAllowed != 12 || qC2Ad2.TrialInitiationsRemaining != 4 {
+		t.Fatalf("cycle 2 ad 2 failed: %+v, err: %v", qC2Ad2, err)
+	}
+	for i := 9; i <= 12; i++ {
+		target := fmt.Sprintf("cycle2-profile-%d", i)
+		if err := repo.ConsumeDiscoveryMessageSlot(ctx, userA, target); err != nil {
+			t.Fatalf("cycle 2 message %d failed: %v", i, err)
+		}
+	}
+
+	// Cycle 2 now enters 2-hour cooldown
+	qC2Cooldown, _ := repo.GetDiscoveryMessageQuota(ctx, userA)
+	if !qC2Cooldown.IsLocked || !qC2Cooldown.CooldownActive || qC2Cooldown.CooldownExpiresAt == nil {
+		t.Fatalf("expected cycle 2 to enter 2-hour cooldown after 12 profiles: %+v", qC2Cooldown)
+	}
+
+	// Expire cycle 2 cooldown -> automatically resets to cycle 3
+	repo.mu.Lock()
+	expiredAt2 := time.Now().UTC().Add(-1 * time.Minute)
+	repo.messagingQuotas[userA].CooldownExpiresAt = &expiredAt2
+	repo.mu.Unlock()
+
+	qC3Reset, _ := repo.GetDiscoveryMessageQuota(ctx, userA)
+	if qC3Reset.IsLocked || qC3Reset.TrialInitiationsRemaining != 4 || qC3Reset.TrialDistinctMessaged != 0 {
+		t.Fatalf("cycle 3 must automatically reset: %+v", qC3Reset)
 	}
 }
 
@@ -353,8 +364,8 @@ func TestDiscoveryMessagingQuota_UnlimitedEntitlementImmunity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get quota: %v", err)
 	}
-	if !quota.IsUnlimited || quota.IsLocked {
-		t.Fatalf("expected VIP to have unlimited messaging: %+v", quota)
+	if !quota.IsUnlimited || quota.IsLocked || quota.TrialInitiationsRemaining != 0 || quota.TrialInitiationsAllowed != 0 {
+		t.Fatalf("expected VIP to have unlimited messaging without 9999 numbers: %+v", quota)
 	}
 
 	// VIP sends many chat and discovery messages without restrictions
@@ -366,6 +377,32 @@ func TestDiscoveryMessagingQuota_UnlimitedEntitlementImmunity(t *testing.T) {
 		if err := repo.ConsumeChatOutgoingSlot(ctx, userVIP); err != nil {
 			t.Fatalf("VIP failed to consume chat slot %d: %v", i, err)
 		}
+	}
+
+	// CRITICAL ROOT-CAUSE TEST:
+	// A user with UNLIMITED_SWIPES from MATCH_REWARD (swipe match reward)
+	// must NOT be treated as having unlimited messaging and must NEVER receive 9999 initiations!
+	userMatched := "user-matched-free"
+	repo.mu.Lock()
+	repo.entitlements[userMatched] = append(repo.entitlements[userMatched], entitlementRecord{
+		Code:      "UNLIMITED_SWIPES",
+		ExpiresAt: time.Now().UTC().Add(24 * time.Hour),
+		Source:    "MATCH_REWARD",
+	})
+	repo.mu.Unlock()
+
+	matchedQuota, err := repo.GetDiscoveryMessageQuota(ctx, userMatched)
+	if err != nil {
+		t.Fatalf("failed to get matched user quota: %v", err)
+	}
+	if matchedQuota.IsUnlimited {
+		t.Fatalf("MATCH_REWARD must NEVER grant unlimited messaging: %+v", matchedQuota)
+	}
+	if matchedQuota.TrialInitiationsRemaining == 9999 || matchedQuota.TrialInitiationsAllowed == 9999 {
+		t.Fatalf("MATCH_REWARD resulted in 9999 initiations bug! got %+v", matchedQuota)
+	}
+	if matchedQuota.TrialInitiationsRemaining != 4 || matchedQuota.TrialInitiationsAllowed != 4 {
+		t.Fatalf("expected normal 4 trial initiations for free user with match reward, got %+v", matchedQuota)
 	}
 }
 

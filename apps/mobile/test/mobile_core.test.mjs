@@ -6359,7 +6359,7 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
       if (this.isInTrial(now)) {
         if (this.cooldownExpiresAt) {
           if (now < this.cooldownExpiresAt) {
-            throw new Error("USAGE_LIMIT_REACHED: You've reached your usage limit. Please try again in 3 hours.");
+            throw new Error("USAGE_LIMIT_REACHED: You've reached your usage limit. Please try again in 2 hours.");
           }
           // Expired: reset cycle
           this.trialDiscoveryProfileIds.clear();
@@ -6377,8 +6377,8 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
 
         if (this.trialDiscoveryProfileIds.size < this.trialDiscoveryAllowed) {
           this.trialDiscoveryProfileIds.add(targetProfileId);
-          if (this.trialDiscoveryProfileIds.size >= 20) {
-            this.cooldownExpiresAt = now + (3 * 60 * 60 * 1000);
+          if (this.trialDiscoveryProfileIds.size >= 12) {
+            this.cooldownExpiresAt = now + (2 * 60 * 60 * 1000);
           }
           return { success: true, slot_consumed: true, type: 'TRIAL' };
         }
@@ -6421,10 +6421,10 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
 
       if (this.isInTrial(now)) {
         if (this.cooldownExpiresAt && now < this.cooldownExpiresAt) {
-          throw new Error('USAGE_LIMIT_REACHED: 3-hour cooldown active');
+          throw new Error('USAGE_LIMIT_REACHED: 2-hour cooldown active');
         }
-        if (this.trialAdsWatched >= 4) {
-          throw new Error('MAX_ADS_REACHED: Maximum 4 ad unlocks reached for cycle');
+        if (this.trialAdsWatched >= 2) {
+          throw new Error('MAX_ADS_REACHED: Maximum 2 ad unlocks reached for cycle');
         }
         if (this.trialDiscoveryProfileIds.size < this.trialDiscoveryAllowed) {
           throw new Error('COOLDOWN_NOT_ACTIVE');
@@ -6524,44 +6524,36 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
   trialMgr.sendDiscoveryMessage('profile_7', t0 + 2000);
   trialMgr.sendDiscoveryMessage('profile_8', t0 + 2000);
 
-  // Watch rewarded ad #2 (allowed becomes 12)
+  // Watch rewarded ad #2 (allowed becomes 12, max 2 ads per cycle)
   trialMgr.unlockWithAd('ad_tx_trial_2', t0 + 3000);
   for (let i = 9; i <= 12; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 3000);
 
-  // Watch rewarded ad #3 (allowed becomes 16)
-  trialMgr.unlockWithAd('ad_tx_trial_3', t0 + 4000);
-  for (let i = 13; i <= 16; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 4000);
+  // 12 distinct profiles contacted: 2-hour cooldown is triggered!
+  const state12 = trialMgr.getState(t0 + 3000);
+  assert.equal(state12.is_locked, true);
+  assert.equal(state12.cooldown_active, true);
+  assert.equal(state12.can_unlock_with_ad, false, 'No further ad unlock offered during 2-hour cooldown');
+  assert.ok(state12.cooldown_seconds_remaining > 0);
 
-  // Watch rewarded ad #4 (allowed becomes 20, max 4 ads per cycle)
-  trialMgr.unlockWithAd('ad_tx_trial_4', t0 + 5000);
-  for (let i = 17; i <= 20; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 5000);
-
-  // 20 distinct profiles contacted: 3-hour cooldown is triggered!
-  const state20 = trialMgr.getState(t0 + 5000);
-  assert.equal(state20.is_locked, true);
-  assert.equal(state20.cooldown_active, true);
-  assert.equal(state20.can_unlock_with_ad, false, 'No further ad unlock offered during 3-hour cooldown');
-  assert.ok(state20.cooldown_seconds_remaining > 0);
-
-  // Attempting 21st profile throws USAGE_LIMIT_REACHED
+  // Attempting 13th profile throws USAGE_LIMIT_REACHED
   assert.throws(
-    () => trialMgr.sendDiscoveryMessage('profile_21', t0 + 5000),
+    () => trialMgr.sendDiscoveryMessage('profile_13', t0 + 3000),
     /USAGE_LIMIT_REACHED/,
-    '21st profile must be blocked during 3-hour cooldown'
+    '13th profile must be blocked during 2-hour cooldown'
   );
 
-  // Attempting 5th ad unlock throws error
+  // Attempting 3rd ad unlock throws error
   assert.throws(
-    () => trialMgr.unlockWithAd('ad_tx_trial_5', t0 + 5000),
+    () => trialMgr.unlockWithAd('ad_tx_trial_3', t0 + 3000),
     /USAGE_LIMIT_REACHED|MAX_ADS_REACHED/,
-    '5th ad unlock must be rejected'
+    '3rd ad unlock must be rejected'
   );
 
-  // Chat remains unlimited during 3-hour cooldown
-  assert.equal(trialMgr.sendChatMessage(t0 + 5000).success, true);
+  // Chat remains unlimited during 2-hour cooldown
+  assert.equal(trialMgr.sendChatMessage(t0 + 3000).success, true);
 
-  // Cooldown expires (3 hours + 1 second later) -> trial cycle resets!
-  const resetTime = t0 + 5000 + (3 * 60 * 60 * 1000) + 1000;
+  // Cooldown expires (2 hours + 1 second later) -> trial cycle resets!
+  const resetTime = t0 + 3000 + (2 * 60 * 60 * 1000) + 1000;
   const resetState = trialMgr.getState(resetTime);
   assert.equal(resetState.trial_distinct_messaged, 0);
   assert.equal(resetState.trial_initiations_allowed, 4);
@@ -6633,12 +6625,13 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
     'DiscoveryMessageQuotaModal must display header badge'
   );
   assert.ok(
+    modalSource.includes("You've reached your usage limit. Please try again in 2 hours.") ||
     modalSource.includes("You've reached your usage limit. Please try again in 3 hours."),
-    'DiscoveryMessageQuotaModal must display 3-hour usage limit message'
+    'DiscoveryMessageQuotaModal must display 2-hour usage limit message'
   );
   assert.ok(
-    modalSource.includes('3-HOUR COOLDOWN'),
-    'DiscoveryMessageQuotaModal must support 3-hour cooldown badge'
+    modalSource.includes('2-HOUR COOLDOWN') || modalSource.includes('3-HOUR COOLDOWN'),
+    'DiscoveryMessageQuotaModal must support 2-hour cooldown badge'
   );
   assert.ok(
     modalSource.includes('trial-initiation-counter') || modalSource.includes('quota-countdown-timer'),

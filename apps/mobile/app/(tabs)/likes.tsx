@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   ActivityIndicator,
   RefreshControl,
   Dimensions,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -16,34 +17,56 @@ import { colors, typography, spacing, borderRadius, useTheme } from '../../src/t
 import { useAuth } from '../../src/context/AuthContext';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
+import { admobService } from '../../src/services/ads/admobService';
 import { chatService } from '../../src/services/chat/chatService';
-import { Match } from '../../src/types';
+import { IncomingLikeCard, LikesYouResponse, Match } from '../../src/types';
 import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanner';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const GRID_CARD_WIDTH = (SCREEN_WIDTH - spacing.lg * 2 - spacing.md) / 2;
 
+function formatCountdown(totalSeconds: number): string {
+  if (totalSeconds <= 0) return '00:00:00';
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
 export default function LikesScreen() {
   const router = useRouter();
-  const { isAgeVerified } = useAuth();
+  const { user, isAgeVerified } = useAuth();
   const { colors } = useTheme();
 
   const [hasVipAccess, setHasVipAccess] = useState(false);
   const [nearbyCount, setNearbyCount] = useState<string>('');
+  const [likesData, setLikesData] = useState<LikesYouResponse | null>(null);
   const [matches, setMatches] = useState<Match[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isWatchingAd, setIsWatchingAd] = useState(false);
+  const [adFeedback, setAdFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+  const [secondsRemaining, setSecondsRemaining] = useState<number>(0);
+
+  const countdownTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const loadLikesData = useCallback(async () => {
     try {
       // 1. Check authoritative billing entitlements
-      const entitlements = await storeBilling.getActiveEntitlements();
-      const rawEnts = entitlements?.entitlements;
-      const entitlementList: string[] = Array.isArray(rawEnts)
-        ? rawEnts.map((e: any) => (typeof e === 'string' ? e : e?.entitlement_code || ''))
-        : [];
-      const canSeeLikes = entitlementList.includes('SEE_WHO_LIKED_YOU');
-      setHasVipAccess(canSeeLikes);
+      let canSeeLikes = false;
+      try {
+        const entitlements = await storeBilling.getActiveEntitlements();
+        const rawEnts = entitlements?.entitlements;
+        const entitlementList: string[] = Array.isArray(rawEnts)
+          ? rawEnts.map((e: any) => (typeof e === 'string' ? e : e?.entitlement_code || ''))
+          : [];
+        canSeeLikes = entitlementList.includes('SEE_WHO_LIKED_YOU');
+        setHasVipAccess(canSeeLikes);
+      } catch {
+        // Default to free tier on entitlement fetch error
+        setHasVipAccess(false);
+      }
 
       // 2. Fetch privacy-preserving nearby count summary
       try {
@@ -55,7 +78,16 @@ export default function LikesScreen() {
         // Summary fallback
       }
 
-      // 3. If entitled, fetch available match Sparks
+      // 3. Fetch Likes You response
+      try {
+        const resp = await discoveryService.getLikesYou(50, 0);
+        setLikesData(resp);
+        setSecondsRemaining(resp.ad_reset_in_seconds || 0);
+      } catch {
+        // Failed to load likes
+      }
+
+      // 4. If VIP, also fetch mutual matches
       if (canSeeLikes) {
         try {
           const res = await chatService.getMatches();
@@ -76,8 +108,40 @@ export default function LikesScreen() {
     loadLikesData();
   }, [loadLikesData]);
 
+  // Live countdown timer for 25-hour ad limit reset
+  useEffect(() => {
+    if (countdownTimerRef.current) {
+      clearInterval(countdownTimerRef.current);
+      countdownTimerRef.current = null;
+    }
+
+    if (secondsRemaining > 0) {
+      countdownTimerRef.current = setInterval(() => {
+        setSecondsRemaining((prev) => {
+          if (prev <= 1) {
+            if (countdownTimerRef.current) {
+              clearInterval(countdownTimerRef.current);
+              countdownTimerRef.current = null;
+            }
+            // Cooldown finished, reload data
+            loadLikesData();
+            return 0;
+          }
+          return prev - 1;
+        });
+      }, 1000);
+    }
+
+    return () => {
+      if (countdownTimerRef.current) {
+        clearInterval(countdownTimerRef.current);
+      }
+    };
+  }, [secondsRemaining, loadLikesData]);
+
   const onRefresh = () => {
     setIsRefreshing(true);
+    setAdFeedback(null);
     loadLikesData();
   };
 
@@ -85,18 +149,121 @@ export default function LikesScreen() {
     router.push('/(tabs)/membership');
   };
 
+  const handleWatchAd = async () => {
+    if (isWatchingAd) return;
+
+    if (likesData && !likesData.can_watch_ad) {
+      Alert.alert(
+        'Limit Reached',
+        `You have reached the maximum of 5 rewarded ads per 25-hour window. Next unlock available in ${formatCountdown(secondsRemaining)}.`
+      );
+      return;
+    }
+
+    setAdFeedback(null);
+    setIsWatchingAd(true);
+
+    try {
+      const userId = user?.id || 'guest_user';
+      // Present rewarded ad with specific Likes You unlock purpose
+      const adResult = await admobService.showRewardedAd(userId, 'likes_you_unlock');
+
+      if (!adResult.rewarded) {
+        setAdFeedback({
+          type: 'error',
+          message: adResult.error || 'Ad could not be completed. Please try again.',
+        });
+        return;
+      }
+
+      // Unlock 2 profiles via backend endpoint
+      const unlockRes = await discoveryService.unlockLikesYouWithAd(adResult.transactionId);
+
+      if (unlockRes.success) {
+        const count = unlockRes.unlocked_count || 2;
+        setAdFeedback({
+          type: 'success',
+          message: `✨ ${count} profile${count === 1 ? '' : 's'} unlocked!`,
+        });
+
+        if (unlockRes.likes_you) {
+          setLikesData(unlockRes.likes_you);
+          setSecondsRemaining(unlockRes.ad_reset_in_seconds || 0);
+        } else {
+          await loadLikesData();
+        }
+      } else {
+        setAdFeedback({
+          type: 'error',
+          message: 'Unable to verify ad reward on the server. Please try again.',
+        });
+      }
+    } catch (err: any) {
+      const errMsg = err?.message || 'Failed to unlock profiles. Please try again.';
+      setAdFeedback({
+        type: 'error',
+        message: errMsg,
+      });
+    } finally {
+      setIsWatchingAd(false);
+    }
+  };
+
+  const handleCardPress = (card: IncomingLikeCard) => {
+    if (hasVipAccess || card.is_revealed) {
+      // Navigate to chat/connection
+      router.push({
+        pathname: '/chat/[id]',
+        params: {
+          id: card.user_id,
+          name: card.display_name,
+          recipientId: card.user_id,
+          avatar: card.photos?.[0]?.card_url || '',
+        },
+      });
+    } else {
+      Alert.alert(
+        'Profile Hidden',
+        'Watch a rewarded video ad above to reveal 2 liked profiles, or upgrade to Aura VIP for instant reveals.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Watch Ad', onPress: handleWatchAd },
+          { text: 'Upgrade to VIP', onPress: handleUpgrade },
+        ]
+      );
+    }
+  };
+
+  const totalLikesCount = likesData?.total_likes || 0;
+  const revealedCount = likesData?.revealed_count || 0;
+  const incomingLikes = likesData?.likes || [];
+  const adsWatched = likesData?.ads_watched_in_window || 0;
+  const maxAds = likesData?.max_ads_per_window || 5;
+  const canWatchAd = likesData?.can_watch_ad ?? true;
+
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: colors.background }]}>
       <View style={[styles.header, { borderBottomColor: colors.borderSubtle }]}>
         <View>
           <Text style={[styles.title, { color: colors.text }]}>Likes</Text>
-          <Text style={[styles.subtitle, { color: colors.gold }]}>Interested In Your Profile</Text>
+          <Text style={[styles.subtitle, { color: colors.gold }]}>
+            {hasVipAccess ? 'Aura VIP • Instant Sparks' : 'Interested In Your Profile'}
+          </Text>
         </View>
-        {nearbyCount ? (
-          <View style={[styles.counterBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
-            <Text style={[styles.counterText, { color: colors.gold }]}>📍 {nearbyCount}</Text>
-          </View>
-        ) : null}
+        <View style={styles.headerRight}>
+          {totalLikesCount > 0 && (
+            <View style={[styles.counterBadge, { backgroundColor: colors.card, borderColor: colors.gold }]}>
+              <Text style={[styles.counterText, { color: colors.gold, fontWeight: '700' }]}>
+                ♥ {totalLikesCount}
+              </Text>
+            </View>
+          )}
+          {nearbyCount ? (
+            <View style={[styles.counterBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+              <Text style={[styles.counterText, { color: colors.gold }]}>📍 {nearbyCount}</Text>
+            </View>
+          ) : null}
+        </View>
       </View>
 
       {!isAgeVerified && (
@@ -120,53 +287,306 @@ export default function LikesScreen() {
             />
           }
         >
-          {/* Locked Free Tier View */}
+          {/* FREE USER EXPERIENCE */}
           {!hasVipAccess ? (
             <View style={styles.lockedContainer}>
+              {/* VIP Upgrade Banner */}
               <View style={[styles.vipBanner, { backgroundColor: colors.card, borderColor: colors.border }]}>
                 <View style={[styles.vipIconWrap, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
                   <Text style={styles.vipIcon}>👑</Text>
                 </View>
                 <Text style={[styles.vipBannerTitle, { color: colors.text }]}>See Who Liked You</Text>
                 <Text style={[styles.vipBannerBody, { color: colors.textMuted }]}>
-                  Reveal everyone who has sent you a Like and match with them instantly without waiting in the deck.
+                  Upgrade to Aura VIP to reveal all incoming likes instantly and match with zero wait.
                 </Text>
                 <TouchableOpacity style={[styles.upgradeBtn, { backgroundColor: colors.gold }]} onPress={handleUpgrade} activeOpacity={0.85}>
                   <Text style={[styles.upgradeBtnText, { color: colors.textInverse }]}>Upgrade to Aura VIP</Text>
                 </TouchableOpacity>
               </View>
 
-              <Text style={styles.previewHeading}>Recent Activity (Locked)</Text>
-
-              {/* Privacy-preserving blurred placeholder cards */}
-              <View style={styles.grid}>
-                {[1, 2, 3, 4].map((item) => (
-                  <View key={item} style={[styles.lockedCard, { backgroundColor: colors.card, borderColor: colors.borderSubtle }]}>
-                    <View style={styles.silhouetteWrap}>
-                      <Text style={styles.silhouetteIcon}>👤</Text>
-                    </View>
-                    <View style={styles.lockOverlay}>
-                      <View style={[styles.padlockCircle, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
-                        <Text style={styles.padlockText}>🔒</Text>
-                      </View>
-                      <Text style={[styles.lockedCardText, { color: colors.gold }]}>Liked your profile</Text>
-                    </View>
+              {/* Rewarded Ad Unlock Card */}
+              <View style={[styles.adRewardCard, { backgroundColor: colors.card, borderColor: canWatchAd ? colors.gold : colors.borderSubtle }]}>
+                <View style={styles.adRewardHeader}>
+                  <View style={[styles.adIconCircle, { backgroundColor: canWatchAd ? colors.goldMuted : colors.cardElevated }]}>
+                    <Text style={styles.adIconText}>{canWatchAd ? '🎬' : '⏳'}</Text>
                   </View>
-                ))}
+                  <View style={styles.adRewardHeaderText}>
+                    <Text style={[styles.adRewardTitle, { color: colors.text }]}>
+                      {canWatchAd ? 'Watch Ad to Unlock 2 Profiles' : '25-Hour Ad Limit Reached'}
+                    </Text>
+                    <Text style={[styles.adRewardSubtitle, { color: colors.textMuted }]}>
+                      {canWatchAd
+                        ? 'Watch a quick video to reveal 2 liked profiles.'
+                        : 'Maximum 5 ads (10 profiles unlocked) in this rolling window.'}
+                    </Text>
+                  </View>
+                </View>
+
+                {/* Window Quota Progress */}
+                <View style={styles.adProgressContainer}>
+                  <View style={styles.adProgressRow}>
+                    <Text style={[styles.adProgressLabel, { color: colors.textMuted }]}>Window Progress</Text>
+                    <Text style={[styles.adProgressValue, { color: colors.gold }]}>
+                      {adsWatched} / {maxAds} Ads Watched ({adsWatched * 2} / 10 Profiles)
+                    </Text>
+                  </View>
+                  <View style={[styles.progressBarTrack, { backgroundColor: colors.cardElevated }]}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        {
+                          width: `${Math.min(100, (adsWatched / maxAds) * 100)}%`,
+                          backgroundColor: canWatchAd ? colors.gold : colors.textMuted,
+                        },
+                      ]}
+                    />
+                  </View>
+                </View>
+
+                {/* Feedback Banner */}
+                {adFeedback && (
+                  <View
+                    style={[
+                      styles.feedbackBanner,
+                      adFeedback.type === 'success'
+                        ? { backgroundColor: 'rgba(16, 185, 129, 0.15)', borderColor: colors.emerald }
+                        : { backgroundColor: 'rgba(239, 68, 68, 0.15)', borderColor: '#ef4444' },
+                    ]}
+                  >
+                    <Text
+                      style={[
+                        styles.feedbackText,
+                        { color: adFeedback.type === 'success' ? colors.emerald : '#ef4444' },
+                      ]}
+                    >
+                      {adFeedback.message}
+                    </Text>
+                  </View>
+                )}
+
+                {/* Ad Button or Live Countdown */}
+                {canWatchAd ? (
+                  <TouchableOpacity
+                    style={[styles.watchAdBtn, { backgroundColor: colors.gold }]}
+                    onPress={handleWatchAd}
+                    disabled={isWatchingAd}
+                    activeOpacity={0.85}
+                  >
+                    {isWatchingAd ? (
+                      <View style={styles.adBtnLoadingRow}>
+                        <ActivityIndicator color={colors.textInverse} size="small" />
+                        <Text style={[styles.watchAdBtnText, { color: colors.textInverse, marginLeft: 8 }]}>
+                          Loading Video...
+                        </Text>
+                      </View>
+                    ) : (
+                      <Text style={[styles.watchAdBtnText, { color: colors.textInverse }]}>
+                        ▶ Watch Video to Unlock 2 Likes
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <View style={[styles.limitCooldownBox, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
+                    <Text style={[styles.limitCooldownLabel, { color: colors.textMuted }]}>
+                      Next ad unlock available in:
+                    </Text>
+                    <Text style={[styles.limitCountdownText, { color: colors.gold }]}>
+                      {formatCountdown(secondsRemaining)}
+                    </Text>
+                    <TouchableOpacity style={styles.instantRevealLink} onPress={handleUpgrade} activeOpacity={0.8}>
+                      <Text style={[styles.instantRevealLinkText, { color: colors.gold }]}>
+                        Skip wait with Aura VIP →
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
+
+              {/* Likes Activity Section */}
+              <View style={styles.sectionHeaderRow}>
+                <Text style={[styles.sectionHeading, { color: colors.textMuted }]}>
+                  INCOMING LIKES ({totalLikesCount})
+                </Text>
+                {revealedCount > 0 && (
+                  <Text style={[styles.revealedCounterText, { color: colors.emerald }]}>
+                    ✓ {revealedCount} Unlocked
+                  </Text>
+                )}
+              </View>
+
+              {/* Empty State */}
+              {totalLikesCount === 0 ? (
+                <View style={[styles.emptyContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
+                  <View style={[styles.emptyIconCircle, { backgroundColor: colors.likeMuted, borderColor: colors.like }]}>
+                    <Text style={styles.emptyIconText}>♥</Text>
+                  </View>
+                  <Text style={[styles.emptyTitle, { color: colors.text }]}>No New Likes Right Now</Text>
+                  <Text style={[styles.emptyBody, { color: colors.textMuted }]}>
+                    As soon as members in your area swipe right on your profile, their cards will appear here.
+                  </Text>
+                  <TouchableOpacity style={[styles.emptyRefreshBtn, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]} onPress={onRefresh} activeOpacity={0.8}>
+                    <Text style={[styles.emptyRefreshBtnText, { color: colors.gold }]}>Check Again</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.grid}>
+                  {incomingLikes.map((card) => {
+                    const isRevealed = card.is_revealed;
+                    const primaryPhoto = card.photos && card.photos.length > 0 ? card.photos[0].card_url : null;
+
+                    return (
+                      <TouchableOpacity
+                        key={card.user_id}
+                        style={[
+                          styles.likeCard,
+                          {
+                            backgroundColor: colors.card,
+                            borderColor: card.is_super_like ? colors.gold : isRevealed ? colors.emerald : colors.borderSubtle,
+                          },
+                        ]}
+                        onPress={() => handleCardPress(card)}
+                        activeOpacity={0.85}
+                      >
+                        {/* UNREVEALED / BLURRED CARD */}
+                        {!isRevealed ? (
+                          <View style={styles.blurredCardInner}>
+                            {/* Background Silhouette */}
+                            <View style={styles.silhouetteWrap}>
+                              <Text style={styles.silhouetteIcon}>👤</Text>
+                            </View>
+
+                            {/* Lock Overlay */}
+                            <View style={styles.lockOverlay}>
+                              <View style={[styles.padlockCircle, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                                <Text style={styles.padlockText}>🔒</Text>
+                              </View>
+                              <Text style={[styles.lockedCardText, { color: colors.gold }]}>
+                                {card.is_super_like ? '⭐ Super Like!' : 'Someone liked you'}
+                              </Text>
+                              <Text style={[styles.distanceText, { color: colors.textMuted }]}>
+                                ~{card.approximate_distance_km} km away
+                              </Text>
+                              <View style={[styles.tapToUnlockBadge, { backgroundColor: colors.cardElevated }]}>
+                                <Text style={[styles.tapToUnlockText, { color: colors.gold }]}>
+                                  Tap to reveal
+                                </Text>
+                              </View>
+                            </View>
+                          </View>
+                        ) : (
+                          /* UNLOCKED CARD */
+                          <View style={styles.revealedCardInner}>
+                            {primaryPhoto ? (
+                              <Image source={{ uri: primaryPhoto }} style={styles.cardImage} />
+                            ) : (
+                              <View style={[styles.cardImage, styles.cardImageFallback, { backgroundColor: colors.cardElevated }]}>
+                                <Text style={[styles.cardMonogram, { color: colors.gold }]}>
+                                  {card.display_name.charAt(0)}
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Super Like Badge */}
+                            {card.is_super_like && (
+                              <View style={[styles.superLikeBadge, { backgroundColor: colors.gold }]}>
+                                <Text style={[styles.superLikeBadgeText, { color: colors.textInverse }]}>
+                                  ⭐ Super Like
+                                </Text>
+                              </View>
+                            )}
+
+                            {/* Card Footer */}
+                            <View style={styles.cardGradientOverlay}>
+                              <View style={styles.cardNameRow}>
+                                <Text style={[styles.cardName, { color: colors.text }]} numberOfLines={1}>
+                                  {card.display_name}, {card.age}
+                                </Text>
+                                {card.is_photo_verified && (
+                                  <Text style={styles.cardVerified}>✓</Text>
+                                )}
+                              </View>
+                              <Text style={[styles.cardDistanceRow, { color: colors.textMuted }]}>
+                                📍 ~{card.approximate_distance_km} km away
+                              </Text>
+                              <Text style={styles.cardActionHint}>Tap to connect</Text>
+                            </View>
+                          </View>
+                        )}
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              )}
             </View>
           ) : (
-            /* Entitled VIP View */
-            <View style={styles.unlockedContainer}>
+            /* VIP / PREMIUM USER EXPERIENCE */
+            <View style={styles.vipContainer}>
               <View style={styles.unlockedHeader}>
+                <View style={styles.vipBadgeRow}>
+                  <View style={[styles.vipCrownBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                    <Text style={styles.vipCrownIcon}>👑</Text>
+                    <Text style={[styles.vipCrownText, { color: colors.gold }]}>AURA VIP UNLIMITED</Text>
+                  </View>
+                </View>
                 <Text style={[styles.unlockedTitle, { color: colors.text }]}>Your Incoming Sparks</Text>
                 <Text style={[styles.unlockedSubtitle, { color: colors.textMuted }]}>
-                  You hold active Aura VIP access. Tap any member to connect.
+                  All profiles interested in you are unlocked and ready for mutual connection.
                 </Text>
               </View>
 
-              {matches.length === 0 ? (
-                <View style={styles.emptyContainer}>
+              {/* Mutual Sparks (VIP) */}
+              {matches.length > 0 && (
+                <View style={{ marginBottom: spacing.lg }}>
+                  <Text style={[styles.sectionHeading, { color: colors.gold, marginBottom: spacing.sm }]}>
+                    Mutual Sparks ({matches.length})
+                  </Text>
+                  <View style={styles.grid}>
+                    {matches.map((m) => (
+                      <TouchableOpacity
+                        key={m.id}
+                        style={[styles.likeCard, { backgroundColor: colors.card, borderColor: colors.gold }]}
+                        onPress={() =>
+                          router.push({
+                            pathname: '/chat/[id]',
+                            params: {
+                              id: m.id,
+                              name: m.target_profile.display_name,
+                              recipientId: m.target_profile.user_id,
+                              avatar: m.target_profile.avatar_url || '',
+                            },
+                          })
+                        }
+                        activeOpacity={0.85}
+                      >
+                        {m.target_profile.avatar_url ? (
+                          <Image source={{ uri: m.target_profile.avatar_url }} style={styles.cardImage} />
+                        ) : (
+                          <View style={[styles.cardImage, styles.cardImageFallback, { backgroundColor: colors.cardElevated }]}>
+                            <Text style={[styles.cardMonogram, { color: colors.gold }]}>
+                              {m.target_profile.display_name.charAt(0)}
+                            </Text>
+                          </View>
+                        )}
+                        <View style={styles.cardGradientOverlay}>
+                          <View style={styles.cardNameRow}>
+                            <Text style={[styles.cardName, { color: colors.text }]} numberOfLines={1}>
+                              {m.target_profile.display_name}
+                            </Text>
+                            {m.target_profile.is_verified && (
+                              <Text style={styles.cardVerified}>✓</Text>
+                            )}
+                          </View>
+                          <Text style={styles.cardDistanceRow}>Mutual Spark</Text>
+                          <Text style={styles.cardActionHint}>Tap to chat</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                </View>
+              )}
+
+              {totalLikesCount === 0 && matches.length === 0 ? (
+                <View style={[styles.emptyContainer, { backgroundColor: colors.card, borderColor: colors.border }]}>
                   <View style={[styles.emptyIconCircle, { backgroundColor: colors.cardElevated }]}>
                     <Text style={styles.emptyIconText}>♥</Text>
                   </View>
@@ -179,47 +599,66 @@ export default function LikesScreen() {
                   </TouchableOpacity>
                 </View>
               ) : (
-                <View style={styles.grid}>
-                  {matches.map((m) => (
-                    <TouchableOpacity
-                      key={m.id}
-                      style={[styles.matchCard, { backgroundColor: colors.card, borderColor: colors.border }]}
-                      onPress={() =>
-                        router.push({
-                          pathname: '/chat/[id]',
-                          params: {
-                            id: m.id,
-                            name: m.target_profile.display_name,
-                            recipientId: m.target_profile.user_id,
-                            avatar: m.target_profile.avatar_url || '',
+                <View>
+                  {totalLikesCount > 0 && (
+                    <View style={styles.sectionHeaderRow}>
+                      <Text style={[styles.sectionHeading, { color: colors.textMuted }]}>
+                        INCOMING LIKES ({totalLikesCount})
+                      </Text>
+                    </View>
+                  )}
+                  <View style={styles.grid}>
+                  {incomingLikes.map((card) => {
+                    const primaryPhoto = card.photos && card.photos.length > 0 ? card.photos[0].card_url : null;
+                    return (
+                      <TouchableOpacity
+                        key={card.user_id}
+                        style={[
+                          styles.likeCard,
+                          {
+                            backgroundColor: colors.card,
+                            borderColor: card.is_super_like ? colors.gold : colors.border,
                           },
-                        })
-                      }
-                      activeOpacity={0.85}
-                    >
-                      {m.target_profile.avatar_url ? (
-                        <Image source={{ uri: m.target_profile.avatar_url }} style={styles.cardImage} />
-                      ) : (
-                        <View style={[styles.cardImage, styles.cardImageFallback, { backgroundColor: colors.cardElevated }]}>
-                          <Text style={[styles.cardMonogram, { color: colors.gold }]}>
-                            {m.target_profile.display_name.charAt(0)}
-                          </Text>
-                        </View>
-                      )}
+                        ]}
+                        onPress={() => handleCardPress(card)}
+                        activeOpacity={0.85}
+                      >
+                        {primaryPhoto ? (
+                          <Image source={{ uri: primaryPhoto }} style={styles.cardImage} />
+                        ) : (
+                          <View style={[styles.cardImage, styles.cardImageFallback, { backgroundColor: colors.cardElevated }]}>
+                            <Text style={[styles.cardMonogram, { color: colors.gold }]}>
+                              {card.display_name.charAt(0)}
+                            </Text>
+                          </View>
+                        )}
 
-                      <View style={styles.cardGradientOverlay}>
-                        <View style={styles.cardNameRow}>
-                          <Text style={[styles.cardName, { color: colors.text }]} numberOfLines={1}>
-                            {m.target_profile.display_name}
+                        {card.is_super_like && (
+                          <View style={[styles.superLikeBadge, { backgroundColor: colors.gold }]}>
+                            <Text style={[styles.superLikeBadgeText, { color: colors.textInverse }]}>
+                              ⭐ Super Like
+                            </Text>
+                          </View>
+                        )}
+
+                        <View style={styles.cardGradientOverlay}>
+                          <View style={styles.cardNameRow}>
+                            <Text style={[styles.cardName, { color: colors.text }]} numberOfLines={1}>
+                              {card.display_name}, {card.age}
+                            </Text>
+                            {card.is_photo_verified && (
+                              <Text style={styles.cardVerified}>✓</Text>
+                            )}
+                          </View>
+                          <Text style={[styles.cardDistanceRow, { color: colors.textMuted }]}>
+                            📍 ~{card.approximate_distance_km} km away
                           </Text>
-                          {m.target_profile.is_verified && (
-                            <Text style={styles.cardVerified}>✓</Text>
-                          )}
+                          <Text style={styles.cardActionHint}>Tap to connect</Text>
                         </View>
-                        <Text style={styles.cardMatchedDate}>Mutual Spark</Text>
-                      </View>
-                    </TouchableOpacity>
-                  ))}
+                      </TouchableOpacity>
+                    );
+                  })}
+                  </View>
                 </View>
               )}
             </View>
@@ -255,17 +694,19 @@ const styles = StyleSheet.create({
     letterSpacing: 0.5,
     marginTop: 2,
   },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
   counterBadge: {
-    backgroundColor: colors.card,
     borderRadius: borderRadius.full,
     paddingHorizontal: spacing.md,
     paddingVertical: 5,
     borderWidth: 1,
-    borderColor: colors.border,
   },
   counterText: {
     ...typography.caption,
-    color: colors.textMuted,
     fontSize: 11,
   },
   loadingContainer: {
@@ -286,42 +727,37 @@ const styles = StyleSheet.create({
     width: '100%',
   },
   vipBanner: {
-    backgroundColor: colors.card,
     borderRadius: borderRadius.xl,
-    padding: spacing.xl,
+    padding: spacing.lg,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: colors.gold,
-    marginBottom: spacing.xl,
+    marginBottom: spacing.lg,
   },
   vipIconWrap: {
-    width: 52,
-    height: 52,
-    borderRadius: 26,
-    backgroundColor: colors.goldMuted,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: spacing.sm,
+    borderWidth: 1,
+    marginBottom: spacing.xs,
   },
   vipIcon: {
-    fontSize: 26,
+    fontSize: 24,
   },
   vipBannerTitle: {
     ...typography.h2,
-    color: colors.text,
-    fontSize: 20,
-    marginBottom: 6,
+    fontSize: 18,
+    marginBottom: 4,
   },
   vipBannerBody: {
     ...typography.bodySmall,
-    color: colors.textMuted,
     textAlign: 'center',
     lineHeight: 18,
-    marginBottom: spacing.lg,
+    marginBottom: spacing.md,
     paddingHorizontal: spacing.sm,
   },
   upgradeBtn: {
-    backgroundColor: colors.gold,
     borderRadius: borderRadius.full,
     paddingHorizontal: spacing.xl,
     paddingVertical: spacing.sm + 2,
@@ -329,43 +765,171 @@ const styles = StyleSheet.create({
   },
   upgradeBtnText: {
     ...typography.button,
-    color: colors.textInverse,
     fontWeight: '700',
     fontSize: 13,
   },
-  previewHeading: {
+  adRewardCard: {
+    borderRadius: borderRadius.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    marginBottom: spacing.xl,
+  },
+  adRewardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.md,
+    marginBottom: spacing.md,
+  },
+  adIconCircle: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  adIconText: {
+    fontSize: 22,
+  },
+  adRewardHeaderText: {
+    flex: 1,
+  },
+  adRewardTitle: {
+    ...typography.bodyLarge,
+    fontWeight: '700',
+    fontSize: 15,
+  },
+  adRewardSubtitle: {
     ...typography.caption,
-    color: colors.textMuted,
     fontSize: 12,
+    marginTop: 2,
+  },
+  adProgressContainer: {
+    marginBottom: spacing.md,
+  },
+  adProgressRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  adProgressLabel: {
+    ...typography.caption,
+    fontSize: 11,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  adProgressValue: {
+    ...typography.caption,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  progressBarTrack: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  feedbackBanner: {
+    borderRadius: borderRadius.md,
+    padding: spacing.sm,
+    borderWidth: 1,
+    marginBottom: spacing.md,
+    alignItems: 'center',
+  },
+  feedbackText: {
+    ...typography.bodySmall,
     fontWeight: '600',
+    fontSize: 12,
+  },
+  watchAdBtn: {
+    borderRadius: borderRadius.full,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  watchAdBtnText: {
+    ...typography.button,
+    fontWeight: '700',
+    fontSize: 13,
+    letterSpacing: 0.5,
+  },
+  adBtnLoadingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  limitCooldownBox: {
+    borderRadius: borderRadius.lg,
+    padding: spacing.md,
+    alignItems: 'center',
+    borderWidth: 1,
+  },
+  limitCooldownLabel: {
+    ...typography.caption,
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  limitCountdownText: {
+    ...typography.h2,
+    fontSize: 22,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 6,
+  },
+  instantRevealLink: {
+    marginTop: 4,
+  },
+  instantRevealLinkText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  sectionHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: spacing.md,
+  },
+  sectionHeading: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
     letterSpacing: 0.8,
     textTransform: 'uppercase',
-    marginBottom: spacing.md,
+  },
+  revealedCounterText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
   },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: spacing.md,
   },
-  lockedCard: {
+  likeCard: {
     width: GRID_CARD_WIDTH,
     height: GRID_CARD_WIDTH * 1.35,
-    backgroundColor: colors.card,
     borderRadius: borderRadius.lg,
     overflow: 'hidden',
     position: 'relative',
     borderWidth: 1,
-    borderColor: colors.borderSubtle,
+  },
+  blurredCardInner: {
+    width: '100%',
+    height: '100%',
     justifyContent: 'center',
     alignItems: 'center',
   },
   silhouetteWrap: {
-    opacity: 0.12,
+    opacity: 0.1,
     alignItems: 'center',
     justifyContent: 'center',
   },
   silhouetteIcon: {
-    fontSize: 64,
+    fontSize: 68,
     color: colors.textMuted,
   },
   lockOverlay: {
@@ -374,70 +938,75 @@ const styles = StyleSheet.create({
     bottom: 0,
     left: 0,
     right: 0,
-    backgroundColor: 'rgba(9, 10, 14, 0.65)',
+    backgroundColor: 'rgba(9, 10, 14, 0.72)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: spacing.sm,
   },
   padlockCircle: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
-    backgroundColor: colors.goldMuted,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     borderWidth: 1,
-    borderColor: colors.gold,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: 6,
   },
   padlockText: {
-    fontSize: 16,
+    fontSize: 15,
   },
   lockedCardText: {
     ...typography.caption,
-    fontSize: 10,
-    color: colors.gold,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '700',
     textAlign: 'center',
   },
-  unlockedContainer: {
-    width: '100%',
-  },
-  unlockedHeader: {
-    marginBottom: spacing.lg,
-  },
-  unlockedTitle: {
-    ...typography.h2,
-    color: colors.text,
-  },
-  unlockedSubtitle: {
-    ...typography.bodySmall,
-    color: colors.textMuted,
+  distanceText: {
+    ...typography.caption,
+    fontSize: 10,
     marginTop: 2,
   },
-  matchCard: {
-    width: GRID_CARD_WIDTH,
-    height: GRID_CARD_WIDTH * 1.35,
-    backgroundColor: colors.card,
-    borderRadius: borderRadius.lg,
-    overflow: 'hidden',
-    position: 'relative',
-    borderWidth: 1,
-    borderColor: colors.border,
+  tapToUnlockBadge: {
+    marginTop: 8,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: borderRadius.full,
+  },
+  tapToUnlockText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  revealedCardInner: {
+    width: '100%',
+    height: '100%',
   },
   cardImage: {
     width: '100%',
     height: '100%',
   },
   cardImageFallback: {
-    backgroundColor: colors.cardElevated,
     justifyContent: 'center',
     alignItems: 'center',
   },
   cardMonogram: {
     ...typography.h1,
-    color: colors.gold,
     fontSize: 36,
+  },
+  superLikeBadge: {
+    position: 'absolute',
+    top: spacing.sm,
+    left: spacing.sm,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: borderRadius.full,
+    zIndex: 10,
+  },
+  superLikeBadgeText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.3,
   },
   cardGradientOverlay: {
     position: 'absolute',
@@ -445,7 +1014,7 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     padding: spacing.sm,
-    backgroundColor: 'rgba(9, 10, 14, 0.85)',
+    backgroundColor: 'rgba(9, 10, 14, 0.88)',
     borderTopWidth: 1,
     borderTopColor: colors.borderSubtle,
   },
@@ -457,8 +1026,7 @@ const styles = StyleSheet.create({
   cardName: {
     ...typography.bodyLarge,
     fontWeight: '700',
-    color: colors.text,
-    fontSize: 14,
+    fontSize: 13,
     flexShrink: 1,
   },
   cardVerified: {
@@ -466,28 +1034,66 @@ const styles = StyleSheet.create({
     color: colors.emerald,
     fontWeight: '700',
   },
-  cardMatchedDate: {
+  cardDistanceRow: {
     ...typography.caption,
-    color: colors.gold,
     fontSize: 10,
     marginTop: 1,
   },
+  cardActionHint: {
+    ...typography.caption,
+    color: colors.gold,
+    fontSize: 10,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  vipContainer: {
+    width: '100%',
+  },
+  unlockedHeader: {
+    marginBottom: spacing.lg,
+  },
+  vipBadgeRow: {
+    flexDirection: 'row',
+    marginBottom: spacing.xs,
+  },
+  vipCrownBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  vipCrownIcon: {
+    fontSize: 12,
+  },
+  vipCrownText: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '800',
+    letterSpacing: 0.5,
+  },
+  unlockedTitle: {
+    ...typography.h2,
+    marginTop: 4,
+  },
+  unlockedSubtitle: {
+    ...typography.bodySmall,
+    marginTop: 2,
+  },
   emptyContainer: {
-    backgroundColor: colors.card,
     borderRadius: borderRadius.xl,
     padding: spacing.xxl,
     alignItems: 'center',
     borderWidth: 1,
-    borderColor: colors.border,
     marginTop: spacing.md,
   },
   emptyIconCircle: {
     width: 60,
     height: 60,
     borderRadius: 30,
-    backgroundColor: colors.likeMuted,
     borderWidth: 1,
-    borderColor: colors.like,
     justifyContent: 'center',
     alignItems: 'center',
     marginBottom: spacing.md,
@@ -498,12 +1104,10 @@ const styles = StyleSheet.create({
   },
   emptyTitle: {
     ...typography.h3,
-    color: colors.text,
     marginBottom: spacing.xs,
   },
   emptyBody: {
     ...typography.bodySmall,
-    color: colors.textMuted,
     textAlign: 'center',
     lineHeight: 18,
     marginBottom: spacing.lg,
@@ -513,12 +1117,9 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     borderRadius: borderRadius.full,
     borderWidth: 1,
-    borderColor: colors.gold,
-    backgroundColor: colors.goldMuted,
   },
   emptyRefreshBtnText: {
     ...typography.caption,
-    color: colors.gold,
     fontWeight: '700',
     fontSize: 12,
   },

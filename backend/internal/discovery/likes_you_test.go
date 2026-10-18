@@ -2,6 +2,7 @@ package discovery_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -137,7 +138,7 @@ func TestRewardedAd_GrantsTwoReveals(t *testing.T) {
 
 	// Deliver AdMob SSV reward callback for 1 ad watched
 	nowMs := time.Now().UTC().UnixMilli()
-	query := fmt.Sprintf("ad_network=54321&key_id=1&reward_amount=1&timestamp=%d&transaction_id=tx-ad-12345&user_id=user-reward&signature=VALID_TEST_SSV_SIGNATURE", nowMs)
+	query := fmt.Sprintf("ad_network=54321&key_id=1&reward_amount=1&timestamp=%d&transaction_id=tx-ad-12345&user_id=user-reward&custom_data=likes_you_unlock&signature=VALID_TEST_SSV_SIGNATURE", nowMs)
 	reward, err := svc.VerifyAndGrantAdReward(ctx, query)
 	if err != nil {
 		t.Fatalf("failed to verify ad reward: %v", err)
@@ -377,4 +378,235 @@ func TestFavourites_CRUD_Deduplication_Ownership(t *testing.T) {
 		t.Fatalf("expected 0 favourites after blocking User C, got %d", listAAfterBlock.Count)
 	}
 }
+
+func TestLikesYou_AdUnlock_DirectFlow(t *testing.T) {
+	ctx := context.Background()
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	svc := discovery.NewService(discoRepo, identRepo, nil, nil, discovery.WithEnvironment("local"))
+
+	// Create Target User
+	_ = identRepo.CreateUser(ctx, &identity.User{
+		ID:     "user-target",
+		Role:   identity.RoleMember,
+		Status: identity.StatusActive,
+	})
+	_ = identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:      "user-target",
+		DisplayName: "Target User",
+		Birthdate:   time.Now().AddDate(-25, 0, 0),
+	})
+
+	// Create 3 suitors: user-1 (regular), user-2 (super like), user-3 (regular)
+	suitors := []struct {
+		id        string
+		name      string
+		direction discovery.SwipeDirection
+	}{
+		{"suitor-1", "Alex", discovery.SwipeLike},
+		{"suitor-2", "Sam", discovery.SwipeSuperSpark},
+		{"suitor-3", "Taylor", discovery.SwipeLike},
+	}
+
+	for _, s := range suitors {
+		_ = identRepo.CreateUser(ctx, &identity.User{
+			ID:     s.id,
+			Role:   identity.RoleMember,
+			Status: identity.StatusActive,
+		})
+		_ = identRepo.UpsertProfile(ctx, &identity.Profile{
+			UserID:      s.id,
+			DisplayName: s.name,
+			Birthdate:   time.Now().AddDate(-24, 0, 0),
+		})
+		_, _, _, _ = discoRepo.CreateSwipe(ctx, s.id, "user-target", s.direction, "", "")
+	}
+
+	// 1. Initial Likes You state
+	initialResp, err := svc.GetLikesYou(ctx, "user-target", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you: %v", err)
+	}
+	if initialResp.TotalLikes != 3 || initialResp.RevealedCount != 0 || initialResp.UnrevealedCount != 3 {
+		t.Fatalf("expected 3 total, 0 revealed, 3 unrevealed; got %d, %d, %d", initialResp.TotalLikes, initialResp.RevealedCount, initialResp.UnrevealedCount)
+	}
+	if initialResp.AdsWatchedInWindow != 0 || !initialResp.CanWatchAd {
+		t.Fatalf("expected 0 ads watched, can_watch_ad=true; got %d, %v", initialResp.AdsWatchedInWindow, initialResp.CanWatchAd)
+	}
+
+	// 2. Watch 1st ad -> unlocks 2 profiles (Super Like Sam first, then Alex)
+	unlockResp1, err := svc.UnlockLikesYouWithAd(ctx, "user-target", "", "tx-ad-1")
+	if err != nil {
+		t.Fatalf("failed to unlock with ad 1: %v", err)
+	}
+	if !unlockResp1.Success || unlockResp1.UnlockedCount != 2 {
+		t.Fatalf("expected 2 profiles unlocked, got %d", unlockResp1.UnlockedCount)
+	}
+	if unlockResp1.AdsWatchedInWindow != 1 || !unlockResp1.CanWatchAd {
+		t.Fatalf("expected 1 ad watched, can_watch_ad=true; got %d, %v", unlockResp1.AdsWatchedInWindow, unlockResp1.CanWatchAd)
+	}
+
+	// Verify the unlocked profiles
+	afterAd1, err := svc.GetLikesYou(ctx, "user-target", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you after ad 1: %v", err)
+	}
+	if afterAd1.RevealedCount != 2 || afterAd1.UnrevealedCount != 1 {
+		t.Fatalf("expected 2 revealed, 1 unrevealed; got %d, %d", afterAd1.RevealedCount, afterAd1.UnrevealedCount)
+	}
+
+	// Super like suitor-2 must be revealed
+	var suitor2Revealed bool
+	for _, l := range afterAd1.Likes {
+		if l.UserID == "suitor-2" && l.IsRevealed {
+			suitor2Revealed = true
+		}
+	}
+	if !suitor2Revealed {
+		t.Errorf("expected Super Like from suitor-2 to be prioritized and revealed")
+	}
+
+	// 3. Replay attack with same tx-ad-1 -> rejected
+	_, err = svc.UnlockLikesYouWithAd(ctx, "user-target", "", "tx-ad-1")
+	if !errors.Is(err, discovery.ErrDuplicateSSVReward) {
+		t.Fatalf("expected ErrDuplicateSSVReward on duplicate transaction, got %v", err)
+	}
+
+	// 4. Watch 2nd ad -> unlocks remaining 1 profile, remainder 1 added to BonusRevealsRemaining
+	unlockResp2, err := svc.UnlockLikesYouWithAd(ctx, "user-target", "", "tx-ad-2")
+	if err != nil {
+		t.Fatalf("failed to unlock with ad 2: %v", err)
+	}
+	if unlockResp2.UnlockedCount != 1 {
+		t.Fatalf("expected 1 profile unlocked, got %d", unlockResp2.UnlockedCount)
+	}
+	if unlockResp2.BonusRevealsRemaining != 1 {
+		t.Fatalf("expected 1 bonus reveal remaining, got %d", unlockResp2.BonusRevealsRemaining)
+	}
+	if unlockResp2.AdsWatchedInWindow != 2 {
+		t.Fatalf("expected 2 ads watched, got %d", unlockResp2.AdsWatchedInWindow)
+	}
+
+	// Now all 3 are revealed
+	afterAd2, err := svc.GetLikesYou(ctx, "user-target", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you after ad 2: %v", err)
+	}
+	if afterAd2.RevealedCount != 3 || afterAd2.UnrevealedCount != 0 {
+		t.Fatalf("expected 3 revealed, 0 unrevealed; got %d, %d", afterAd2.RevealedCount, afterAd2.UnrevealedCount)
+	}
+}
+
+func TestLikesYou_Rolling25Hour_5AdsLimit(t *testing.T) {
+	ctx := context.Background()
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	svc := discovery.NewService(discoRepo, identRepo, nil, nil, discovery.WithEnvironment("local"))
+
+	_ = identRepo.CreateUser(ctx, &identity.User{
+		ID:     "user-limit",
+		Role:   identity.RoleMember,
+		Status: identity.StatusActive,
+	})
+	_ = identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:      "user-limit",
+		DisplayName: "Limit User",
+		Birthdate:   time.Now().AddDate(-22, 0, 0),
+	})
+
+	// Watch 5 ads consecutively
+	for i := 1; i <= 5; i++ {
+		txID := fmt.Sprintf("tx-limit-%d", i)
+		res, err := svc.UnlockLikesYouWithAd(ctx, "user-limit", "", txID)
+		if err != nil {
+			t.Fatalf("expected ad %d to succeed, got %v", i, err)
+		}
+		if res.AdsWatchedInWindow != i {
+			t.Fatalf("expected %d ads watched, got %d", i, res.AdsWatchedInWindow)
+		}
+		if i < 5 && !res.CanWatchAd {
+			t.Fatalf("expected can_watch_ad=true at ad %d", i)
+		}
+		if i == 5 && res.CanWatchAd {
+			t.Fatalf("expected can_watch_ad=false at ad 5")
+		}
+	}
+
+	// 6th ad must be rejected with ErrLikesYouAdLimitReached
+	_, err := svc.UnlockLikesYouWithAd(ctx, "user-limit", "", "tx-limit-6")
+	if !errors.Is(err, discovery.ErrLikesYouAdLimitReached) {
+		t.Fatalf("expected ErrLikesYouAdLimitReached for 6th ad, got: %v", err)
+	}
+
+	// Calling GetLikesYou should reflect limit reached
+	resp, err := svc.GetLikesYou(ctx, "user-limit", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you: %v", err)
+	}
+	if resp.AdsWatchedInWindow != 5 {
+		t.Errorf("expected 5 ads watched, got %d", resp.AdsWatchedInWindow)
+	}
+	if resp.CanWatchAd {
+		t.Errorf("expected can_watch_ad=false")
+	}
+	if resp.AdResetInSeconds <= 0 {
+		t.Errorf("expected positive ad_reset_in_seconds, got %d", resp.AdResetInSeconds)
+	}
+	if !resp.CooldownActive {
+		t.Errorf("expected cooldown_active=true")
+	}
+}
+
+func TestLikesYou_RewardPurposeSeparation(t *testing.T) {
+	ctx := context.Background()
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	svc := discovery.NewService(discoRepo, identRepo, nil, nil, discovery.WithEnvironment("local"))
+
+	_ = identRepo.CreateUser(ctx, &identity.User{
+		ID:     "user-sep",
+		Role:   identity.RoleMember,
+		Status: identity.StatusActive,
+	})
+	_ = identRepo.UpsertProfile(ctx, &identity.Profile{
+		UserID:      "user-sep",
+		DisplayName: "Sep User",
+		Birthdate:   time.Now().AddDate(-22, 0, 0),
+	})
+
+	nowMs := time.Now().UTC().UnixMilli()
+
+	// 1. Deliver swipe allowance ad reward
+	swipeQuery := fmt.Sprintf("ad_network=54321&key_id=1&reward_amount=5&timestamp=%d&transaction_id=tx-swipe-1&user_id=user-sep&custom_data=bonus_likes_reward&signature=VALID_TEST_SSV_SIGNATURE", nowMs)
+	_, err := svc.VerifyAndGrantAdReward(ctx, swipeQuery)
+	if err != nil {
+		t.Fatalf("failed to grant swipe ad: %v", err)
+	}
+
+	// Verify Likes You was NOT affected
+	likesYou1, err := svc.GetLikesYou(ctx, "user-sep", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you: %v", err)
+	}
+	if likesYou1.AdsWatchedInWindow != 0 || likesYou1.BonusRevealsRemaining != 0 {
+		t.Errorf("swipe ad must NOT increment likes you ads watched or grant reveal credits: ads=%d, credits=%d", likesYou1.AdsWatchedInWindow, likesYou1.BonusRevealsRemaining)
+	}
+
+	// 2. Deliver Likes You ad reward
+	likesYouQuery := fmt.Sprintf("ad_network=54321&key_id=1&reward_amount=2&timestamp=%d&transaction_id=tx-ly-1&user_id=user-sep&custom_data=likes_you_unlock&signature=VALID_TEST_SSV_SIGNATURE", nowMs+1)
+	_, err = svc.VerifyAndGrantAdReward(ctx, likesYouQuery)
+	if err != nil {
+		t.Fatalf("failed to grant likes you ad: %v", err)
+	}
+
+	// Verify Likes You WAS credited
+	likesYou2, err := svc.GetLikesYou(ctx, "user-sep", 20, 0)
+	if err != nil {
+		t.Fatalf("failed to get likes you: %v", err)
+	}
+	if likesYou2.AdsWatchedInWindow != 1 || likesYou2.BonusRevealsRemaining != 2 {
+		t.Errorf("likes you ad must increment ads watched and grant reveal credits: ads=%d, credits=%d", likesYou2.AdsWatchedInWindow, likesYou2.BonusRevealsRemaining)
+	}
+}
+
 

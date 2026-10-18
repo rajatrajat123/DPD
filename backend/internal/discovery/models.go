@@ -1,6 +1,7 @@
 package discovery
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -159,15 +160,67 @@ type IncomingLikeCard struct {
 }
 
 type LikesYouResponse struct {
-	TotalLikes                int                `json:"total_likes"`
-	RevealedCount             int                `json:"revealed_count"`
-	UnrevealedCount           int                `json:"unrevealed_count"`
-	FreeRevealsRemaining      int                `json:"free_reveals_remaining"`
-	BonusRevealsRemaining     int                `json:"bonus_reveals_remaining"`
-	CooldownActive            bool               `json:"cooldown_active"`
-	CooldownRemainingSeconds  int                `json:"cooldown_remaining_seconds"`
-	RewardedAdEnabled         bool               `json:"rewarded_ad_enabled"`
-	Likes                     []IncomingLikeCard `json:"likes"`
+	TotalLikes               int                `json:"total_likes"`
+	RevealedCount            int                `json:"revealed_count"`
+	UnrevealedCount          int                `json:"unrevealed_count"`
+	FreeRevealsRemaining     int                `json:"free_reveals_remaining"`
+	BonusRevealsRemaining    int                `json:"bonus_reveals_remaining"`
+	CooldownActive           bool               `json:"cooldown_active"`
+	CooldownRemainingSeconds int                `json:"cooldown_remaining_seconds"`
+	RewardedAdEnabled        bool               `json:"rewarded_ad_enabled"`
+	Likes                    []IncomingLikeCard `json:"likes"`
+	AdsWatchedInWindow       int                `json:"ads_watched_in_window"`
+	MaxAdsPerWindow          int                `json:"max_ads_per_window"`
+	CanWatchAd               bool               `json:"can_watch_ad"`
+	AdResetInSeconds         int                `json:"ad_reset_in_seconds"`
+	ProfilesUnlockedInWindow int                `json:"profiles_unlocked_in_window"`
+	MaxProfilesPerWindow     int                `json:"max_profiles_per_window"`
+}
+
+const (
+	LikesYouAdWindowHours        = 25 * time.Hour
+	LikesYouMaxAdsPerWindow      = 5
+	LikesYouProfilesPerAd        = 2
+	LikesYouMaxProfilesPerWindow = LikesYouMaxAdsPerWindow * LikesYouProfilesPerAd // 10
+)
+
+var (
+	ErrLikesYouAdLimitReached = errors.New("Likes You rewarded ad limit reached (maximum 5 ads per rolling 25-hour window)")
+)
+
+type LikesYouAdStatus struct {
+	AdsWatchedInWindow       int  `json:"ads_watched_in_window"`
+	MaxAdsPerWindow          int  `json:"max_ads_per_window"`
+	CanWatchAd               bool `json:"can_watch_ad"`
+	AdResetInSeconds         int  `json:"ad_reset_in_seconds"`
+	ProfilesUnlockedInWindow int  `json:"profiles_unlocked_in_window"`
+	MaxProfilesPerWindow     int  `json:"max_profiles_per_window"`
+}
+
+type LikesYouAdRewardResult struct {
+	AdsWatchedInWindow    int
+	MaxAdsPerWindow       int
+	CanWatchAd            bool
+	AdResetInSeconds      int
+	NewlyUnlockedUserIDs  []string
+	BonusRevealsRemaining int
+}
+
+type LikesYouUnlockAdRequest struct {
+	TransactionID string `json:"transaction_id"`
+	RawQuery      string `json:"raw_query,omitempty"`
+}
+
+type LikesYouUnlockAdResponse struct {
+	Success               bool              `json:"success"`
+	AdsWatchedInWindow    int               `json:"ads_watched_in_window"`
+	MaxAdsPerWindow       int               `json:"max_ads_per_window"`
+	CanWatchAd            bool              `json:"can_watch_ad"`
+	AdResetInSeconds      int               `json:"ad_reset_in_seconds"`
+	BonusRevealsRemaining int               `json:"bonus_reveals_remaining"`
+	NewlyUnlockedUserIDs  []string          `json:"newly_unlocked_user_ids"`
+	UnlockedCount         int               `json:"unlocked_count"`
+	LikesYou              *LikesYouResponse `json:"likes_you,omitempty"`
 }
 
 type RevealLikeRequest struct {
@@ -200,16 +253,16 @@ const (
 	TrialDuration                  = 30 * 24 * time.Hour
 	TrialDiscoveryFreeBatchQuota   = 4
 	TrialDiscoveryAdBatchQuota     = 4
-	TrialDiscoveryMaxCycleProfiles = 20
-	TrialDiscoveryMaxAdsPerCycle   = 4
-	TrialDiscoveryCycleCooldown    = 3 * time.Hour
+	TrialDiscoveryMaxCycleProfiles = 12
+	TrialDiscoveryMaxAdsPerCycle   = 2
+	TrialDiscoveryCycleCooldown    = 2 * time.Hour
 	PostTrialFreeQuota             = 2
 	PostTrialBonusQuota            = 2
 
 	// Backwards compatibility constants
 	DiscoveryMessageFreeQuota        = 4
 	DiscoveryMessageBonusQuota       = 4
-	DiscoveryMessageCooldownDuration = 10 * time.Minute
+	DiscoveryMessageCooldownDuration = 2 * time.Hour
 )
 
 type DiscoveryMessagingQuota struct {

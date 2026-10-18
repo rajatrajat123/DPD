@@ -54,7 +54,7 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
 
   const trimmed = text.trim();
   const charLimit = 500;
-  const isLocked = Boolean(quota?.is_locked);
+  const isLocked = Boolean(quota?.is_locked && !quota?.is_unlimited);
   const canSend = trimmed.length > 0 && trimmed.length <= charLimit && !isSending && !disabled;
 
   const handleSend = async () => {
@@ -92,13 +92,13 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
           </Text>
         </TouchableOpacity>
       )}
-      {!isLocked && quota?.is_in_trial && (
+      {!isLocked && !quota?.is_unlimited && quota?.is_in_trial && (
         <View
           style={[styles.quotaIndicator, { backgroundColor: 'rgba(212,175,55,0.08)', borderColor: 'rgba(212,175,55,0.3)' }]}
           testID="composer-quota-trial-indicator"
         >
           <Text style={[styles.quotaIndicatorText, { color: colors.gold }]}>
-            ✦ Trial: {quota.trial_initiations_remaining ?? quota.free_slots_remaining} of {quota.trial_initiations_allowed ?? 4} Discovery initiations left
+            ✦ Trial: {quota.trial_initiations_remaining ?? quota.free_slots_remaining ?? 0} of {quota.trial_initiations_allowed ?? 4} Discovery initiations left
           </Text>
         </View>
       )}

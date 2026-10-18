@@ -75,6 +75,8 @@ type Repository interface {
 	RemoveFavourite(ctx context.Context, userID, targetUserID string) error
 	ListFavourites(ctx context.Context, userID string) ([]FavouriteProfileCard, error)
 	IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error)
+	GetLikesYouAdStatus(ctx context.Context, userID string) (*LikesYouAdStatus, error)
+	UnlockLikesYouAdReward(ctx context.Context, userID string, transactionID string) (*LikesYouAdRewardResult, error)
 }
 
 type UserLikesUnlockState struct {
@@ -116,8 +118,9 @@ type MemoryRepository struct {
 	likesUnlockState map[string]*UserLikesUnlockState
 	messageRequests  map[string]*MessageRequest
 	messagingQuotas  map[string]*DiscoveryMessageQuotaState
-	repliedPairs     map[string]bool // key: senderID:recipientID
-	favourites       map[string]map[string]time.Time // key: userID -> targetUserID -> addedAt
+	repliedPairs      map[string]bool                 // key: senderID:recipientID
+	favourites        map[string]map[string]time.Time // key: userID -> targetUserID -> addedAt
+	likesYouAdRewards map[string][]time.Time          // key: userID -> slice of verifiedAt
 }
 
 type swipeRecord struct {
@@ -158,8 +161,9 @@ func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 		likesUnlockState: make(map[string]*UserLikesUnlockState),
 		messageRequests:  make(map[string]*MessageRequest),
 		messagingQuotas:  make(map[string]*DiscoveryMessageQuotaState),
-		repliedPairs:     make(map[string]bool),
-		favourites:       make(map[string]map[string]time.Time),
+		repliedPairs:      make(map[string]bool),
+		favourites:        make(map[string]map[string]time.Time),
+		likesYouAdRewards: make(map[string][]time.Time),
 	}
 }
 
@@ -1259,6 +1263,187 @@ func (m *MemoryRepository) SaveUserLikesUnlockState(_ context.Context, state *Us
 	return nil
 }
 
+func (m *MemoryRepository) GetLikesYouAdStatus(_ context.Context, userID string) (*LikesYouAdStatus, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-LikesYouAdWindowHours)
+
+	var active []time.Time
+	for _, t := range m.likesYouAdRewards[userID] {
+		if t.After(cutoff) {
+			active = append(active, t)
+		}
+	}
+
+	adsCount := len(active)
+	canWatch := adsCount < LikesYouMaxAdsPerWindow
+	resetSec := 0
+
+	if !canWatch && len(active) > 0 {
+		earliest := active[0]
+		for _, t := range active {
+			if t.Before(earliest) {
+				earliest = t
+			}
+		}
+		rem := earliest.Add(LikesYouAdWindowHours).Sub(now)
+		resetSec = int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+	}
+
+	return &LikesYouAdStatus{
+		AdsWatchedInWindow:       adsCount,
+		MaxAdsPerWindow:          LikesYouMaxAdsPerWindow,
+		CanWatchAd:               canWatch,
+		AdResetInSeconds:         resetSec,
+		ProfilesUnlockedInWindow: adsCount * LikesYouProfilesPerAd,
+		MaxProfilesPerWindow:     LikesYouMaxProfilesPerWindow,
+	}, nil
+}
+
+func (m *MemoryRepository) UnlockLikesYouAdReward(ctx context.Context, userID string, transactionID string) (*LikesYouAdRewardResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if _, exists := m.usedAdRewards[transactionID]; exists {
+		return nil, ErrDuplicateSSVReward
+	}
+
+	now := time.Now().UTC()
+	cutoff := now.Add(-LikesYouAdWindowHours)
+
+	var active []time.Time
+	for _, t := range m.likesYouAdRewards[userID] {
+		if t.After(cutoff) {
+			active = append(active, t)
+		}
+	}
+
+	if len(active) >= LikesYouMaxAdsPerWindow {
+		earliest := active[0]
+		for _, t := range active {
+			if t.Before(earliest) {
+				earliest = t
+			}
+		}
+		rem := earliest.Add(LikesYouAdWindowHours).Sub(now)
+		resetSec := int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+		return nil, ErrLikesYouAdLimitReached
+	}
+
+	m.usedAdRewards[transactionID] = now
+	active = append(active, now)
+	m.likesYouAdRewards[userID] = active
+
+	// Find up to 2 unrevealed incoming likes
+	type candidateLike struct {
+		actorID     string
+		isSuperLike bool
+		likedAt     time.Time
+	}
+
+	var unrevealed []candidateLike
+	for _, s := range m.swipes {
+		if s.TargetID == userID && (s.Direction == SwipeLike || s.Direction == SwipeSuperSpark) {
+			k1 := fmt.Sprintf("%s:%s", userID, s.ActorID)
+			k2 := fmt.Sprintf("%s:%s", s.ActorID, userID)
+			if _, b1 := m.blocks[k1]; b1 {
+				continue
+			}
+			if _, b2 := m.blocks[k2]; b2 {
+				continue
+			}
+
+			isRev := false
+			if revs, ok := m.revealedLikes[userID]; ok {
+				if _, rOk := revs[s.ActorID]; rOk {
+					isRev = true
+				}
+			}
+			if !isRev {
+				unrevealed = append(unrevealed, candidateLike{
+					actorID:     s.ActorID,
+					isSuperLike: s.Direction == SwipeSuperSpark,
+					likedAt:     s.CreatedAt,
+				})
+			}
+		}
+	}
+
+	// Order by Super Likes first, then newest
+	sort.Slice(unrevealed, func(i, j int) bool {
+		if unrevealed[i].isSuperLike != unrevealed[j].isSuperLike {
+			return unrevealed[i].isSuperLike
+		}
+		return unrevealed[i].likedAt.After(unrevealed[j].likedAt)
+	})
+
+	if m.revealedLikes[userID] == nil {
+		m.revealedLikes[userID] = make(map[string]string)
+	}
+
+	var newlyUnlocked []string
+	toUnlock := LikesYouProfilesPerAd
+	if len(unrevealed) < toUnlock {
+		toUnlock = len(unrevealed)
+	}
+
+	for i := 0; i < toUnlock; i++ {
+		actorID := unrevealed[i].actorID
+		m.revealedLikes[userID][actorID] = "REWARDED_AD"
+		newlyUnlocked = append(newlyUnlocked, actorID)
+	}
+
+	remainder := LikesYouProfilesPerAd - len(newlyUnlocked)
+	if remainder < 0 {
+		remainder = 0
+	}
+
+	st, ok := m.likesUnlockState[userID]
+	if !ok {
+		st = &UserLikesUnlockState{
+			UserID: userID,
+		}
+	}
+	st.BonusRevealsRemaining += remainder
+	st.AdRevealsToday++
+	st.LastAdRevealAt = &now
+	m.likesUnlockState[userID] = st
+
+	newCount := len(active)
+	canWatch := newCount < LikesYouMaxAdsPerWindow
+	resetSec := 0
+	if !canWatch && len(active) > 0 {
+		earliest := active[0]
+		for _, t := range active {
+			if t.Before(earliest) {
+				earliest = t
+			}
+		}
+		rem := earliest.Add(LikesYouAdWindowHours).Sub(now)
+		resetSec = int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+	}
+
+	return &LikesYouAdRewardResult{
+		AdsWatchedInWindow:    newCount,
+		MaxAdsPerWindow:       LikesYouMaxAdsPerWindow,
+		CanWatchAd:            canWatch,
+		AdResetInSeconds:      resetSec,
+		NewlyUnlockedUserIDs:  newlyUnlocked,
+		BonusRevealsRemaining: st.BonusRevealsRemaining,
+	}, nil
+}
+
 func (m *MemoryRepository) CreateMessageRequest(_ context.Context, req *MessageRequest) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1315,7 +1500,7 @@ func (m *MemoryRepository) UpdateMessageRequestStatus(_ context.Context, request
 func (m *MemoryRepository) isUserUnlimited(actorID string) bool {
 	now := time.Now().UTC()
 	for _, e := range m.entitlements[actorID] {
-		if (e.Code == "UNLIMITED_SWIPES" || e.Code == "VIP_SUBSCRIPTION") && e.ExpiresAt.After(now) {
+		if (e.Code == "VIP_SUBSCRIPTION" || e.Code == "UNLIMITED_MESSAGING" || (e.Code == "UNLIMITED_SWIPES" && e.Source != "MATCH_REWARD")) && e.ExpiresAt.After(now) {
 			return true
 		}
 	}
@@ -1327,20 +1512,20 @@ func evaluateMessageQuotaState(state *DiscoveryMessageQuotaState, now time.Time,
 		return &DiscoveryMessagingQuota{
 			UserID:                    state.UserID,
 			IsUnlimited:               true,
-			IsInTrial:                 true,
+			IsInTrial:                 false,
 			TrialStartedAt:            state.TrialStartedAt,
 			TrialEndsAt:               state.TrialEndsAt,
-			TrialDaysRemaining:        30,
+			TrialDaysRemaining:        0,
 			IsLocked:                  false,
 			CanUnlockWithAd:           false,
 			AdUnlocked:                false,
-			TrialInitiationsRemaining: 9999,
-			TrialInitiationsAllowed:   9999,
+			TrialInitiationsRemaining: 0,
+			TrialInitiationsAllowed:   0,
 			TrialDistinctMessaged:     0,
-			PostTrialFreeRemaining:    9999,
+			PostTrialFreeRemaining:    0,
 			PostTrialBonusRemaining:   0,
-			FreeQuota:                 9999,
-			FreeSlotsRemaining:        9999,
+			FreeQuota:                 0,
+			FreeSlotsRemaining:        0,
 			DistinctProfilesMessaged:  0,
 			CooldownActive:            false,
 			CooldownSecondsRemaining:  0,
@@ -2075,7 +2260,7 @@ func (p *PostgresRepository) GetSwipeAllowanceDetail(ctx context.Context, userID
 	// 4. Fetch bonus rewarded likes earned in current 12-hour window
 	bonusQuery := `
 		SELECT COALESCE(SUM(reward_amount), 0) FROM ad_reward_transactions
-		WHERE user_id = $1 AND verified_at >= $2
+		WHERE user_id = $1 AND verified_at >= $2 AND reward_item = 'LIKES'
 	`
 	var bonusLikes int
 	_ = p.pool.QueryRow(ctx, bonusQuery, userID, windowStart).Scan(&bonusLikes)
@@ -2587,7 +2772,7 @@ func (p *PostgresRepository) CreateSwipe(ctx context.Context, actorID, targetID 
 					return false, nil, false, err
 				}
 				var bonusLikes int
-				_ = tx.QueryRow(ctx, "SELECT COALESCE(SUM(reward_amount), 0) FROM ad_reward_transactions WHERE user_id = $1 AND verified_at >= $2", actorID, windowStart).Scan(&bonusLikes)
+				_ = tx.QueryRow(ctx, "SELECT COALESCE(SUM(reward_amount), 0) FROM ad_reward_transactions WHERE user_id = $1 AND verified_at >= $2 AND reward_item = 'LIKES'", actorID, windowStart).Scan(&bonusLikes)
 
 				regularRemaining := PostIntroQuota - likeCount
 				bonusRemaining := bonusLikes
@@ -3129,6 +3314,188 @@ func (p *PostgresRepository) SaveUserLikesUnlockState(ctx context.Context, state
 	return err
 }
 
+func (p *PostgresRepository) GetLikesYouAdStatus(ctx context.Context, userID string) (*LikesYouAdStatus, error) {
+	query := `
+		SELECT COUNT(*), COALESCE(MIN(verified_at), NOW())
+		FROM ad_reward_transactions
+		WHERE user_id = $1 AND reward_item = 'LIKES_YOU' AND verified_at >= NOW() - INTERVAL '25 hours'
+	`
+	var adsCount int
+	var earliestVerified time.Time
+	if err := p.pool.QueryRow(ctx, query, userID).Scan(&adsCount, &earliestVerified); err != nil {
+		return nil, fmt.Errorf("failed to query likes you ad status: %w", err)
+	}
+
+	canWatch := adsCount < LikesYouMaxAdsPerWindow
+	resetSec := 0
+	if !canWatch {
+		rem := earliestVerified.Add(LikesYouAdWindowHours).Sub(time.Now().UTC())
+		resetSec = int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+	}
+
+	return &LikesYouAdStatus{
+		AdsWatchedInWindow:       adsCount,
+		MaxAdsPerWindow:          LikesYouMaxAdsPerWindow,
+		CanWatchAd:               canWatch,
+		AdResetInSeconds:         resetSec,
+		ProfilesUnlockedInWindow: adsCount * LikesYouProfilesPerAd,
+		MaxProfilesPerWindow:     LikesYouMaxProfilesPerWindow,
+	}, nil
+}
+
+func (p *PostgresRepository) UnlockLikesYouAdReward(ctx context.Context, userID string, transactionID string) (*LikesYouAdRewardResult, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Serialize concurrent requests for this user
+	lockQuery := `
+		INSERT INTO user_likes_unlock_state (user_id)
+		VALUES ($1)
+		ON CONFLICT (user_id) DO NOTHING
+	`
+	if _, err := tx.Exec(ctx, lockQuery, userID); err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, "SELECT 1 FROM user_likes_unlock_state WHERE user_id = $1 FOR UPDATE", userID); err != nil {
+		return nil, err
+	}
+
+	// 2. Replay check
+	var exists bool
+	checkTxQuery := `SELECT EXISTS(SELECT 1 FROM ad_reward_transactions WHERE transaction_id = $1)`
+	if err := tx.QueryRow(ctx, checkTxQuery, transactionID).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrDuplicateSSVReward
+	}
+
+	// 3. Check rolling 25-hour limit
+	countQuery := `
+		SELECT COUNT(*), COALESCE(MIN(verified_at), NOW())
+		FROM ad_reward_transactions
+		WHERE user_id = $1 AND reward_item = 'LIKES_YOU' AND verified_at >= NOW() - INTERVAL '25 hours'
+	`
+	var adsCount int
+	var earliestVerified time.Time
+	if err := tx.QueryRow(ctx, countQuery, userID).Scan(&adsCount, &earliestVerified); err != nil {
+		return nil, err
+	}
+
+	if adsCount >= LikesYouMaxAdsPerWindow {
+		rem := earliestVerified.Add(LikesYouAdWindowHours).Sub(time.Now().UTC())
+		resetSec := int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+		return nil, ErrLikesYouAdLimitReached
+	}
+
+	// 4. Record ad transaction
+	insertTxQuery := `
+		INSERT INTO ad_reward_transactions (user_id, ad_network, transaction_id, reward_item, reward_amount, verified_at)
+		VALUES ($1, 'ADMOB', $2, 'LIKES_YOU', $3, NOW())
+	`
+	if _, err := tx.Exec(ctx, insertTxQuery, userID, transactionID, LikesYouProfilesPerAd); err != nil {
+		if strings.Contains(err.Error(), "uq_ad_reward_tx") || strings.Contains(err.Error(), "duplicate key") {
+			return nil, ErrDuplicateSSVReward
+		}
+		return nil, err
+	}
+
+	// 5. Find up to 2 unrevealed incoming likes
+	findQuery := `
+		SELECT s.actor_user_id
+		FROM swipes s
+		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
+		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
+		  AND NOT EXISTS (
+			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
+		  )
+		  AND NOT EXISTS (
+			  SELECT 1 FROM likes_reveals lr WHERE lr.user_id = $1 AND lr.liked_by_user_id = s.actor_user_id
+		  )
+		ORDER BY CASE WHEN s.direction = 'SUPER_SPARK' THEN 0 ELSE 1 END ASC, s.created_at DESC
+		LIMIT $2
+	`
+	rows, err := tx.Query(ctx, findQuery, userID, LikesYouProfilesPerAd)
+	if err != nil {
+		return nil, err
+	}
+	var actorIDs []string
+	for rows.Next() {
+		var aID string
+		if err := rows.Scan(&aID); err == nil {
+			actorIDs = append(actorIDs, aID)
+		}
+	}
+	rows.Close()
+
+	var newlyUnlocked []string
+	for _, aID := range actorIDs {
+		revealQuery := `
+			INSERT INTO likes_reveals (user_id, liked_by_user_id, source, revealed_at)
+			VALUES ($1, $2, 'REWARDED_AD', NOW())
+			ON CONFLICT (user_id, liked_by_user_id) DO NOTHING
+		`
+		tag, err := tx.Exec(ctx, revealQuery, userID, aID)
+		if err == nil && tag.RowsAffected() > 0 {
+			newlyUnlocked = append(newlyUnlocked, aID)
+		}
+	}
+
+	remainder := LikesYouProfilesPerAd - len(newlyUnlocked)
+	if remainder < 0 {
+		remainder = 0
+	}
+
+	// 6. Update user_likes_unlock_state
+	updateStateQuery := `
+		UPDATE user_likes_unlock_state
+		SET bonus_reveals_remaining = bonus_reveals_remaining + $2,
+		    ad_reveals_today = ad_reveals_today + 1,
+		    last_ad_reveal_at = NOW(),
+		    updated_at = NOW()
+		WHERE user_id = $1
+		RETURNING bonus_reveals_remaining
+	`
+	var bonusRemaining int
+	if err := tx.QueryRow(ctx, updateStateQuery, userID, remainder).Scan(&bonusRemaining); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	newCount := adsCount + 1
+	canWatch := newCount < LikesYouMaxAdsPerWindow
+	resetSec := 0
+	if !canWatch {
+		rem := earliestVerified.Add(LikesYouAdWindowHours).Sub(time.Now().UTC())
+		resetSec = int(math.Ceil(rem.Seconds()))
+		if resetSec < 0 {
+			resetSec = 0
+		}
+	}
+
+	return &LikesYouAdRewardResult{
+		AdsWatchedInWindow:    newCount,
+		MaxAdsPerWindow:       LikesYouMaxAdsPerWindow,
+		CanWatchAd:            canWatch,
+		AdResetInSeconds:      resetSec,
+		NewlyUnlockedUserIDs:  newlyUnlocked,
+		BonusRevealsRemaining: bonusRemaining,
+	}, nil
+}
+
 func (p *PostgresRepository) CreateMessageRequest(ctx context.Context, req *MessageRequest) error {
 	query := `
 		INSERT INTO message_requests (id, sender_user_id, recipient_user_id, body, status, created_at)
@@ -3208,7 +3575,7 @@ func (p *PostgresRepository) consumeDiscoveryMessageSlotTx(ctx context.Context, 
 
 	// 1. Check if user has unlimited swipes/messages entitlement
 	var entFound int
-	err := tx.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
+	err := tx.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND (entitlement_code IN ('VIP_SUBSCRIPTION', 'UNLIMITED_MESSAGING') OR (entitlement_code = 'UNLIMITED_SWIPES' AND source != 'MATCH_REWARD')) AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
 	if err == nil && entFound == 1 {
 		return nil
 	}
@@ -3400,7 +3767,7 @@ func (p *PostgresRepository) ConsumeChatOutgoingSlot(ctx context.Context, userID
 	now := time.Now().UTC()
 
 	var entFound int
-	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND (entitlement_code IN ('VIP_SUBSCRIPTION', 'UNLIMITED_MESSAGING') OR (entitlement_code = 'UNLIMITED_SWIPES' AND source != 'MATCH_REWARD')) AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
 	if entFound == 1 {
 		return nil
 	}
@@ -3514,7 +3881,7 @@ func (p *PostgresRepository) GetDiscoveryMessageQuota(ctx context.Context, userI
 	now := time.Now().UTC()
 
 	var entFound int
-	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND (entitlement_code IN ('VIP_SUBSCRIPTION', 'UNLIMITED_MESSAGING') OR (entitlement_code = 'UNLIMITED_SWIPES' AND source != 'MATCH_REWARD')) AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
 	isUnlimited := (entFound == 1)
 	if isUnlimited {
 		return evaluateMessageQuotaState(&DiscoveryMessageQuotaState{UserID: userID}, now, true), nil
@@ -3610,7 +3977,7 @@ func (p *PostgresRepository) UnlockDiscoveryMessageAdBonus(ctx context.Context, 
 	now := time.Now().UTC()
 
 	var entFound int
-	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND (entitlement_code IN ('VIP_SUBSCRIPTION', 'UNLIMITED_MESSAGING') OR (entitlement_code = 'UNLIMITED_SWIPES' AND source != 'MATCH_REWARD')) AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
 	if entFound == 1 {
 		return evaluateMessageQuotaState(&DiscoveryMessageQuotaState{UserID: actorID}, now, true), nil
 	}
@@ -3765,7 +4132,7 @@ func (p *PostgresRepository) CheckCanSendChat(ctx context.Context, senderID, rec
 	now := time.Now().UTC()
 
 	var entFound int
-	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", senderID).Scan(&entFound)
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND (entitlement_code IN ('VIP_SUBSCRIPTION', 'UNLIMITED_MESSAGING') OR (entitlement_code = 'UNLIMITED_SWIPES' AND source != 'MATCH_REWARD')) AND expires_at > NOW() LIMIT 1", senderID).Scan(&entFound)
 	if entFound == 1 {
 		return nil
 	}

@@ -127,6 +127,33 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 		return nil, err
 	}
 
+	// 1. Likes You rewarded ad separation
+	if reward.CustomData == "likes_you_unlock" || reward.RewardItem == "LIKES_YOU" {
+		res, err := s.repo.UnlockLikesYouAdReward(ctx, reward.UserID, reward.TransactionID)
+		if err != nil {
+			if s.logger != nil {
+				s.logger.Warn("likes_you_unlock_reward_failed", slog.String("error", err.Error()), slog.String("transaction_id", reward.TransactionID))
+			}
+			return nil, err
+		}
+		if s.logger != nil {
+			s.logger.Info("likes_you_ad_reward_granted", slog.String("user_id", reward.UserID), slog.String("transaction_id", reward.TransactionID), slog.Int("unlocked_count", len(res.NewlyUnlockedUserIDs)))
+		}
+		reward.RewardAmount = 2
+		return reward, nil
+	}
+
+	// 2. Messaging quota rewarded ad separation
+	if reward.CustomData == "messaging_quota_unlock" || reward.RewardItem == "MESSAGING" {
+		if err := s.repo.RecordAdReward(ctx, reward.UserID, reward.TransactionID, 2); err != nil {
+			return nil, err
+		}
+		_, _ = s.repo.UnlockDiscoveryMessageAdBonus(ctx, reward.UserID)
+		reward.RewardAmount = 2
+		return reward, nil
+	}
+
+	// 3. Swipe allowance rewarded ad
 	grantAmount := reward.RewardAmount
 	if grantAmount <= 0 {
 		grantAmount = 5
@@ -142,19 +169,6 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 	if s.logger != nil {
 		s.logger.Info("admob_ssv_reward_granted", slog.String("user_id", reward.UserID), slog.String("transaction_id", reward.TransactionID), slog.Int("reward_amount", grantAmount))
 	}
-
-	// Grant 2 likes reveals unlocked per completed rewarded ad (Section 5)
-	state, stateErr := s.repo.GetUserLikesUnlockState(ctx, reward.UserID)
-	if stateErr == nil && state != nil {
-		state.BonusRevealsRemaining += 2
-		now := time.Now().UTC()
-		state.LastAdRevealAt = &now
-		state.AdRevealsToday++
-		_ = s.repo.SaveUserLikesUnlockState(ctx, state)
-	}
-
-	// Unlock discovery messaging quota ad bonus if active cooldown
-	_, _ = s.repo.UnlockDiscoveryMessageAdBonus(ctx, reward.UserID)
 
 	reward.RewardAmount = grantAmount
 	return reward, nil
@@ -712,25 +726,38 @@ func (s *Service) GetLikesYou(ctx context.Context, actorID string, limit, offset
 		return nil, err
 	}
 
-	// 3. Fetch unlock state
+	// 3. Fetch unlock state and ad status
 	state, err := s.repo.GetUserLikesUnlockState(ctx, actorID)
 	if err != nil {
 		state = &UserLikesUnlockState{UserID: actorID}
 	}
 
-	freeLimit := 1
-	cooldownDuration := 4 * time.Hour
+	adStatus, err := s.repo.GetLikesYouAdStatus(ctx, actorID)
+	if err != nil {
+		adStatus = &LikesYouAdStatus{
+			AdsWatchedInWindow:       0,
+			MaxAdsPerWindow:          LikesYouMaxAdsPerWindow,
+			CanWatchAd:               true,
+			AdResetInSeconds:         0,
+			ProfilesUnlockedInWindow: 0,
+			MaxProfilesPerWindow:     LikesYouMaxProfilesPerWindow,
+		}
+	}
 
+	freeLimit := 1
 	freeRemaining := freeLimit - state.FreeRevealsUsed
 	if freeRemaining < 0 {
 		freeRemaining = 0
 	}
 
-	cooldownActive := false
-	cooldownRemainingSec := 0
-	if state.LastAdRevealAt != nil && time.Since(*state.LastAdRevealAt) < cooldownDuration {
-		cooldownActive = true
-		cooldownRemainingSec = int((cooldownDuration - time.Since(*state.LastAdRevealAt)).Seconds())
+	cooldownActive := !adStatus.CanWatchAd
+	cooldownRemainingSec := adStatus.AdResetInSeconds
+	canWatchAd := adStatus.CanWatchAd
+
+	if isPremium {
+		cooldownActive = false
+		cooldownRemainingSec = 0
+		canWatchAd = true
 	}
 
 	revealedCount := 0
@@ -783,6 +810,59 @@ func (s *Service) GetLikesYou(ctx context.Context, actorID string, limit, offset
 		CooldownRemainingSeconds: cooldownRemainingSec,
 		RewardedAdEnabled:        true,
 		Likes:                    likes,
+		AdsWatchedInWindow:       adStatus.AdsWatchedInWindow,
+		MaxAdsPerWindow:          adStatus.MaxAdsPerWindow,
+		CanWatchAd:               canWatchAd,
+		AdResetInSeconds:         adStatus.AdResetInSeconds,
+		ProfilesUnlockedInWindow: adStatus.ProfilesUnlockedInWindow,
+		MaxProfilesPerWindow:     adStatus.MaxProfilesPerWindow,
+	}, nil
+}
+
+func (s *Service) UnlockLikesYouWithAd(ctx context.Context, userID, rawQuery, transactionID string) (*LikesYouUnlockAdResponse, error) {
+	rawQuery = strings.TrimSpace(rawQuery)
+	transactionID = strings.TrimSpace(transactionID)
+
+	var txID string
+	if rawQuery != "" {
+		reward, err := s.verifier.VerifyCallback(rawQuery)
+		if err != nil {
+			return nil, err
+		}
+		if reward.UserID != "" && reward.UserID != userID {
+			return nil, errors.New("reward user_id does not match authenticated user")
+		}
+		txID = reward.TransactionID
+	} else if transactionID != "" {
+		if !s.verifier.isTestSignatureAllowed() {
+			return nil, errors.New("raw_query cryptographic SSV callback is required")
+		}
+		txID = transactionID
+	} else {
+		if s.verifier.isTestSignatureAllowed() {
+			txID = fmt.Sprintf("test-likes-you-%s-%d", userID, time.Now().UnixNano())
+		} else {
+			return nil, errors.New("raw_query cryptographic SSV callback is required")
+		}
+	}
+
+	result, err := s.repo.UnlockLikesYouAdReward(ctx, userID, txID)
+	if err != nil {
+		return nil, err
+	}
+
+	likesYou, _ := s.GetLikesYou(ctx, userID, 20, 0)
+
+	return &LikesYouUnlockAdResponse{
+		Success:               true,
+		AdsWatchedInWindow:    result.AdsWatchedInWindow,
+		MaxAdsPerWindow:       result.MaxAdsPerWindow,
+		CanWatchAd:            result.CanWatchAd,
+		AdResetInSeconds:      result.AdResetInSeconds,
+		BonusRevealsRemaining: result.BonusRevealsRemaining,
+		NewlyUnlockedUserIDs:  result.NewlyUnlockedUserIDs,
+		UnlockedCount:         len(result.NewlyUnlockedUserIDs),
+		LikesYou:              likesYou,
 	}, nil
 }
 
@@ -892,16 +972,16 @@ func (s *Service) GetDiscoveryMessageQuota(ctx context.Context, userID string) (
 		return nil, err
 	}
 	if !quota.IsUnlimited && s.entitlementChecker != nil {
-		if s.entitlementChecker(ctx, userID, "UNLIMITED_SWIPES") {
+		if s.entitlementChecker(ctx, userID, "VIP_SUBSCRIPTION") || s.entitlementChecker(ctx, userID, "UNLIMITED_MESSAGING") {
 			quota.IsUnlimited = true
-			quota.IsInTrial = true
+			quota.IsInTrial = false
 			quota.IsLocked = false
 			quota.CooldownActive = false
 			quota.CanUnlockWithAd = false
-			quota.TrialInitiationsRemaining = 9999
-			quota.TrialInitiationsAllowed = 9999
-			quota.FreeQuota = 9999
-			quota.FreeSlotsRemaining = 9999
+			quota.TrialInitiationsRemaining = 0
+			quota.TrialInitiationsAllowed = 0
+			quota.FreeQuota = 0
+			quota.FreeSlotsRemaining = 0
 		}
 	}
 	return quota, nil

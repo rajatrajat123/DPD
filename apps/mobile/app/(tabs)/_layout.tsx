@@ -137,6 +137,7 @@ const styles = StyleSheet.create({
   tabBarItem: {
     minHeight: 48,
     paddingVertical: 2,
+    paddingHorizontal: 2,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -144,7 +145,8 @@ const styles = StyleSheet.create({
     ...typography.caption,
     fontSize: 10,
     fontWeight: '700',
-    letterSpacing: 0.5,
+    letterSpacing: 0.2,
     marginTop: 2,
+    textAlign: 'center',
   },
 });

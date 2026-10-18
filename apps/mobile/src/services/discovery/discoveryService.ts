@@ -7,6 +7,8 @@ import {
   RewindResponse,
   ProfilePhoto,
   DiscoveryMessagingQuota,
+  LikesYouResponse,
+  LikesYouUnlockAdResponse,
 } from '../../types';
 import { buildMediaUrl } from '../media/mediaUploader';
 
@@ -251,6 +253,23 @@ export const discoveryService = {
    */
   async unlockMessagingQuotaWithAd(transactionId?: string, rawQuery?: string): Promise<DiscoveryMessagingQuota> {
     return await api.post<DiscoveryMessagingQuota>('/api/v1/discovery/messaging-quota/unlock-ad', {
+      transaction_id: transactionId,
+      raw_query: rawQuery,
+    });
+  },
+
+  /**
+   * Fetches incoming likes and Likes You unlock state
+   */
+  async getLikesYou(limit = 20, offset = 0): Promise<LikesYouResponse> {
+    return await api.get<LikesYouResponse>(`/api/v1/discovery/likes-you?limit=${limit}&offset=${offset}`);
+  },
+
+  /**
+   * Unlocks 2 profiles via completed Likes You rewarded ad
+   */
+  async unlockLikesYouWithAd(transactionId?: string, rawQuery?: string): Promise<LikesYouUnlockAdResponse> {
+    return await api.post<LikesYouUnlockAdResponse>('/api/v1/discovery/likes-you/unlock-ad', {
       transaction_id: transactionId,
       raw_query: rawQuery,
     });

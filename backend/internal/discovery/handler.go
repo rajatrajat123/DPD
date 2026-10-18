@@ -300,6 +300,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, reqID string, err er
 		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, "AD_ALREADY_UNLOCKED", "Rewarded ad bonus has already been unlocked for the current cooldown window."))
 	case errors.Is(err, ErrDiscoveryMessageCooldownNotActive):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, "COOLDOWN_NOT_ACTIVE", "Discovery messaging cooldown is not currently active."))
+	case errors.Is(err, ErrLikesYouAdLimitReached):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, "LIKES_YOU_AD_LIMIT_REACHED", err.Error()))
 	case errors.Is(err, ErrDuplicateSSVReward):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "Reward transaction already processed (replay blocked)"))
 	case errors.Is(err, ErrExpiredSSVCallback), errors.Is(err, ErrInvalidSSVSignature), errors.Is(err, ErrMissingSSVParam):
@@ -472,6 +474,34 @@ func (h *Handler) RevealLike(w http.ResponseWriter, r *http.Request) {
 		Card:   *card,
 		Source: source,
 	})
+}
+
+// UnlockLikesYouAd handles POST /api/v1/discovery/likes-you/unlock-ad.
+func (h *Handler) UnlockLikesYouAd(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	var req LikesYouUnlockAdRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		_ = validator.DecodeAndValidate(w, r, 16*1024, &req)
+	}
+
+	resp, err := h.svc.UnlockLikesYouWithAd(r.Context(), authUser.ID, req.RawQuery, req.TransactionID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, resp)
 }
 
 // MessageRequests handles GET and POST for /api/v1/discovery/message-requests.

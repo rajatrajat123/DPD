@@ -181,7 +181,7 @@ class AdMobService {
    * Presents a rewarded video ad to the user to earn 1 bonus like.
    * Leverages server-side verification (SSV) callback on the Go backend.
    */
-  async showRewardedAd(userId: string): Promise<AdRewardResult> {
+  async showRewardedAd(userId: string, customData: string = 'bonus_likes_reward'): Promise<AdRewardResult> {
     await this.initialize();
 
     // Verify privacy clean userId format
@@ -190,6 +190,14 @@ class AdMobService {
     }
 
     if (!isGoogleMobileAdsAvailable()) {
+      if (typeof __DEV__ !== 'undefined' && __DEV__) {
+        const mockTxId = `test-ad-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+        return {
+          rewarded: true,
+          rewardAmount: 1,
+          transactionId: mockTxId,
+        };
+      }
       return {
         rewarded: false,
         rewardAmount: 0,
@@ -205,7 +213,7 @@ class AdMobService {
 
         const ssvOptions = {
           userId,
-          customData: 'bonus_likes_reward',
+          customData,
         };
         assertPrivacyClean(ssvOptions);
 

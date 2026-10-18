@@ -89,6 +89,9 @@ export function normalizeMatch(raw: any): Match {
       avatar_url: avatarUrl,
       is_verified: Boolean(targetProf.is_photo_verified || targetProf.is_verified),
       gender_identities: targetProf.gender_identities,
+      bio: targetProf.bio,
+      age: targetProf.age,
+      relationship_structure: targetProf.relationship_structure,
     },
     matched_at: raw.matched_at || new Date().toISOString(),
   };
