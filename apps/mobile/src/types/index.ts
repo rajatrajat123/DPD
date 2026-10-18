@@ -359,3 +359,29 @@ export interface LikesYouUnlockAdResponse {
   unlocked_count: number;
   likes_you?: LikesYouResponse;
 }
+
+export interface FavouriteProfileCard {
+  user_id: string;
+  display_name: string;
+  age: number;
+  bio: string;
+  photo_url?: string;
+  added_at: string;
+}
+
+export interface ListFavouritesResponse {
+  count: number;
+  favourites: FavouriteProfileCard[];
+}
+
+export interface AddFavouriteResponse {
+  success: boolean;
+  target_user_id: string;
+  added_at: string;
+}
+
+export interface RemoveFavouriteResponse {
+  success: boolean;
+  target_user_id: string;
+}
+

@@ -40,6 +40,8 @@ interface DiscoveryCardProps {
   onQuotaPress?: () => void;
   onSendIntroNote?: (message: string) => Promise<void> | void;
   onQuotaUpdated?: (quota: DiscoveryMessagingQuota | null) => void;
+  isFavourite?: boolean;
+  onToggleFavourite?: () => void;
 }
 
 export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
@@ -58,6 +60,8 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   onQuotaPress,
   onSendIntroNote,
   onQuotaUpdated,
+  isFavourite = false,
+  onToggleFavourite,
 }) => {
   const { colors } = useTheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -405,16 +409,42 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           {/* Modal Header */}
           <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
-            <TouchableOpacity
-              style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-              onPress={handleCloseModal}
-              activeOpacity={0.7}
-              testID="modal-close-btn"
-              accessibilityRole="button"
-              accessibilityLabel="Close profile details"
-            >
-              <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
-            </TouchableOpacity>
+            <View style={styles.modalHeaderActions}>
+              {onToggleFavourite && (
+                <TouchableOpacity
+                  style={[
+                    styles.modalFavouriteBtn,
+                    {
+                      backgroundColor: isFavourite ? 'rgba(212, 175, 55, 0.18)' : colors.card,
+                      borderColor: isFavourite ? colors.gold : colors.border,
+                    },
+                  ]}
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
+                    onToggleFavourite();
+                  }}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  testID={`modal-favourite-btn-${candidate.user_id || candidate.id}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={isFavourite ? `Remove ${candidate.display_name} from favourites` : `Save ${candidate.display_name} to favourites`}
+                >
+                  <Text style={[styles.modalFavouriteText, { color: isFavourite ? colors.gold : colors.textMuted }]}>
+                    {isFavourite ? '🔖 Saved' : '🏷️ Save'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+                onPress={handleCloseModal}
+                activeOpacity={0.7}
+                testID="modal-close-btn"
+                accessibilityRole="button"
+                accessibilityLabel="Close profile details"
+              >
+                <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
           </View>
 
           {/* Scrollable Profile Content */}
@@ -638,27 +668,54 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
             )}
 
             {/* Top Badges */}
-            <View style={styles.doubleTopBadgesRow} pointerEvents="none">
+            <View style={styles.doubleTopBadgesRow} pointerEvents="box-none">
               {/* Online Indicator */}
               <View style={styles.doubleOnlineBadge}>
                 <View style={[styles.doubleOnlineDot, { backgroundColor: colors.emerald || '#10B981' }]} />
                 <Text style={styles.doubleOnlineText}>Active</Text>
               </View>
 
-              {/* 18+ Verified Badge */}
-              {candidate.is_verified && (
-                <View
-                  style={[
-                    styles.doubleVerifiedPill,
-                    {
-                      backgroundColor: colors.emeraldMuted || 'rgba(16, 185, 129, 0.15)',
-                      borderColor: colors.emerald || '#10B981',
-                    },
-                  ]}
-                >
-                  <Text style={[styles.doubleVerifiedText, { color: colors.emerald || '#10B981' }]}>✓ 18+</Text>
-                </View>
-              )}
+              <View style={styles.doubleRightBadgesRow} pointerEvents="box-none">
+                {onToggleFavourite && (
+                  <TouchableOpacity
+                    style={[
+                      styles.doubleFavouriteBtn,
+                      {
+                        backgroundColor: isFavourite ? 'rgba(212, 175, 55, 0.35)' : 'rgba(9, 10, 14, 0.72)',
+                        borderColor: isFavourite ? colors.gold : colors.border,
+                      },
+                    ]}
+                    onPress={(e) => {
+                      e?.stopPropagation?.();
+                      onToggleFavourite();
+                    }}
+                    activeOpacity={0.7}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    testID={`discovery-favourite-btn-${candidate.user_id || candidate.id}`}
+                    accessibilityRole="button"
+                    accessibilityLabel={isFavourite ? `Remove ${candidate.display_name} from favourites` : `Save ${candidate.display_name} to favourites`}
+                  >
+                    <Text style={[styles.doubleFavouriteIcon, { color: isFavourite ? colors.gold : colors.textMuted }]}>
+                      {isFavourite ? '🔖' : '🏷️'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+
+                {/* 18+ Verified Badge */}
+                {candidate.is_verified && (
+                  <View
+                    style={[
+                      styles.doubleVerifiedPill,
+                      {
+                        backgroundColor: colors.emeraldMuted || 'rgba(16, 185, 129, 0.15)',
+                        borderColor: colors.emerald || '#10B981',
+                      },
+                    ]}
+                  >
+                    <Text style={[styles.doubleVerifiedText, { color: colors.emerald || '#10B981' }]}>✓ 18+</Text>
+                  </View>
+                )}
+              </View>
             </View>
 
             {/* Distance Overlay at bottom of photo */}
@@ -857,11 +914,41 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               ) : null}
             </View>
 
-            {candidate.is_verified && (
-              <View style={styles.verifiedPill}>
-                <Text style={styles.verifiedPillText}>✓ 18+ Verified</Text>
-              </View>
-            )}
+            <View style={styles.badgeRightGroup} pointerEvents="box-none">
+              {onToggleFavourite && (
+                <TouchableOpacity
+                  style={[
+                    styles.favouriteBadgeBtn,
+                    {
+                      backgroundColor: isFavourite ? 'rgba(212, 175, 55, 0.25)' : 'rgba(9, 10, 14, 0.72)',
+                      borderColor: isFavourite ? colors.gold : colors.border,
+                    },
+                  ]}
+                  onPress={(e) => {
+                    e?.stopPropagation?.();
+                    onToggleFavourite();
+                  }}
+                  activeOpacity={0.7}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  testID={`discovery-favourite-btn-${candidate.user_id || candidate.id}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={isFavourite ? `Remove ${candidate.display_name} from favourites` : `Save ${candidate.display_name} to favourites`}
+                >
+                  <Text style={[styles.favouriteBadgeIcon, { color: isFavourite ? colors.gold : colors.textMuted }]}>
+                    {isFavourite ? '🔖' : '🏷️'}
+                  </Text>
+                  <Text style={[styles.favouriteBadgeText, { color: isFavourite ? colors.gold : colors.textMuted }]}>
+                    {isFavourite ? 'Saved' : 'Save'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+
+              {candidate.is_verified && (
+                <View style={styles.verifiedPill}>
+                  <Text style={styles.verifiedPillText}>✓ 18+ Verified</Text>
+                </View>
+              )}
+            </View>
           </View>
 
           {/* Tap Zones for cycling photos */}
@@ -1763,6 +1850,62 @@ const styles = StyleSheet.create({
   },
   doubleLikeIcon: {
     fontSize: 15,
+  },
+  modalHeaderActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  modalFavouriteBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 5,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  modalFavouriteText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  doubleRightBadgesRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  doubleFavouriteBtn: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  doubleFavouriteIcon: {
+    fontSize: 12,
+  },
+  badgeRightGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+  },
+  favouriteBadgeBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: spacing.sm + 2,
+    paddingVertical: 4,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  favouriteBadgeIcon: {
+    fontSize: 12,
+  },
+  favouriteBadgeText: {
+    ...typography.caption,
+    fontSize: 11,
+    fontWeight: '700',
   },
 });
 

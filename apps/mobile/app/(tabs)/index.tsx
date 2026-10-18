@@ -67,6 +67,57 @@ export default function DiscoveryScreen() {
   const lastKeyboardScreenYRef = useRef<number>(0);
   const [cardRegionHeight, setCardRegionHeight] = useState<number>(0);
 
+  // My Favourites (private bookmarks, no likes/swipes/matches triggered)
+  const [favouriteUserIds, setFavouriteUserIds] = useState<Set<string>>(new Set());
+
+  const loadFavourites = useCallback(async () => {
+    try {
+      const res = await discoveryService.getFavourites();
+      if (res?.favourites && Array.isArray(res.favourites)) {
+        setFavouriteUserIds(new Set(res.favourites.map((f) => f.user_id)));
+      }
+    } catch {
+      // non-blocking
+    }
+  }, []);
+
+  const handleToggleFavourite = useCallback(async (target: DiscoveryCandidate) => {
+    const targetId = target.user_id || target.id;
+    if (!targetId) return;
+
+    const wasFav = favouriteUserIds.has(targetId);
+    // Optimistic UI update
+    setFavouriteUserIds((prev) => {
+      const next = new Set(prev);
+      if (wasFav) {
+        next.delete(targetId);
+      } else {
+        next.add(targetId);
+      }
+      return next;
+    });
+
+    try {
+      if (wasFav) {
+        await discoveryService.removeFavourite(targetId);
+      } else {
+        await discoveryService.addFavourite(targetId);
+      }
+    } catch {
+      // Rollback on network failure
+      setFavouriteUserIds((prev) => {
+        const next = new Set(prev);
+        if (wasFav) {
+          next.add(targetId);
+        } else {
+          next.delete(targetId);
+        }
+        return next;
+      });
+      Alert.alert('Bookmark Failed', 'Could not update favourite. Please check your connection.');
+    }
+  }, [favouriteUserIds]);
+
   // Load saved layout preference on initial mount
   useEffect(() => {
     let isMounted = true;
@@ -99,11 +150,12 @@ export default function DiscoveryScreen() {
           // ignore
         }
       })();
+      loadFavourites();
       return () => {
         isMounted = false;
         Keyboard.dismiss();
       };
-    }, [])
+    }, [loadFavourites])
   );
 
   const selectLayoutMode = useCallback((mode: 'single' | 'double') => {
@@ -356,7 +408,8 @@ export default function DiscoveryScreen() {
 
   useEffect(() => {
     loadFeed();
-  }, [loadFeed]);
+    loadFavourites();
+  }, [loadFeed, loadFavourites]);
 
   // Auto-replenish: when the user reaches near the end of the current deck, automatically load the next batch
   useEffect(() => {
@@ -906,6 +959,8 @@ export default function DiscoveryScreen() {
                     <DiscoveryCard
                       candidate={item}
                       layout="double"
+                      isFavourite={favouriteUserIds.has(item.user_id || item.id)}
+                      onToggleFavourite={() => handleToggleFavourite(item)}
                       onLike={() => handleSwipeForCandidate(item, 'LIKE')}
                       onPass={() => handleSwipeForCandidate(item, 'PASS')}
                       onSuperSpark={() => handleSuperSpark(item)}
@@ -966,6 +1021,8 @@ export default function DiscoveryScreen() {
                       key={activeCandidate.user_id || activeCandidate.id || 'candidate-active'}
                       candidate={activeCandidate}
                       layout="single"
+                      isFavourite={favouriteUserIds.has(activeCandidate.user_id || activeCandidate.id)}
+                      onToggleFavourite={() => handleToggleFavourite(activeCandidate)}
                       onLike={() => handleSwipe('LIKE')}
                       onPass={() => handleSwipe('PASS')}
                       onSuperSpark={() => handleSuperSpark(activeCandidate)}

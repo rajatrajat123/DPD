@@ -40,10 +40,33 @@ export default function ProfileDetailScreen() {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
   const [messageQuota, setMessageQuota] = useState<DiscoveryMessagingQuota | null>(null);
   const [showMessageQuotaModal, setShowMessageQuotaModal] = useState(false);
+  const [isFavourite, setIsFavourite] = useState(false);
 
   useEffect(() => {
     discoveryService.getMessagingQuota().then(setMessageQuota).catch(() => {});
-  }, []);
+    if (id) {
+      discoveryService.getFavourites().then((res) => {
+        const isFav = (res?.favourites || []).some((f) => f.user_id === id);
+        setIsFavourite(isFav);
+      }).catch(() => {});
+    }
+  }, [id]);
+
+  const handleToggleFavourite = async () => {
+    if (!id) return;
+    const wasFav = isFavourite;
+    setIsFavourite(!wasFav);
+    try {
+      if (wasFav) {
+        await discoveryService.removeFavourite(id);
+      } else {
+        await discoveryService.addFavourite(id);
+      }
+    } catch {
+      setIsFavourite(wasFav);
+      Alert.alert('Bookmark Failed', 'Could not update favourites.');
+    }
+  };
 
   const fetchProfile = async () => {
     if (!id) {
@@ -178,7 +201,24 @@ export default function ProfileDetailScreen() {
           <Text style={styles.backIcon}>◀</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Profile</Text>
-        <View style={styles.headerRightSpacer} />
+        <TouchableOpacity
+          style={[
+            styles.favouriteToggleBtn,
+            {
+              backgroundColor: isFavourite ? 'rgba(212, 175, 55, 0.2)' : colors.card,
+              borderColor: isFavourite ? colors.gold : colors.border,
+            },
+          ]}
+          onPress={handleToggleFavourite}
+          activeOpacity={0.7}
+          testID="profile-favourite-toggle"
+          accessibilityRole="button"
+          accessibilityLabel={isFavourite ? 'Remove from favourites' : 'Save to favourites'}
+        >
+          <Text style={[styles.favouriteToggleText, { color: isFavourite ? colors.gold : colors.textMuted }]}>
+            {isFavourite ? '🔖 Saved' : '🏷️ Save'}
+          </Text>
+        </TouchableOpacity>
       </View>
 
       {isLoading ? (
@@ -428,6 +468,19 @@ const styles = StyleSheet.create({
   },
   headerRightSpacer: {
     width: 40,
+  },
+  favouriteToggleBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.md,
+    paddingVertical: 6,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  favouriteToggleText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
   },
   centerContainer: {
     flex: 1,

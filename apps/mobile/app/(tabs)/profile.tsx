@@ -14,13 +14,13 @@ import {
   LayoutAnimation,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
 import { mediaUploader } from '../../src/services/media/mediaUploader';
 import { authService } from '../../src/services/auth/authService';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
-import { SmokingPreference, ProfilePhoto, DiscoveryPreferences } from '../../src/types';
+import { SmokingPreference, ProfilePhoto, DiscoveryPreferences, FavouriteProfileCard } from '../../src/types';
 import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
 import {
   GENDER_IDENTITY_OPTIONS,
@@ -184,12 +184,14 @@ export default function ProfileScreen() {
     identity: boolean;
     lifestyle: boolean;
     preferences: boolean;
+    favourites: boolean;
   }>({
     basic: true,       // Expanded by default
     physical: false,    // Collapsed by default
     identity: false,    // Collapsed by default
     lifestyle: false,   // Collapsed by default
     preferences: false, // Collapsed by default
+    favourites: true,   // Expanded by default
   });
 
   const toggleSection = (key: keyof typeof expandedSections) => {
@@ -257,6 +259,45 @@ export default function ProfileScreen() {
   useEffect(() => {
     loadDiscoveryPrefs();
   }, [loadDiscoveryPrefs]);
+
+  // Section F: My Favourites (Private bookmarks loaded from backend)
+  const [favourites, setFavourites] = useState<FavouriteProfileCard[]>([]);
+  const [isLoadingFavourites, setIsLoadingFavourites] = useState<boolean>(true);
+  const [favouritesError, setFavouritesError] = useState<string | null>(null);
+
+  const loadFavourites = useCallback(async () => {
+    setIsLoadingFavourites(true);
+    setFavouritesError(null);
+    try {
+      const res = await discoveryService.getFavourites();
+      setFavourites(res.favourites || []);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setFavouritesError(msg || 'Could not load favourites.');
+    } finally {
+      setIsLoadingFavourites(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadFavourites();
+  }, [loadFavourites]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadFavourites();
+    }, [loadFavourites])
+  );
+
+  const handleRemoveFavourite = useCallback(async (targetUserId: string) => {
+    setFavourites((prev) => prev.filter((f) => f.user_id !== targetUserId));
+    try {
+      await discoveryService.removeFavourite(targetUserId);
+    } catch {
+      loadFavourites();
+      Alert.alert('Remove Failed', 'Could not remove favourite profile. Please try again.');
+    }
+  }, [loadFavourites]);
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -2222,6 +2263,176 @@ export default function ProfileScreen() {
           currentPreferences={discoveryPrefs}
         />
 
+        {/* SECTION F: My Favourites */}
+        <View
+          testID="section-my-favourites"
+          style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+        >
+          <TouchableOpacity
+            testID="accordion-header-favourites"
+            style={styles.accordionHeader}
+            onPress={() => toggleSection('favourites')}
+            activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="My Favourites section"
+            accessibilityState={{ expanded: expandedSections.favourites }}
+          >
+            <View style={styles.accordionTitleCol}>
+              <View style={styles.accordionTitleRow}>
+                <Text style={styles.accordionIcon}>🔖</Text>
+                <Text style={[styles.sectionTitle, { color: colors.text }]}>My Favourites</Text>
+                <View
+                  style={[
+                    styles.accordionBadge,
+                    {
+                      backgroundColor: favourites.length > 0 ? `${colors.gold}20` : `${colors.borderSubtle}`,
+                      borderColor: favourites.length > 0 ? colors.gold : colors.border,
+                    },
+                  ]}
+                >
+                  <Text
+                    style={[
+                      styles.accordionBadgeText,
+                      { color: favourites.length > 0 ? colors.gold : colors.textMuted },
+                    ]}
+                  >
+                    {favourites.length > 0 ? `${favourites.length} Saved` : '0 Saved'}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.accordionDesc}>
+                Private bookmarks — profiles you've saved from Discovery
+              </Text>
+            </View>
+            <View
+              style={[
+                styles.accordionChevronWrap,
+                { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+              ]}
+            >
+              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                {expandedSections.favourites ? '▲' : '▼'}
+              </Text>
+            </View>
+          </TouchableOpacity>
+
+          {expandedSections.favourites && (
+            <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+              {isLoadingFavourites && favourites.length === 0 ? (
+                <View style={styles.favLoadingState} testID="favourites-loading-state">
+                  <ActivityIndicator size="small" color={colors.gold} />
+                  <Text style={[styles.favLoadingText, { color: colors.textMuted }]}>
+                    Loading saved favourites...
+                  </Text>
+                </View>
+              ) : favouritesError && favourites.length === 0 ? (
+                <View style={styles.favErrorState} testID="favourites-error-state">
+                  <Text style={[styles.favErrorText, { color: colors.ruby }]}>
+                    ⚠️ {favouritesError}
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.favRetryBtn, { borderColor: colors.gold }]}
+                    onPress={loadFavourites}
+                    activeOpacity={0.7}
+                    testID="favourites-retry-btn"
+                  >
+                    <Text style={[styles.favRetryBtnText, { color: colors.gold }]}>Retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : favourites.length === 0 ? (
+                <View style={styles.favEmptyState} testID="favourites-empty-state">
+                  <Text style={styles.favEmptyIcon}>🔖</Text>
+                  <Text style={[styles.favEmptyTitle, { color: colors.text }]}>No favourite profiles saved yet</Text>
+                  <Text style={[styles.favEmptySubtitle, { color: colors.textMuted }]}>
+                    Tap the bookmark icon on any Discovery card to save profiles here for quick private access.
+                  </Text>
+                </View>
+              ) : (
+                <View style={styles.favList} testID="favourites-list">
+                  {favourites.map((fav) => (
+                    <View
+                      key={fav.user_id}
+                      style={[
+                        styles.favCard,
+                        { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+                      ]}
+                      testID={`favourite-item-${fav.user_id}`}
+                    >
+                      <TouchableOpacity
+                        style={styles.favCardTouchable}
+                        onPress={() =>
+                          router.push({
+                            pathname: '/profile/[id]',
+                            params: { id: fav.user_id },
+                          })
+                        }
+                        activeOpacity={0.7}
+                        testID={`favourite-card-${fav.user_id}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`View profile of ${fav.display_name}`}
+                      >
+                        {fav.photo_url ? (
+                          <Image
+                            source={{ uri: fav.photo_url }}
+                            style={styles.favAvatar}
+                            resizeMode="cover"
+                          />
+                        ) : (
+                          <View
+                            style={[
+                              styles.favAvatar,
+                              styles.favAvatarPlaceholder,
+                              { backgroundColor: colors.cardMuted },
+                            ]}
+                          >
+                            <Text style={[styles.favPlaceholderMonogram, { color: colors.gold }]}>
+                              {fav.display_name ? fav.display_name.charAt(0).toUpperCase() : 'A'}
+                            </Text>
+                          </View>
+                        )}
+                        <View style={styles.favInfoCol}>
+                          <View style={styles.favNameRow}>
+                            <Text style={[styles.favName, { color: colors.text }]} numberOfLines={1}>
+                              {fav.display_name}
+                            </Text>
+                            {fav.age > 0 && (
+                              <Text style={[styles.favAge, { color: colors.gold }]}>, {fav.age}</Text>
+                            )}
+                          </View>
+                          {fav.bio ? (
+                            <Text style={[styles.favBio, { color: colors.textMuted }]} numberOfLines={1}>
+                              {fav.bio}
+                            </Text>
+                          ) : (
+                            <Text style={[styles.favBio, { color: colors.textSubtle }]}>
+                              Saved favourite
+                            </Text>
+                          )}
+                        </View>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity
+                        style={[
+                          styles.favRemoveBtn,
+                          { backgroundColor: colors.card, borderColor: colors.border },
+                        ]}
+                        onPress={() => handleRemoveFavourite(fav.user_id)}
+                        activeOpacity={0.7}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        testID={`remove-favourite-${fav.user_id}`}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Remove ${fav.display_name} from favourites`}
+                      >
+                        <Text style={[styles.favRemoveBtnText, { color: colors.textMuted }]}>✕</Text>
+                      </TouchableOpacity>
+                    </View>
+                  ))}
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+
         {/* App Appearance & Themes Section */}
         <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
           <View style={styles.sectionTitleRow}>
@@ -3577,6 +3788,124 @@ const styles = StyleSheet.create({
     ...typography.body,
     fontWeight: '700',
     letterSpacing: 0.5,
+  },
+  favLoadingState: {
+    paddingVertical: spacing.lg,
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  favLoadingText: {
+    ...typography.caption,
+    fontSize: 12,
+  },
+  favErrorState: {
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  favErrorText: {
+    ...typography.caption,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  favRetryBtn: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 5,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  favRetryBtnText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  favEmptyState: {
+    paddingVertical: spacing.lg,
+    paddingHorizontal: spacing.md,
+    alignItems: 'center',
+  },
+  favEmptyIcon: {
+    fontSize: 28,
+    marginBottom: spacing.xs,
+  },
+  favEmptyTitle: {
+    ...typography.body,
+    fontWeight: '700',
+    fontSize: 14,
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  favEmptySubtitle: {
+    ...typography.caption,
+    fontSize: 12,
+    textAlign: 'center',
+    lineHeight: 17,
+  },
+  favList: {
+    gap: spacing.sm,
+    paddingTop: 4,
+  },
+  favCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: spacing.sm,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+  },
+  favCardTouchable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: spacing.sm,
+  },
+  favAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
+  favAvatarPlaceholder: {
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  favPlaceholderMonogram: {
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  favInfoCol: {
+    flex: 1,
+    marginLeft: spacing.sm,
+  },
+  favNameRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  favName: {
+    ...typography.body,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  favAge: {
+    ...typography.body,
+    fontWeight: '600',
+    fontSize: 13,
+  },
+  favBio: {
+    ...typography.caption,
+    fontSize: 11,
+    marginTop: 2,
+  },
+  favRemoveBtn: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  favRemoveBtnText: {
+    fontSize: 12,
+    fontWeight: '700',
   },
 });
 

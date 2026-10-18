@@ -9,6 +9,10 @@ import {
   DiscoveryMessagingQuota,
   LikesYouResponse,
   LikesYouUnlockAdResponse,
+  FavouriteProfileCard,
+  ListFavouritesResponse,
+  AddFavouriteResponse,
+  RemoveFavouriteResponse,
 } from '../../types';
 import { buildMediaUrl } from '../media/mediaUploader';
 
@@ -273,5 +277,32 @@ export const discoveryService = {
       transaction_id: transactionId,
       raw_query: rawQuery,
     });
+  },
+
+  /**
+   * Fetches the current user's saved favourite profiles
+   */
+  async getFavourites(): Promise<ListFavouritesResponse> {
+    const res = await api.get<ListFavouritesResponse>('/api/v1/discovery/favourites');
+    return {
+      count: res.count ?? (res.favourites ? res.favourites.length : 0),
+      favourites: res.favourites || [],
+    };
+  },
+
+  /**
+   * Saves a profile to current user's favourites (strictly private bookmark)
+   */
+  async addFavourite(targetUserId: string): Promise<AddFavouriteResponse> {
+    return await api.post<AddFavouriteResponse>('/api/v1/discovery/favourites', {
+      target_user_id: targetUserId,
+    });
+  },
+
+  /**
+   * Removes a profile from current user's favourites
+   */
+  async removeFavourite(targetUserId: string): Promise<RemoveFavouriteResponse> {
+    return await api.delete<RemoveFavouriteResponse>(`/api/v1/discovery/favourites/${targetUserId}`);
   },
 };
