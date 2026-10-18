@@ -32,6 +32,12 @@ var (
 	ErrAgeVerificationRequired   = errors.New("mandatory 18+ age verification required")
 	ErrBirthdateRequired         = errors.New("birthdate is required to verify adult status")
 	ErrUnderageProhibited        = errors.New("underage access prohibited: must be at least 18 years old")
+	ErrDiscoveryMessageQuotaLocked       = errors.New("discovery profile messaging quota exhausted; cooldown active")
+	ErrDiscoveryMessageAdAlreadyUnlocked = errors.New("rewarded ad already unlocked for current cooldown window")
+	ErrDiscoveryMessageCooldownNotActive = errors.New("cooldown is not active")
+	ErrDiscoveryMessageAwaitingReply     = errors.New("cannot send another message until recipient replies")
+	ErrDiscoveryMessageUsageLimitReached = errors.New("You've reached your usage limit. Please try again in 3 hours.")
+	ErrDiscoveryMessageMaxAdsReached     = errors.New("maximum rewarded ad unlocks reached for current cycle")
 )
 
 type Repository interface {
@@ -57,6 +63,13 @@ type Repository interface {
 	CreateMessageRequest(ctx context.Context, mr *MessageRequest) error
 	ListMessageRequests(ctx context.Context, userID, folder string) ([]MessageRequest, error)
 	UpdateMessageRequestStatus(ctx context.Context, requestID, recipientID, status string) error
+	GetDiscoveryMessageQuota(ctx context.Context, userID string) (*DiscoveryMessagingQuota, error)
+	ConsumeDiscoveryMessageSlot(ctx context.Context, actorID, targetID string) error
+	UnlockDiscoveryMessageAdBonus(ctx context.Context, actorID string) (*DiscoveryMessagingQuota, error)
+	ConsumeChatOutgoingSlot(ctx context.Context, userID string) error
+	CheckCanSendChat(ctx context.Context, senderID, recipientID string) error
+	HasRecipientReplied(ctx context.Context, senderID, recipientID string) (bool, error)
+	RecordRecipientReply(ctx context.Context, senderID, recipientID string) error
 }
 
 type UserLikesUnlockState struct {
@@ -97,6 +110,8 @@ type MemoryRepository struct {
 	revealedLikes    map[string]map[string]string
 	likesUnlockState map[string]*UserLikesUnlockState
 	messageRequests  map[string]*MessageRequest
+	messagingQuotas  map[string]*DiscoveryMessageQuotaState
+	repliedPairs     map[string]bool // key: senderID:recipientID
 }
 
 type swipeRecord struct {
@@ -136,6 +151,8 @@ func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 		revealedLikes:    make(map[string]map[string]string),
 		likesUnlockState: make(map[string]*UserLikesUnlockState),
 		messageRequests:  make(map[string]*MessageRequest),
+		messagingQuotas:  make(map[string]*DiscoveryMessageQuotaState),
+		repliedPairs:     make(map[string]bool),
 	}
 }
 
@@ -809,6 +826,13 @@ func (m *MemoryRepository) CreateSwipe(ctx context.Context, actorID, targetID st
 		}
 	}
 
+	// Enforce Discovery messaging quota if initiating a message with an Intro Note
+	if strings.TrimSpace(introNote) != "" {
+		if err := m.consumeDiscoveryMessageSlotLocked(actorID, targetID); err != nil {
+			return false, nil, false, err
+		}
+	}
+
 	now := time.Now().UTC()
 	m.swipes[swipeKey] = &swipeRecord{
 		ActorID:   actorID,
@@ -816,6 +840,18 @@ func (m *MemoryRepository) CreateSwipe(ctx context.Context, actorID, targetID st
 		Direction: direction,
 		IntroNote: introNote,
 		CreatedAt: now,
+	}
+
+	if strings.TrimSpace(introNote) != "" {
+		mrID := fmt.Sprintf("mr-%d", now.UnixNano())
+		m.messageRequests[mrID] = &MessageRequest{
+			ID:              mrID,
+			SenderUserID:    actorID,
+			RecipientUserID: targetID,
+			Body:            strings.TrimSpace(introNote),
+			Status:          "PENDING",
+			CreatedAt:       now,
+		}
 	}
 
 	// If direction is PASS, no match can occur
@@ -1262,6 +1298,519 @@ func (m *MemoryRepository) UpdateMessageRequestStatus(_ context.Context, request
 	now := time.Now().UTC()
 	req.RespondedAt = &now
 	return nil
+}
+
+func (m *MemoryRepository) isUserUnlimited(actorID string) bool {
+	now := time.Now().UTC()
+	for _, e := range m.entitlements[actorID] {
+		if (e.Code == "UNLIMITED_SWIPES" || e.Code == "VIP_SUBSCRIPTION") && e.ExpiresAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+func evaluateMessageQuotaState(state *DiscoveryMessageQuotaState, now time.Time, isUnlimited bool) *DiscoveryMessagingQuota {
+	if isUnlimited {
+		return &DiscoveryMessagingQuota{
+			UserID:                    state.UserID,
+			IsUnlimited:               true,
+			IsInTrial:                 true,
+			TrialStartedAt:            state.TrialStartedAt,
+			TrialEndsAt:               state.TrialEndsAt,
+			TrialDaysRemaining:        30,
+			IsLocked:                  false,
+			CanUnlockWithAd:           false,
+			AdUnlocked:                false,
+			TrialInitiationsRemaining: 9999,
+			TrialInitiationsAllowed:   9999,
+			TrialDistinctMessaged:     0,
+			PostTrialFreeRemaining:    9999,
+			PostTrialBonusRemaining:   0,
+			FreeQuota:                 9999,
+			FreeSlotsRemaining:        9999,
+			DistinctProfilesMessaged:  0,
+			CooldownActive:            false,
+			CooldownSecondsRemaining:  0,
+			BonusSlotsRemaining:       0,
+		}
+	}
+
+	isInTrial := now.Before(state.TrialEndsAt)
+	if isInTrial {
+		daysRemaining := int(math.Ceil(state.TrialEndsAt.Sub(now).Hours() / 24.0))
+		if daysRemaining < 0 {
+			daysRemaining = 0
+		}
+
+		cooldownActive := false
+		cooldownSecs := 0
+		var cooldownExp *time.Time
+
+		if state.CooldownExpiresAt != nil {
+			if state.CooldownExpiresAt.After(now) {
+				cooldownActive = true
+				cooldownSecs = int(state.CooldownExpiresAt.Sub(now).Seconds())
+				cooldownExp = state.CooldownExpiresAt
+			} else {
+				// Expired! Reset cycle
+				state.TrialDiscoveryProfileIDs = []string{}
+				state.TrialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+				state.TrialDiscoveryAdsWatched = 0
+				state.CooldownExpiresAt = nil
+				state.UpdatedAt = now
+			}
+		}
+
+		distinctCount := len(state.TrialDiscoveryProfileIDs)
+		allowed := state.TrialDiscoveryAllowed
+		if allowed <= 0 {
+			allowed = TrialDiscoveryFreeBatchQuota
+		}
+		initiationsRemaining := allowed - distinctCount
+		if initiationsRemaining < 0 {
+			initiationsRemaining = 0
+		}
+
+		isLocked := false
+		canUnlockWithAd := false
+
+		if cooldownActive {
+			isLocked = true
+			canUnlockWithAd = false
+		} else if distinctCount >= TrialDiscoveryMaxCycleProfiles {
+			isLocked = true
+			canUnlockWithAd = false
+			cooldownActive = true
+			if state.CooldownExpiresAt != nil && state.CooldownExpiresAt.After(now) {
+				cooldownSecs = int(state.CooldownExpiresAt.Sub(now).Seconds())
+				cooldownExp = state.CooldownExpiresAt
+			}
+		} else if initiationsRemaining == 0 {
+			isLocked = true
+			if state.TrialDiscoveryAdsWatched < TrialDiscoveryMaxAdsPerCycle {
+				canUnlockWithAd = true
+			}
+		}
+
+		adUnlocked := (state.TrialDiscoveryAdsWatched > 0 && !isLocked)
+
+		return &DiscoveryMessagingQuota{
+			UserID:                    state.UserID,
+			IsUnlimited:               false,
+			IsInTrial:                 true,
+			TrialStartedAt:            state.TrialStartedAt,
+			TrialEndsAt:               state.TrialEndsAt,
+			TrialDaysRemaining:        daysRemaining,
+			IsLocked:                  isLocked,
+			CanUnlockWithAd:           canUnlockWithAd,
+			AdUnlocked:                adUnlocked,
+			TrialInitiationsRemaining: initiationsRemaining,
+			TrialInitiationsAllowed:   allowed,
+			TrialDistinctMessaged:     distinctCount,
+			PostTrialFreeRemaining:    PostTrialFreeQuota,
+			PostTrialBonusRemaining:   0,
+			FreeQuota:                 allowed,
+			FreeSlotsRemaining:        initiationsRemaining,
+			DistinctProfilesMessaged:  distinctCount,
+			CooldownActive:            cooldownActive,
+			CooldownSecondsRemaining:  cooldownSecs,
+			CooldownExpiresAt:         cooldownExp,
+			BonusSlotsRemaining:       0,
+		}
+	}
+
+	// Post-trial mode
+	postFreeRemaining := PostTrialFreeQuota - state.PostTrialOutgoingCount
+	if postFreeRemaining < 0 {
+		postFreeRemaining = 0
+	}
+	postBonusRemaining := 0
+	if state.PostTrialAdUnlocked {
+		postBonusRemaining = PostTrialBonusQuota - state.PostTrialBonusOutgoing
+		if postBonusRemaining < 0 {
+			postBonusRemaining = 0
+		}
+	}
+
+	isLocked := false
+	canUnlockWithAd := false
+	if postFreeRemaining <= 0 {
+		if !state.PostTrialAdUnlocked {
+			isLocked = true
+			canUnlockWithAd = true
+		} else {
+			if postBonusRemaining <= 0 {
+				isLocked = true
+				canUnlockWithAd = false
+			} else {
+				isLocked = false
+				canUnlockWithAd = false
+			}
+		}
+	}
+
+	return &DiscoveryMessagingQuota{
+		UserID:                    state.UserID,
+		IsUnlimited:               false,
+		IsInTrial:                 false,
+		TrialStartedAt:            state.TrialStartedAt,
+		TrialEndsAt:               state.TrialEndsAt,
+		TrialDaysRemaining:        0,
+		IsLocked:                  isLocked,
+		CanUnlockWithAd:           canUnlockWithAd,
+		AdUnlocked:                state.PostTrialAdUnlocked,
+		TrialInitiationsRemaining: 0,
+		TrialInitiationsAllowed:   state.TrialDiscoveryAllowed,
+		TrialDistinctMessaged:     len(state.TrialDiscoveryProfileIDs),
+		PostTrialFreeRemaining:    postFreeRemaining,
+		PostTrialBonusRemaining:   postBonusRemaining,
+		FreeQuota:                 PostTrialFreeQuota,
+		FreeSlotsRemaining:        postFreeRemaining,
+		DistinctProfilesMessaged:  state.PostTrialOutgoingCount,
+		CooldownActive:            isLocked,
+		CooldownSecondsRemaining:  0,
+		CooldownExpiresAt:         nil,
+		BonusSlotsRemaining:       postBonusRemaining,
+	}
+}
+
+func (m *MemoryRepository) consumeDiscoveryMessageSlotLocked(actorID, targetID string) error {
+	now := time.Now().UTC()
+	if m.isUserUnlimited(actorID) {
+		return nil
+	}
+
+	state, ok := m.messagingQuotas[actorID]
+	if !ok {
+		userCreatedAt := now
+		if t, ok := m.userCreatedAt[actorID]; ok && !t.IsZero() {
+			userCreatedAt = t
+		}
+		state = &DiscoveryMessageQuotaState{
+			UserID:                   actorID,
+			TrialStartedAt:           userCreatedAt,
+			TrialEndsAt:              userCreatedAt.Add(TrialDuration),
+			TrialDiscoveryProfileIDs: []string{},
+			TrialDiscoveryAllowed:    TrialDiscoveryFreeBatchQuota,
+			TrialDiscoveryAdsWatched: 0,
+			PostTrialOutgoingCount:   0,
+			PostTrialAdUnlocked:      false,
+			PostTrialBonusOutgoing:   0,
+			UpdatedAt:                now,
+		}
+		m.messagingQuotas[actorID] = state
+	}
+
+	if state.TrialDiscoveryAllowed <= 0 {
+		state.TrialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+	if state.TrialEndsAt.IsZero() {
+		state.TrialStartedAt = now
+		state.TrialEndsAt = now.Add(TrialDuration)
+	}
+
+	// 1. In Trial Mode
+	if now.Before(state.TrialEndsAt) {
+		// A. Check 3-hour cooldown
+		if state.CooldownExpiresAt != nil {
+			if state.CooldownExpiresAt.After(now) {
+				return ErrDiscoveryMessageUsageLimitReached
+			}
+			// Cooldown expired! Reset trial cycle
+			state.TrialDiscoveryProfileIDs = []string{}
+			state.TrialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+			state.TrialDiscoveryAdsWatched = 0
+			state.CooldownExpiresAt = nil
+			state.UpdatedAt = now
+		}
+
+		// B. Check if targetID was already contacted
+		alreadyContacted := false
+		for _, id := range state.TrialDiscoveryProfileIDs {
+			if id == targetID {
+				alreadyContacted = true
+				break
+			}
+		}
+
+		if alreadyContacted {
+			// One initial message per profile until they reply!
+			hasReplied := m.repliedPairs[actorID+":"+targetID]
+			if !hasReplied {
+				for _, req := range m.messageRequests {
+					if (req.SenderUserID == actorID && req.RecipientUserID == targetID && req.Status == "ACCEPTED") ||
+					   (req.SenderUserID == targetID && req.RecipientUserID == actorID) {
+						hasReplied = true
+						break
+					}
+				}
+			}
+			if !hasReplied {
+				return ErrDiscoveryMessageAwaitingReply
+			}
+			// Recipient replied; conversation is established, allowed without consuming an additional slot
+			return nil
+		}
+
+		// C. Target is a new distinct profile
+		if len(state.TrialDiscoveryProfileIDs) < state.TrialDiscoveryAllowed {
+			state.TrialDiscoveryProfileIDs = append(state.TrialDiscoveryProfileIDs, targetID)
+			if len(state.TrialDiscoveryProfileIDs) >= TrialDiscoveryMaxCycleProfiles {
+				exp := now.Add(TrialDiscoveryCycleCooldown)
+				state.CooldownExpiresAt = &exp
+			}
+			state.UpdatedAt = now
+			return nil
+		}
+
+		return ErrDiscoveryMessageQuotaLocked
+	}
+
+	// 2. Post-Trial Mode
+	if state.PostTrialOutgoingCount < PostTrialFreeQuota {
+		state.PostTrialOutgoingCount++
+		state.UpdatedAt = now
+		return nil
+	}
+
+	if state.PostTrialAdUnlocked && state.PostTrialBonusOutgoing < PostTrialBonusQuota {
+		state.PostTrialBonusOutgoing++
+		state.UpdatedAt = now
+		return nil
+	}
+
+	return ErrDiscoveryMessageQuotaLocked
+}
+
+func (m *MemoryRepository) ConsumeDiscoveryMessageSlot(_ context.Context, actorID, targetID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.consumeDiscoveryMessageSlotLocked(actorID, targetID)
+}
+
+func (m *MemoryRepository) ConsumeChatOutgoingSlot(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	if m.isUserUnlimited(userID) {
+		return nil
+	}
+
+	state, ok := m.messagingQuotas[userID]
+	if !ok {
+		userCreatedAt := now
+		if t, ok := m.userCreatedAt[userID]; ok && !t.IsZero() {
+			userCreatedAt = t
+		}
+		state = &DiscoveryMessageQuotaState{
+			UserID:                   userID,
+			TrialStartedAt:           userCreatedAt,
+			TrialEndsAt:              userCreatedAt.Add(TrialDuration),
+			TrialDiscoveryProfileIDs: []string{},
+			TrialDiscoveryAllowed:    TrialDiscoveryFreeBatchQuota,
+			TrialDiscoveryAdsWatched: 0,
+			PostTrialOutgoingCount:   0,
+			PostTrialAdUnlocked:      false,
+			PostTrialBonusOutgoing:   0,
+			UpdatedAt:                now,
+		}
+		m.messagingQuotas[userID] = state
+	}
+
+	if state.TrialEndsAt.IsZero() {
+		state.TrialStartedAt = now
+		state.TrialEndsAt = now.Add(TrialDuration)
+	}
+
+	// During trial: all messages & replies in existing conversations are unlimited!
+	if now.Before(state.TrialEndsAt) {
+		return nil
+	}
+
+	// Post-trial mode
+	if state.PostTrialOutgoingCount < PostTrialFreeQuota {
+		state.PostTrialOutgoingCount++
+		state.UpdatedAt = now
+		return nil
+	}
+
+	if state.PostTrialAdUnlocked && state.PostTrialBonusOutgoing < PostTrialBonusQuota {
+		state.PostTrialBonusOutgoing++
+		state.UpdatedAt = now
+		return nil
+	}
+
+	return ErrDiscoveryMessageQuotaLocked
+}
+
+func (m *MemoryRepository) CheckCanSendChat(_ context.Context, senderID, recipientID string) error {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	now := time.Now().UTC()
+	if m.isUserUnlimited(senderID) {
+		return nil
+	}
+
+	state, ok := m.messagingQuotas[senderID]
+	if !ok {
+		return nil
+	}
+
+	if now.Before(state.TrialEndsAt) {
+		isDiscoveryContact := false
+		for _, id := range state.TrialDiscoveryProfileIDs {
+			if id == recipientID {
+				isDiscoveryContact = true
+				break
+			}
+		}
+		if isDiscoveryContact {
+			if m.repliedPairs[senderID+":"+recipientID] {
+				return nil
+			}
+			for _, req := range m.messageRequests {
+				if (req.SenderUserID == senderID && req.RecipientUserID == recipientID && req.Status == "ACCEPTED") ||
+				   (req.SenderUserID == recipientID && req.RecipientUserID == senderID) {
+					return nil
+				}
+			}
+			return ErrDiscoveryMessageAwaitingReply
+		}
+	}
+	return nil
+}
+
+func (m *MemoryRepository) HasRecipientReplied(_ context.Context, senderID, recipientID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.repliedPairs[senderID+":"+recipientID] {
+		return true, nil
+	}
+	for _, req := range m.messageRequests {
+		if (req.SenderUserID == senderID && req.RecipientUserID == recipientID && req.Status == "ACCEPTED") ||
+		   (req.SenderUserID == recipientID && req.RecipientUserID == senderID) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *MemoryRepository) RecordRecipientReply(_ context.Context, senderID, recipientID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.repliedPairs[senderID+":"+recipientID] = true
+	return nil
+}
+
+func (m *MemoryRepository) GetDiscoveryMessageQuota(_ context.Context, userID string) (*DiscoveryMessagingQuota, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	state, ok := m.messagingQuotas[userID]
+	if !ok {
+		userCreatedAt := now
+		if t, ok := m.userCreatedAt[userID]; ok && !t.IsZero() {
+			userCreatedAt = t
+		}
+		state = &DiscoveryMessageQuotaState{
+			UserID:                   userID,
+			TrialStartedAt:           userCreatedAt,
+			TrialEndsAt:              userCreatedAt.Add(TrialDuration),
+			TrialDiscoveryProfileIDs: []string{},
+			TrialDiscoveryAllowed:    TrialDiscoveryFreeBatchQuota,
+			TrialDiscoveryAdsWatched: 0,
+			PostTrialOutgoingCount:   0,
+			PostTrialAdUnlocked:      false,
+			PostTrialBonusOutgoing:   0,
+			UpdatedAt:                now,
+		}
+		m.messagingQuotas[userID] = state
+	}
+
+	if state.TrialDiscoveryAllowed <= 0 {
+		state.TrialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+	if state.TrialEndsAt.IsZero() {
+		state.TrialStartedAt = now
+		state.TrialEndsAt = now.Add(TrialDuration)
+	}
+
+	isUnlimited := m.isUserUnlimited(userID)
+	return evaluateMessageQuotaState(state, now, isUnlimited), nil
+}
+
+func (m *MemoryRepository) UnlockDiscoveryMessageAdBonus(_ context.Context, actorID string) (*DiscoveryMessagingQuota, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	now := time.Now().UTC()
+	isUnlimited := m.isUserUnlimited(actorID)
+	if isUnlimited {
+		return evaluateMessageQuotaState(&DiscoveryMessageQuotaState{UserID: actorID}, now, true), nil
+	}
+
+	state, ok := m.messagingQuotas[actorID]
+	if !ok {
+		userCreatedAt := now
+		if t, ok := m.userCreatedAt[actorID]; ok && !t.IsZero() {
+			userCreatedAt = t
+		}
+		state = &DiscoveryMessageQuotaState{
+			UserID:                   actorID,
+			TrialStartedAt:           userCreatedAt,
+			TrialEndsAt:              userCreatedAt.Add(TrialDuration),
+			TrialDiscoveryProfileIDs: []string{},
+			TrialDiscoveryAllowed:    TrialDiscoveryFreeBatchQuota,
+			TrialDiscoveryAdsWatched: 0,
+			PostTrialOutgoingCount:   0,
+			PostTrialAdUnlocked:      false,
+			PostTrialBonusOutgoing:   0,
+			UpdatedAt:                now,
+		}
+		m.messagingQuotas[actorID] = state
+	}
+
+	if state.TrialDiscoveryAllowed <= 0 {
+		state.TrialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+	if state.TrialEndsAt.IsZero() {
+		state.TrialStartedAt = now
+		state.TrialEndsAt = now.Add(TrialDuration)
+	}
+
+	if now.Before(state.TrialEndsAt) {
+		if state.CooldownExpiresAt != nil && state.CooldownExpiresAt.After(now) {
+			return nil, ErrDiscoveryMessageUsageLimitReached
+		}
+		if state.TrialDiscoveryAdsWatched >= TrialDiscoveryMaxAdsPerCycle {
+			return nil, ErrDiscoveryMessageMaxAdsReached
+		}
+		if len(state.TrialDiscoveryProfileIDs) < state.TrialDiscoveryAllowed {
+			return nil, ErrDiscoveryMessageCooldownNotActive
+		}
+		state.TrialDiscoveryAllowed += TrialDiscoveryAdBatchQuota
+		state.TrialDiscoveryAdsWatched++
+		state.UpdatedAt = now
+		return evaluateMessageQuotaState(state, now, false), nil
+	}
+
+	// Post-trial
+	if state.PostTrialOutgoingCount < PostTrialFreeQuota {
+		return nil, ErrDiscoveryMessageCooldownNotActive
+	}
+	if state.PostTrialAdUnlocked && state.PostTrialBonusOutgoing < PostTrialBonusQuota {
+		return nil, ErrDiscoveryMessageAdAlreadyUnlocked
+	}
+
+	state.PostTrialAdUnlocked = true
+	state.PostTrialBonusOutgoing = 0
+	state.UpdatedAt = now
+	return evaluateMessageQuotaState(state, now, false), nil
 }
 
 // PostgresRepository implements production discovery and matching using PostGIS and SQL transactions.
@@ -1738,9 +2287,11 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 	var emptyReason string
 	if len(candidates) == 0 {
 		if cursor == "" {
-			var swipedCount int
-			_ = p.pool.QueryRow(ctx, "SELECT COUNT(*) FROM swipes WHERE actor_user_id = $1 AND undone_at IS NULL", actorID).Scan(&swipedCount)
-			if swipedCount > 0 {
+			var unswipedCount int
+			_ = p.pool.QueryRow(ctx, `SELECT COUNT(*) FROM users u WHERE u.id <> $1 AND u.status = 'ACTIVE' AND NOT EXISTS (
+				SELECT 1 FROM swipes s WHERE s.actor_user_id = $1 AND s.target_user_id = u.id AND s.undone_at IS NULL
+			)`, actorID).Scan(&unswipedCount)
+			if unswipedCount == 0 {
 				emptyReason = "ALL_CANDIDATES_SWIPED"
 			} else {
 				emptyReason = "DEALBREAKERS_EXCLUDED_ALL"
@@ -1948,6 +2499,13 @@ func (p *PostgresRepository) CreateSwipe(ctx context.Context, actorID, targetID 
 					}
 				}
 			}
+		}
+	}
+
+	// Enforce Discovery messaging quota if initiating a message with an Intro Note
+	if strings.TrimSpace(introNote) != "" {
+		if err := p.consumeDiscoveryMessageSlotTx(ctx, tx, actorID, targetID); err != nil {
+			return false, nil, false, err
 		}
 	}
 
@@ -2527,6 +3085,600 @@ func (p *PostgresRepository) UpdateMessageRequestStatus(ctx context.Context, req
 	if tag.RowsAffected() == 0 {
 		return errors.New("message request not found or unauthorized")
 	}
+	return nil
+}
+
+func (p *PostgresRepository) consumeDiscoveryMessageSlotTx(ctx context.Context, tx pgx.Tx, actorID, targetID string) error {
+	now := time.Now().UTC()
+
+	// 1. Check if user has unlimited swipes/messages entitlement
+	var entFound int
+	err := tx.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
+	if err == nil && entFound == 1 {
+		return nil
+	}
+
+	var trialStartedAt, trialEndsAt, updatedAt time.Time
+	var cooldownExpiresAt *time.Time
+	var trialDiscoveryProfileIDs []string
+	var trialDiscoveryAllowed, trialDiscoveryAdsWatched, postTrialOutgoingCount, postTrialBonusOutgoingCount int
+	var postTrialAdUnlocked bool
+
+	selectQuery := `
+		SELECT trial_started_at, trial_ends_at, trial_discovery_profile_ids, trial_discovery_allowed_count,
+		       trial_discovery_ads_watched, post_trial_outgoing_count, post_trial_ad_unlocked,
+		       post_trial_bonus_outgoing_count, cooldown_expires_at, updated_at
+		FROM discovery_message_quotas
+		WHERE user_id = $1
+		FOR UPDATE
+	`
+	err = tx.QueryRow(ctx, selectQuery, actorID).Scan(
+		&trialStartedAt, &trialEndsAt, &trialDiscoveryProfileIDs, &trialDiscoveryAllowed,
+		&trialDiscoveryAdsWatched, &postTrialOutgoingCount, &postTrialAdUnlocked,
+		&postTrialBonusOutgoingCount, &cooldownExpiresAt, &updatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var createdAt time.Time
+			_ = tx.QueryRow(ctx, "SELECT created_at FROM users WHERE id = $1", actorID).Scan(&createdAt)
+			if createdAt.IsZero() {
+				createdAt = now
+			}
+			trialStartedAt = createdAt
+			trialEndsAt = createdAt.Add(TrialDuration)
+			trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+
+			if now.Before(trialEndsAt) {
+				trialDiscoveryProfileIDs = []string{targetID}
+				insertQuery := `
+					INSERT INTO discovery_message_quotas (
+						user_id, trial_started_at, trial_ends_at, trial_discovery_profile_ids,
+						trial_discovery_allowed_count, trial_discovery_ads_watched,
+						post_trial_outgoing_count, post_trial_ad_unlocked,
+						post_trial_bonus_outgoing_count, cooldown_expires_at, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				`
+				_, err = tx.Exec(ctx, insertQuery, actorID, trialStartedAt, trialEndsAt, trialDiscoveryProfileIDs, trialDiscoveryAllowed, 0, 0, false, 0, nil, now)
+				return err
+			} else {
+				postTrialOutgoingCount = 1
+				insertQuery := `
+					INSERT INTO discovery_message_quotas (
+						user_id, trial_started_at, trial_ends_at, trial_discovery_profile_ids,
+						trial_discovery_allowed_count, trial_discovery_ads_watched,
+						post_trial_outgoing_count, post_trial_ad_unlocked,
+						post_trial_bonus_outgoing_count, cooldown_expires_at, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+				`
+				_, err = tx.Exec(ctx, insertQuery, actorID, trialStartedAt, trialEndsAt, []string{}, trialDiscoveryAllowed, 0, postTrialOutgoingCount, false, 0, nil, now)
+				return err
+			}
+		}
+		return fmt.Errorf("failed to query discovery message quota: %w", err)
+	}
+
+	if trialDiscoveryAllowed <= 0 {
+		trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+
+	// 3. In trial mode
+	if now.Before(trialEndsAt) {
+		// A. Check 3-hour cooldown
+		if cooldownExpiresAt != nil {
+			if cooldownExpiresAt.After(now) {
+				return ErrDiscoveryMessageUsageLimitReached
+			}
+			// Cooldown expired! Reset trial cycle
+			trialDiscoveryProfileIDs = []string{}
+			trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+			trialDiscoveryAdsWatched = 0
+			cooldownExpiresAt = nil
+			updateResetQuery := `
+				UPDATE discovery_message_quotas
+				SET trial_discovery_profile_ids = '{}',
+				    trial_discovery_allowed_count = $2,
+				    trial_discovery_ads_watched = 0,
+				    cooldown_expires_at = NULL,
+				    updated_at = $3
+				WHERE user_id = $1
+			`
+			if _, err := tx.Exec(ctx, updateResetQuery, actorID, TrialDiscoveryFreeBatchQuota, now); err != nil {
+				return err
+			}
+		}
+
+		// B. Check if targetID already contacted
+		alreadyContacted := false
+		for _, id := range trialDiscoveryProfileIDs {
+			if id == targetID {
+				alreadyContacted = true
+				break
+			}
+		}
+
+		if alreadyContacted {
+			// One initial message per Discovery profile until they reply
+			var replyFound int
+			replyQuery := `
+				SELECT 1 FROM (
+					SELECT 1 FROM message_requests
+					WHERE ((sender_user_id = $1 AND recipient_user_id = $2 AND status = 'ACCEPTED')
+					    OR (sender_user_id = $2 AND recipient_user_id = $1))
+					UNION ALL
+					SELECT 1 FROM messages m
+					JOIN conversations c ON c.id = m.conversation_id
+					JOIN matches match ON match.id = c.match_id
+					WHERE m.sender_user_id = $2
+					  AND ((match.user_low_id = $1 AND match.user_high_id = $2)
+					    OR (match.user_low_id = $2 AND match.user_high_id = $1))
+				) replies LIMIT 1
+			`
+			err := tx.QueryRow(ctx, replyQuery, actorID, targetID).Scan(&replyFound)
+			if err != nil || replyFound == 0 {
+				return ErrDiscoveryMessageAwaitingReply
+			}
+			return nil
+		}
+
+		// C. Target is a new distinct profile
+		if len(trialDiscoveryProfileIDs) < trialDiscoveryAllowed {
+			trialDiscoveryProfileIDs = append(trialDiscoveryProfileIDs, targetID)
+			var newCooldown *time.Time
+			if len(trialDiscoveryProfileIDs) >= TrialDiscoveryMaxCycleProfiles {
+				exp := now.Add(TrialDiscoveryCycleCooldown)
+				newCooldown = &exp
+			}
+			updateQuery := `
+				UPDATE discovery_message_quotas
+				SET trial_discovery_profile_ids = $2,
+				    cooldown_expires_at = $3,
+				    updated_at = $4
+				WHERE user_id = $1
+			`
+			_, err = tx.Exec(ctx, updateQuery, actorID, trialDiscoveryProfileIDs, newCooldown, now)
+			return err
+		}
+		return ErrDiscoveryMessageQuotaLocked
+	}
+
+	// 4. Post-trial mode
+	if postTrialOutgoingCount < PostTrialFreeQuota {
+		postTrialOutgoingCount++
+		updateQuery := `
+			UPDATE discovery_message_quotas
+			SET post_trial_outgoing_count = $2, updated_at = $3
+			WHERE user_id = $1
+		`
+		_, err = tx.Exec(ctx, updateQuery, actorID, postTrialOutgoingCount, now)
+		return err
+	}
+
+	if postTrialAdUnlocked && postTrialBonusOutgoingCount < PostTrialBonusQuota {
+		postTrialBonusOutgoingCount++
+		updateQuery := `
+			UPDATE discovery_message_quotas
+			SET post_trial_bonus_outgoing_count = $2, updated_at = $3
+			WHERE user_id = $1
+		`
+		_, err = tx.Exec(ctx, updateQuery, actorID, postTrialBonusOutgoingCount, now)
+		return err
+	}
+
+	return ErrDiscoveryMessageQuotaLocked
+}
+
+func (p *PostgresRepository) ConsumeDiscoveryMessageSlot(ctx context.Context, actorID, targetID string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	if err := p.consumeDiscoveryMessageSlotTx(ctx, tx, actorID, targetID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+func (p *PostgresRepository) ConsumeChatOutgoingSlot(ctx context.Context, userID string) error {
+	now := time.Now().UTC()
+
+	var entFound int
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
+	if entFound == 1 {
+		return nil
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var trialStartedAt, trialEndsAt, updatedAt time.Time
+	var trialDiscoveryProfileIDs []string
+	var trialDiscoveryAllowed, trialDiscoveryAdsWatched, postTrialOutgoingCount, postTrialBonusOutgoingCount int
+	var postTrialAdUnlocked bool
+
+	selectQuery := `
+		SELECT trial_started_at, trial_ends_at, trial_discovery_profile_ids, trial_discovery_allowed_count,
+		       trial_discovery_ads_watched, post_trial_outgoing_count, post_trial_ad_unlocked,
+		       post_trial_bonus_outgoing_count, updated_at
+		FROM discovery_message_quotas
+		WHERE user_id = $1
+		FOR UPDATE
+	`
+	err = tx.QueryRow(ctx, selectQuery, userID).Scan(
+		&trialStartedAt, &trialEndsAt, &trialDiscoveryProfileIDs, &trialDiscoveryAllowed,
+		&trialDiscoveryAdsWatched, &postTrialOutgoingCount, &postTrialAdUnlocked,
+		&postTrialBonusOutgoingCount, &updatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var createdAt time.Time
+			_ = tx.QueryRow(ctx, "SELECT created_at FROM users WHERE id = $1", userID).Scan(&createdAt)
+			if createdAt.IsZero() {
+				createdAt = now
+			}
+			trialStartedAt = createdAt
+			trialEndsAt = createdAt.Add(TrialDuration)
+			trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+
+			if now.Before(trialEndsAt) {
+				insertQuery := `
+					INSERT INTO discovery_message_quotas (
+						user_id, trial_started_at, trial_ends_at, trial_discovery_profile_ids,
+						trial_discovery_allowed_count, trial_discovery_ads_watched,
+						post_trial_outgoing_count, post_trial_ad_unlocked,
+						post_trial_bonus_outgoing_count, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				`
+				_, err = tx.Exec(ctx, insertQuery, userID, trialStartedAt, trialEndsAt, []string{}, trialDiscoveryAllowed, 0, 0, false, 0, now)
+				if err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			} else {
+				postTrialOutgoingCount = 1
+				insertQuery := `
+					INSERT INTO discovery_message_quotas (
+						user_id, trial_started_at, trial_ends_at, trial_discovery_profile_ids,
+						trial_discovery_allowed_count, trial_discovery_ads_watched,
+						post_trial_outgoing_count, post_trial_ad_unlocked,
+						post_trial_bonus_outgoing_count, updated_at
+					) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				`
+				_, err = tx.Exec(ctx, insertQuery, userID, trialStartedAt, trialEndsAt, []string{}, trialDiscoveryAllowed, 0, postTrialOutgoingCount, false, 0, now)
+				if err != nil {
+					return err
+				}
+				return tx.Commit(ctx)
+			}
+		}
+		return fmt.Errorf("failed to query discovery message quota: %w", err)
+	}
+
+	// During trial: all messages and replies within existing conversations are unlimited!
+	if now.Before(trialEndsAt) {
+		return nil
+	}
+
+	// Post-trial mode
+	if postTrialOutgoingCount < PostTrialFreeQuota {
+		postTrialOutgoingCount++
+		updateQuery := `
+			UPDATE discovery_message_quotas
+			SET post_trial_outgoing_count = $2, updated_at = $3
+			WHERE user_id = $1
+		`
+		if _, err := tx.Exec(ctx, updateQuery, userID, postTrialOutgoingCount, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	if postTrialAdUnlocked && postTrialBonusOutgoingCount < PostTrialBonusQuota {
+		postTrialBonusOutgoingCount++
+		updateQuery := `
+			UPDATE discovery_message_quotas
+			SET post_trial_bonus_outgoing_count = $2, updated_at = $3
+			WHERE user_id = $1
+		`
+		if _, err := tx.Exec(ctx, updateQuery, userID, postTrialBonusOutgoingCount, now); err != nil {
+			return err
+		}
+		return tx.Commit(ctx)
+	}
+
+	return ErrDiscoveryMessageQuotaLocked
+}
+
+func (p *PostgresRepository) GetDiscoveryMessageQuota(ctx context.Context, userID string) (*DiscoveryMessagingQuota, error) {
+	now := time.Now().UTC()
+
+	var entFound int
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", userID).Scan(&entFound)
+	isUnlimited := (entFound == 1)
+	if isUnlimited {
+		return evaluateMessageQuotaState(&DiscoveryMessageQuotaState{UserID: userID}, now, true), nil
+	}
+
+	var trialStartedAt, trialEndsAt, updatedAt time.Time
+	var cooldownExpiresAt *time.Time
+	var trialDiscoveryProfileIDs []string
+	var trialDiscoveryAllowed, trialDiscoveryAdsWatched, postTrialOutgoingCount, postTrialBonusOutgoingCount int
+	var postTrialAdUnlocked bool
+
+	selectQuery := `
+		SELECT trial_started_at, trial_ends_at, trial_discovery_profile_ids, trial_discovery_allowed_count,
+		       trial_discovery_ads_watched, post_trial_outgoing_count, post_trial_ad_unlocked,
+		       post_trial_bonus_outgoing_count, cooldown_expires_at, updated_at
+		FROM discovery_message_quotas
+		WHERE user_id = $1
+	`
+	err := p.pool.QueryRow(ctx, selectQuery, userID).Scan(
+		&trialStartedAt, &trialEndsAt, &trialDiscoveryProfileIDs, &trialDiscoveryAllowed,
+		&trialDiscoveryAdsWatched, &postTrialOutgoingCount, &postTrialAdUnlocked,
+		&postTrialBonusOutgoingCount, &cooldownExpiresAt, &updatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var createdAt time.Time
+			_ = p.pool.QueryRow(ctx, "SELECT created_at FROM users WHERE id = $1", userID).Scan(&createdAt)
+			if createdAt.IsZero() {
+				createdAt = now
+			}
+			trialStartedAt = createdAt
+			trialEndsAt = createdAt.Add(TrialDuration)
+			trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+
+			state := &DiscoveryMessageQuotaState{
+				UserID:                   userID,
+				TrialStartedAt:           trialStartedAt,
+				TrialEndsAt:              trialEndsAt,
+				TrialDiscoveryProfileIDs: []string{},
+				TrialDiscoveryAllowed:    trialDiscoveryAllowed,
+				TrialDiscoveryAdsWatched: 0,
+				PostTrialOutgoingCount:   0,
+				PostTrialAdUnlocked:      false,
+				PostTrialBonusOutgoing:   0,
+				CooldownExpiresAt:        nil,
+				UpdatedAt:                now,
+			}
+			return evaluateMessageQuotaState(state, now, false), nil
+		}
+		return nil, fmt.Errorf("failed to query discovery message quota: %w", err)
+	}
+
+	if trialDiscoveryAllowed <= 0 {
+		trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+
+	if now.Before(trialEndsAt) && cooldownExpiresAt != nil && !cooldownExpiresAt.After(now) {
+		// Cooldown expired! Reset cycle in DB
+		trialDiscoveryProfileIDs = []string{}
+		trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+		trialDiscoveryAdsWatched = 0
+		cooldownExpiresAt = nil
+		_, _ = p.pool.Exec(ctx, `
+			UPDATE discovery_message_quotas
+			SET trial_discovery_profile_ids = '{}',
+			    trial_discovery_allowed_count = $2,
+			    trial_discovery_ads_watched = 0,
+			    cooldown_expires_at = NULL,
+			    updated_at = $3
+			WHERE user_id = $1
+		`, userID, TrialDiscoveryFreeBatchQuota, now)
+	}
+
+	state := &DiscoveryMessageQuotaState{
+		UserID:                   userID,
+		TrialStartedAt:           trialStartedAt,
+		TrialEndsAt:              trialEndsAt,
+		TrialDiscoveryProfileIDs: trialDiscoveryProfileIDs,
+		TrialDiscoveryAllowed:    trialDiscoveryAllowed,
+		TrialDiscoveryAdsWatched: trialDiscoveryAdsWatched,
+		PostTrialOutgoingCount:   postTrialOutgoingCount,
+		PostTrialAdUnlocked:      postTrialAdUnlocked,
+		PostTrialBonusOutgoing:   postTrialBonusOutgoingCount,
+		CooldownExpiresAt:        cooldownExpiresAt,
+		UpdatedAt:                updatedAt,
+	}
+
+	return evaluateMessageQuotaState(state, now, false), nil
+}
+
+func (p *PostgresRepository) UnlockDiscoveryMessageAdBonus(ctx context.Context, actorID string) (*DiscoveryMessagingQuota, error) {
+	now := time.Now().UTC()
+
+	var entFound int
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", actorID).Scan(&entFound)
+	if entFound == 1 {
+		return evaluateMessageQuotaState(&DiscoveryMessageQuotaState{UserID: actorID}, now, true), nil
+	}
+
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	var trialStartedAt, trialEndsAt, updatedAt time.Time
+	var cooldownExpiresAt *time.Time
+	var trialDiscoveryProfileIDs []string
+	var trialDiscoveryAllowed, trialDiscoveryAdsWatched, postTrialOutgoingCount, postTrialBonusOutgoingCount int
+	var postTrialAdUnlocked bool
+
+	selectQuery := `
+		SELECT trial_started_at, trial_ends_at, trial_discovery_profile_ids, trial_discovery_allowed_count,
+		       trial_discovery_ads_watched, post_trial_outgoing_count, post_trial_ad_unlocked,
+		       post_trial_bonus_outgoing_count, cooldown_expires_at, updated_at
+		FROM discovery_message_quotas
+		WHERE user_id = $1
+		FOR UPDATE
+	`
+	err = tx.QueryRow(ctx, selectQuery, actorID).Scan(
+		&trialStartedAt, &trialEndsAt, &trialDiscoveryProfileIDs, &trialDiscoveryAllowed,
+		&trialDiscoveryAdsWatched, &postTrialOutgoingCount, &postTrialAdUnlocked,
+		&postTrialBonusOutgoingCount, &cooldownExpiresAt, &updatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrDiscoveryMessageCooldownNotActive
+		}
+		return nil, fmt.Errorf("failed to query discovery message quota: %w", err)
+	}
+
+	if trialDiscoveryAllowed <= 0 {
+		trialDiscoveryAllowed = TrialDiscoveryFreeBatchQuota
+	}
+
+	if now.Before(trialEndsAt) {
+		if cooldownExpiresAt != nil && cooldownExpiresAt.After(now) {
+			return nil, ErrDiscoveryMessageUsageLimitReached
+		}
+		if trialDiscoveryAdsWatched >= TrialDiscoveryMaxAdsPerCycle {
+			return nil, ErrDiscoveryMessageMaxAdsReached
+		}
+		if len(trialDiscoveryProfileIDs) < trialDiscoveryAllowed {
+			return nil, ErrDiscoveryMessageCooldownNotActive
+		}
+		trialDiscoveryAllowed += TrialDiscoveryAdBatchQuota
+		trialDiscoveryAdsWatched++
+		updateQuery := `
+			UPDATE discovery_message_quotas
+			SET trial_discovery_allowed_count = $2, trial_discovery_ads_watched = $3, updated_at = $4
+			WHERE user_id = $1
+		`
+		if _, err := tx.Exec(ctx, updateQuery, actorID, trialDiscoveryAllowed, trialDiscoveryAdsWatched, now); err != nil {
+			return nil, fmt.Errorf("failed to update discovery message quota: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, err
+		}
+
+		state := &DiscoveryMessageQuotaState{
+			UserID:                   actorID,
+			TrialStartedAt:           trialStartedAt,
+			TrialEndsAt:              trialEndsAt,
+			TrialDiscoveryProfileIDs: trialDiscoveryProfileIDs,
+			TrialDiscoveryAllowed:    trialDiscoveryAllowed,
+			TrialDiscoveryAdsWatched: trialDiscoveryAdsWatched,
+			PostTrialOutgoingCount:   postTrialOutgoingCount,
+			PostTrialAdUnlocked:      postTrialAdUnlocked,
+			PostTrialBonusOutgoing:   postTrialBonusOutgoingCount,
+			CooldownExpiresAt:        cooldownExpiresAt,
+			UpdatedAt:                now,
+		}
+		return evaluateMessageQuotaState(state, now, false), nil
+	}
+
+	// Post-trial
+	if postTrialOutgoingCount < PostTrialFreeQuota {
+		return nil, ErrDiscoveryMessageCooldownNotActive
+	}
+	if postTrialAdUnlocked && postTrialBonusOutgoingCount < PostTrialBonusQuota {
+		return nil, ErrDiscoveryMessageAdAlreadyUnlocked
+	}
+
+	postTrialAdUnlocked = true
+	postTrialBonusOutgoingCount = 0
+	updateQuery := `
+		UPDATE discovery_message_quotas
+		SET post_trial_ad_unlocked = $2, post_trial_bonus_outgoing_count = $3, updated_at = $4
+		WHERE user_id = $1
+	`
+	if _, err := tx.Exec(ctx, updateQuery, actorID, postTrialAdUnlocked, postTrialBonusOutgoingCount, now); err != nil {
+		return nil, fmt.Errorf("failed to update discovery message quota: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	state := &DiscoveryMessageQuotaState{
+		UserID:                   actorID,
+		TrialStartedAt:           trialStartedAt,
+		TrialEndsAt:              trialEndsAt,
+		TrialDiscoveryProfileIDs: trialDiscoveryProfileIDs,
+		TrialDiscoveryAllowed:    trialDiscoveryAllowed,
+		TrialDiscoveryAdsWatched: trialDiscoveryAdsWatched,
+		PostTrialOutgoingCount:   postTrialOutgoingCount,
+		PostTrialAdUnlocked:      postTrialAdUnlocked,
+		PostTrialBonusOutgoing:   postTrialBonusOutgoingCount,
+		CooldownExpiresAt:        nil,
+		UpdatedAt:                now,
+	}
+	return evaluateMessageQuotaState(state, now, false), nil
+}
+
+func (p *PostgresRepository) HasRecipientReplied(ctx context.Context, senderID, recipientID string) (bool, error) {
+	var replyFound int
+	replyQuery := `
+		SELECT 1 FROM (
+			SELECT 1 FROM message_requests
+			WHERE ((sender_user_id = $1 AND recipient_user_id = $2 AND status = 'ACCEPTED')
+			    OR (sender_user_id = $2 AND recipient_user_id = $1))
+			UNION ALL
+			SELECT 1 FROM messages m
+			JOIN conversations c ON c.id = m.conversation_id
+			JOIN matches match ON match.id = c.match_id
+			WHERE m.sender_user_id = $2
+			  AND ((match.user_low_id = $1 AND match.user_high_id = $2)
+			    OR (match.user_low_id = $2 AND match.user_high_id = $1))
+		) replies LIMIT 1
+	`
+	err := p.pool.QueryRow(ctx, replyQuery, senderID, recipientID).Scan(&replyFound)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	return replyFound == 1, nil
+}
+
+func (p *PostgresRepository) RecordRecipientReply(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (p *PostgresRepository) CheckCanSendChat(ctx context.Context, senderID, recipientID string) error {
+	now := time.Now().UTC()
+
+	var entFound int
+	_ = p.pool.QueryRow(ctx, "SELECT 1 FROM user_entitlements WHERE user_id = $1 AND entitlement_code = 'UNLIMITED_SWIPES' AND expires_at > NOW() LIMIT 1", senderID).Scan(&entFound)
+	if entFound == 1 {
+		return nil
+	}
+
+	var trialEndsAt time.Time
+	var trialDiscoveryProfileIDs []string
+	query := `SELECT trial_ends_at, trial_discovery_profile_ids FROM discovery_message_quotas WHERE user_id = $1`
+	err := p.pool.QueryRow(ctx, query, senderID).Scan(&trialEndsAt, &trialDiscoveryProfileIDs)
+	if err != nil {
+		return nil // No quota record yet
+	}
+
+	if now.Before(trialEndsAt) {
+		isDiscoveryContact := false
+		for _, id := range trialDiscoveryProfileIDs {
+			if id == recipientID {
+				isDiscoveryContact = true
+				break
+			}
+		}
+		if isDiscoveryContact {
+			replied, err := p.HasRecipientReplied(ctx, senderID, recipientID)
+			if err != nil || !replied {
+				return ErrDiscoveryMessageAwaitingReply
+			}
+		}
+	}
+
 	return nil
 }
 

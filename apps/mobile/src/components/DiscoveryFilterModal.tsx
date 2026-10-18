@@ -111,6 +111,8 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
   const [preferredGenders, setPreferredGenders] = useState<string[]>([]);
   const [preferredOrientations, setPreferredOrientations] = useState<string[]>([]);
   const [preferredIntents, setPreferredIntents] = useState<string[]>([]);
+  const [isGenderExpanded, setIsGenderExpanded] = useState(false);
+  const [isOrientationExpanded, setIsOrientationExpanded] = useState(false);
 
   // Toggles
   const [verifiedOnly, setVerifiedOnly] = useState(false);
@@ -948,15 +950,18 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
                 min={66}
                 max={661}
                 step={1}
-                minValue={kgToLb(minWeightKg)}
-                maxValue={kgToLb(maxWeightKg)}
+                minValue={parseInt(minWeightLbText, 10) || kgToLb(minWeightKg)}
+                maxValue={parseInt(maxWeightLbText, 10) || kgToLb(maxWeightKg)}
                 onChange={(newMinLb, newMaxLb) => {
                   setIsWeightFiltered(true);
-                  const newMinKg = lbToKg(newMinLb);
-                  const newMaxKg = lbToKg(newMaxLb);
+                  const newMinKg = Math.max(30, Math.min(300, lbToKg(newMinLb)));
+                  const newMaxKg = Math.max(30, Math.min(300, lbToKg(newMaxLb)));
                   setMinWeightKg(newMinKg);
                   setMaxWeightKg(newMaxKg);
-                  syncWeightTexts(newMinKg, newMaxKg);
+                  setMinWeightText(String(newMinKg));
+                  setMaxWeightText(String(newMaxKg));
+                  setMinWeightLbText(String(newMinLb));
+                  setMaxWeightLbText(String(newMaxLb));
                 }}
                 minLabel="66 lb"
                 maxLabel="661 lb"
@@ -965,50 +970,148 @@ export const DiscoveryFilterModal: React.FC<DiscoveryFilterModalProps> = ({
             )}
           </View>
 
-          {/* 5. Gender Preferences Section */}
+          {/* 5. Gender Preferences Section (Expandable/Collapsible Dropdown Section) */}
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Gender Preferences</Text>
-            <Text style={styles.sectionDesc}>Select all gender identities you wish to see.</Text>
-            <View style={styles.chipsRow}>
-              {LOOKING_FOR_OPTIONS.filter((o) => o.value !== 'custom').map((opt) => {
-                const selected = preferredGenders.includes(opt.value);
-                return (
-                  <TouchableOpacity
-                    key={opt.value}
-                    style={[styles.chip, selected ? styles.chipSelected : null]}
-                    onPress={() => toggleGender(opt.value)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            <TouchableOpacity
+              testID="accordion-header-gender-preferences"
+              style={styles.accordionHeader}
+              onPress={() => setIsGenderExpanded((prev) => !prev)}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="Gender Preferences section"
+              accessibilityState={{ expanded: isGenderExpanded }}
+            >
+              <View style={styles.accordionTitleCol}>
+                <View style={styles.accordionTitleRow}>
+                  <Text style={styles.sectionTitle}>Gender Preferences</Text>
+                  {preferredGenders.length > 0 && (
+                    <View
+                      style={[
+                        styles.accordionBadge,
+                        {
+                          backgroundColor: `${colors.emerald}20`,
+                          borderColor: colors.emerald,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.accordionBadgeText,
+                          { color: colors.emerald },
+                        ]}
+                      >
+                        {preferredGenders.length === 1 ? '1 Selected' : `${preferredGenders.length} Selected`}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.accordionDesc}>Select all gender identities you wish to see.</Text>
+              </View>
+              <View
+                style={[
+                  styles.accordionChevronWrap,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.borderSubtle },
+                ]}
+              >
+                <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                  {isGenderExpanded ? '▲' : '▼'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            {isGenderExpanded && (
+              <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+                <View style={styles.chipsRow}>
+                  {LOOKING_FOR_OPTIONS.filter((o) => o.value !== 'custom').map((opt) => {
+                    const selected = preferredGenders.includes(opt.value);
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[styles.chip, selected ? styles.chipSelected : null]}
+                        onPress={() => toggleGender(opt.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
           </View>
 
-          {/* 6. Sexual Orientation Preferences Section */}
+          {/* 6. Sexual Orientation Preferences Section (Expandable/Collapsible Dropdown Section) */}
           <View style={styles.sectionCard}>
-            <Text style={styles.sectionTitle}>Sexual Orientation Preferences</Text>
-            <Text style={styles.sectionDesc}>Filter candidates by sexual orientation.</Text>
-            <View style={styles.chipsRow}>
-              {SEXUAL_ORIENTATION_OPTIONS.filter((o) => o.value !== 'custom').map((opt) => {
-                const selected = preferredOrientations.includes(opt.value);
-                return (
-                  <TouchableOpacity
-                    key={opt.value}
-                    style={[styles.chip, selected ? styles.chipSelected : null]}
-                    onPress={() => toggleOrientation(opt.value)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
-                      {opt.label}
-                    </Text>
-                  </TouchableOpacity>
-                );
-              })}
-            </View>
+            <TouchableOpacity
+              testID="accordion-header-orientation-preferences"
+              style={styles.accordionHeader}
+              onPress={() => setIsOrientationExpanded((prev) => !prev)}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="Sexual Orientation Preferences section"
+              accessibilityState={{ expanded: isOrientationExpanded }}
+            >
+              <View style={styles.accordionTitleCol}>
+                <View style={styles.accordionTitleRow}>
+                  <Text style={styles.sectionTitle}>Sexual Orientation Preferences</Text>
+                  {preferredOrientations.length > 0 && (
+                    <View
+                      style={[
+                        styles.accordionBadge,
+                        {
+                          backgroundColor: `${colors.emerald}20`,
+                          borderColor: colors.emerald,
+                        },
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.accordionBadgeText,
+                          { color: colors.emerald },
+                        ]}
+                      >
+                        {preferredOrientations.length === 1 ? '1 Selected' : `${preferredOrientations.length} Selected`}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.accordionDesc}>Filter candidates by sexual orientation.</Text>
+              </View>
+              <View
+                style={[
+                  styles.accordionChevronWrap,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.borderSubtle },
+                ]}
+              >
+                <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
+                  {isOrientationExpanded ? '▲' : '▼'}
+                </Text>
+              </View>
+            </TouchableOpacity>
+
+            {isOrientationExpanded && (
+              <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
+                <View style={styles.chipsRow}>
+                  {SEXUAL_ORIENTATION_OPTIONS.filter((o) => o.value !== 'custom').map((opt) => {
+                    const selected = preferredOrientations.includes(opt.value);
+                    return (
+                      <TouchableOpacity
+                        key={opt.value}
+                        style={[styles.chip, selected ? styles.chipSelected : null]}
+                        onPress={() => toggleOrientation(opt.value)}
+                        activeOpacity={0.7}
+                      >
+                        <Text style={[styles.chipText, selected ? styles.chipTextSelected : null]}>
+                          {opt.label}
+                        </Text>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </View>
+              </View>
+            )}
           </View>
 
           {/* 7. Relationship Intentions Section */}
@@ -1355,5 +1458,55 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 0.5,
+  },
+  accordionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.xs,
+  },
+  accordionTitleCol: {
+    flex: 1,
+    minWidth: 0,
+    marginRight: spacing.sm,
+  },
+  accordionTitleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flexWrap: 'wrap',
+    gap: spacing.xs,
+  },
+  accordionBadge: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 2,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+  },
+  accordionBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  accordionDesc: {
+    fontSize: 12,
+    color: colors.textSubtle,
+    marginTop: 2,
+  },
+  accordionChevronWrap: {
+    width: 32,
+    height: 32,
+    borderRadius: borderRadius.full,
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    borderWidth: 1,
+  },
+  accordionChevronText: {
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  accordionBody: {
+    marginTop: spacing.md,
+    borderTopWidth: 1,
+    paddingTop: spacing.md,
   },
 });

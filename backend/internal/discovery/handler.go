@@ -286,6 +286,22 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, reqID string, err er
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "AGE_ASSURANCE_REQUIRED", err.Error()))
 	case errors.Is(err, ErrUnderageProhibited):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "UNDERAGE_PROHIBITED", err.Error()))
+	case errors.Is(err, ErrDiscoveryMessageUsageLimitReached):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, "USAGE_LIMIT_REACHED", "You've reached your usage limit. Please try again in 3 hours."))
+	case errors.Is(err, ErrDiscoveryMessageAwaitingReply):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "AWAITING_REPLY", "cannot send another message until recipient replies"))
+	case errors.Is(err, ErrDiscoveryMessageMaxAdsReached):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, "MAX_ADS_REACHED", "maximum rewarded ad unlocks reached for current cycle"))
+	case errors.Is(err, ErrDiscoveryMessageQuotaLocked):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, "DISCOVERY_MESSAGE_QUOTA_LOCKED", "Discovery profile messaging quota reached. Watch a rewarded ad to unlock the next 4 profiles."))
+	case errors.Is(err, ErrDiscoveryMessageAdAlreadyUnlocked):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, "AD_ALREADY_UNLOCKED", "Rewarded ad bonus has already been unlocked for the current cooldown window."))
+	case errors.Is(err, ErrDiscoveryMessageCooldownNotActive):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, "COOLDOWN_NOT_ACTIVE", "Discovery messaging cooldown is not currently active."))
+	case errors.Is(err, ErrDuplicateSSVReward):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "Reward transaction already processed (replay blocked)"))
+	case errors.Is(err, ErrExpiredSSVCallback), errors.Is(err, ErrInvalidSSVSignature), errors.Is(err, ErrMissingSSVParam):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
 	default:
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
 	}
@@ -491,7 +507,7 @@ func (h *Handler) MessageRequests(w http.ResponseWriter, r *http.Request) {
 
 		created, err := h.svc.SendMessageRequest(r.Context(), authUser.ID, req)
 		if err != nil {
-			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
+			h.handleServiceError(w, reqID, err)
 			return
 		}
 
@@ -541,4 +557,55 @@ func (h *Handler) RespondMessageRequest(w http.ResponseWriter, r *http.Request) 
 		"id":     requestID,
 		"status": strings.ToUpper(strings.TrimSpace(body.Action)),
 	})
+}
+
+// MessagingQuota handles GET /api/v1/discovery/messaging-quota.
+func (h *Handler) MessagingQuota(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	quota, err := h.svc.GetDiscoveryMessageQuota(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, quota)
+}
+
+// UnlockMessagingQuotaAd handles POST /api/v1/discovery/messaging-quota/unlock-ad.
+func (h *Handler) UnlockMessagingQuotaAd(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	var req UnlockAdQuotaRequest
+	if r.Body != nil && r.ContentLength > 0 {
+		_ = validator.DecodeAndValidate(w, r, 16*1024, &req)
+	}
+
+	quota, err := h.svc.UnlockDiscoveryMessageAdBonus(r.Context(), authUser.ID, req.RawQuery, req.TransactionID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, quota)
 }

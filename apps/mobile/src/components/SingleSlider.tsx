@@ -6,8 +6,9 @@ import {
   PanResponder,
   LayoutChangeEvent,
   GestureResponderEvent,
+  Pressable,
 } from 'react-native';
-import { colors, spacing, useTheme } from '../theme';
+import { colors, spacing, borderRadius, useTheme } from '../theme';
 
 interface SingleSliderProps {
   min: number;
@@ -34,14 +35,15 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
 }) => {
   const { colors } = useTheme();
   const [trackWidth, setTrackWidth] = useState(300);
+  const [isDragging, setIsDragging] = useState(false);
 
   const currentValueRef = useRef(value);
   const trackWidthRef = useRef(trackWidth);
   const startValRef = useRef(value);
 
   useEffect(() => {
-    currentValueRef.current = value;
-  }, [value]);
+    currentValueRef.current = Math.max(min, Math.min(max, value));
+  }, [value, min, max]);
 
   useEffect(() => {
     trackWidthRef.current = trackWidth;
@@ -60,6 +62,7 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
+        setIsDragging(true);
         startValRef.current = currentValueRef.current;
       },
       onPanResponderMove: (_, gestureState) => {
@@ -74,11 +77,17 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
           onChange(clamped);
         }
       },
+      onPanResponderRelease: () => {
+        setIsDragging(false);
+      },
+      onPanResponderTerminate: () => {
+        setIsDragging(false);
+      },
       onPanResponderTerminationRequest: () => false,
     })
   ).current;
 
-  const handleTrackTouch = (e: GestureResponderEvent) => {
+  const handleTrackPress = (e: GestureResponderEvent) => {
     const width = trackWidthRef.current;
     if (width <= 0) return;
     const x = e.nativeEvent.locationX;
@@ -97,20 +106,27 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
   return (
     <View style={styles.container} testID={testID}>
       {/* Slider Track Container */}
-      <View style={styles.trackContainer} onLayout={handleLayout} onTouchStart={handleTrackTouch}>
-        {/* Inactive Track */}
-        <View style={styles.inactiveTrack} />
+      <View style={styles.trackContainer} onLayout={handleLayout}>
+        {/* Tappable Track Area */}
+        <Pressable
+          style={styles.trackPressArea}
+          onPress={handleTrackPress}
+          hitSlop={{ top: 10, bottom: 10 }}
+        >
+          {/* Inactive Track */}
+          <View style={styles.inactiveTrack} />
 
-        {/* Active Highlight Track */}
-        <View
-          style={[
-            styles.activeTrack,
-            {
-              backgroundColor: colors.gold,
-              width: Math.max(0, Math.min(trackWidth, pos)),
-            },
-          ]}
-        />
+          {/* Active Highlight Track */}
+          <View
+            style={[
+              styles.activeTrack,
+              {
+                backgroundColor: colors.gold,
+                width: Math.max(0, Math.min(trackWidth, pos)),
+              },
+            ]}
+          />
+        </Pressable>
 
         {/* Single Thumb Handle */}
         <View
@@ -120,10 +136,12 @@ export const SingleSlider: React.FC<SingleSliderProps> = ({
               borderColor: colors.gold,
               backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, pos - THUMB_SIZE / 2)),
+              zIndex: isDragging ? 10 : 3,
+              transform: [{ scale: isDragging ? 1.15 : 1 }],
             },
           ]}
           {...panResponder.panHandlers}
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
           testID={`${testID}-thumb`}
         >
           <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
@@ -150,6 +168,11 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: 'center',
     position: 'relative',
+    width: '100%',
+  },
+  trackPressArea: {
+    height: 40,
+    justifyContent: 'center',
     width: '100%',
   },
   inactiveTrack: {

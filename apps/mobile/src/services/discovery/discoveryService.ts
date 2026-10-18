@@ -6,6 +6,7 @@ import {
   SwipeResponse,
   RewindResponse,
   ProfilePhoto,
+  DiscoveryMessagingQuota,
 } from '../../types';
 import { buildMediaUrl } from '../media/mediaUploader';
 
@@ -55,6 +56,7 @@ export function normalizeCandidate(raw: any): DiscoveryCandidate {
     relationship_structure: raw.relationship_structure,
     height_cm: raw.height_cm,
     weight_kg: raw.weight_kg,
+    is_online: raw.is_online !== undefined ? Boolean(raw.is_online) : true,
   };
 }
 
@@ -224,5 +226,22 @@ export const discoveryService = {
       details,
     });
     return true;
+  },
+
+  /**
+   * Fetches the current user's Discovery profile messaging quota state
+   */
+  async getMessagingQuota(): Promise<DiscoveryMessagingQuota> {
+    return await api.get<DiscoveryMessagingQuota>('/api/v1/discovery/messaging-quota');
+  },
+
+  /**
+   * Unlocks 2 bonus message slots via completed rewarded ad
+   */
+  async unlockMessagingQuotaWithAd(transactionId?: string, rawQuery?: string): Promise<DiscoveryMessagingQuota> {
+    return await api.post<DiscoveryMessagingQuota>('/api/v1/discovery/messaging-quota/unlock-ad', {
+      transaction_id: transactionId,
+      raw_query: rawQuery,
+    });
   },
 };

@@ -193,3 +193,76 @@ type SendMessageRequestPayload struct {
 	RecipientUserID string `json:"recipient_user_id"`
 	Body            string `json:"body"`
 }
+
+const (
+	TrialDuration                  = 30 * 24 * time.Hour
+	TrialDiscoveryFreeBatchQuota   = 4
+	TrialDiscoveryAdBatchQuota     = 4
+	TrialDiscoveryMaxCycleProfiles = 20
+	TrialDiscoveryMaxAdsPerCycle   = 4
+	TrialDiscoveryCycleCooldown    = 3 * time.Hour
+	PostTrialFreeQuota             = 2
+	PostTrialBonusQuota            = 2
+
+	// Backwards compatibility constants
+	DiscoveryMessageFreeQuota        = 4
+	DiscoveryMessageBonusQuota       = 4
+	DiscoveryMessageCooldownDuration = 10 * time.Minute
+)
+
+type DiscoveryMessagingQuota struct {
+	UserID                   string     `json:"user_id"`
+	IsUnlimited              bool       `json:"is_unlimited"`
+
+	// 30-day Trial status
+	IsInTrial                bool       `json:"is_in_trial"`
+	TrialStartedAt           time.Time  `json:"trial_started_at"`
+	TrialEndsAt              time.Time  `json:"trial_ends_at"`
+	TrialDaysRemaining       int        `json:"trial_days_remaining"`
+
+	// Lock & Ad unlock status
+	IsLocked                 bool       `json:"is_locked"`
+	CanUnlockWithAd          bool       `json:"can_unlock_with_ad"`
+	AdUnlocked               bool       `json:"ad_unlocked"`
+
+	// Trial Discovery direct messaging limits (active when IsInTrial == true)
+	TrialInitiationsRemaining int       `json:"trial_initiations_remaining"`
+	TrialInitiationsAllowed   int       `json:"trial_initiations_allowed"`
+	TrialDistinctMessaged     int       `json:"trial_distinct_messaged"`
+
+	// Post-Trial global messaging limits (active when IsInTrial == false && !IsUnlimited)
+	PostTrialFreeRemaining    int       `json:"post_trial_free_remaining"`
+	PostTrialBonusRemaining   int       `json:"post_trial_bonus_remaining"`
+
+	// Backwards-compatible fields for existing mobile components
+	FreeQuota                int        `json:"free_quota"`
+	FreeSlotsRemaining       int        `json:"free_slots_remaining"`
+	DistinctProfilesMessaged int        `json:"distinct_profiles_messaged"`
+	CooldownActive           bool       `json:"cooldown_active"`
+	CooldownSecondsRemaining int        `json:"cooldown_seconds_remaining"`
+	CooldownExpiresAt        *time.Time `json:"cooldown_expires_at,omitempty"`
+	BonusSlotsRemaining      int        `json:"bonus_slots_remaining"`
+}
+
+type DiscoveryMessageQuotaState struct {
+	UserID                   string
+	TrialStartedAt           time.Time
+	TrialEndsAt              time.Time
+	TrialDiscoveryProfileIDs []string
+	TrialDiscoveryAllowed    int
+	TrialDiscoveryAdsWatched int
+	PostTrialOutgoingCount   int
+	PostTrialAdUnlocked      bool
+	PostTrialBonusOutgoing   int
+	CycleStartAt             time.Time
+	FreeProfileIDs           []string
+	CooldownExpiresAt        *time.Time
+	AdUnlocked               bool
+	BonusProfileIDs          []string
+	UpdatedAt                time.Time
+}
+
+type UnlockAdQuotaRequest struct {
+	RawQuery      string `json:"raw_query,omitempty"`
+	TransactionID string `json:"transaction_id,omitempty"`
+}

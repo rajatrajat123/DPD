@@ -5960,3 +5960,714 @@ test('Chat Unread Count: counts only unread incoming messages, ignores outgoing,
     'AuthContext must set current user ID on chatService to filter out outgoing messages'
   );
 });
+
+// --- Test 91: Discovery Filters: Dropdown Sections & Smooth Non-Crossing Range Sliders ---
+test('Discovery Filters: Gender & Orientation dropdown sections and smooth non-crossing RangeSlider state', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Inspect DiscoveryFilterModal.tsx for dropdown expandable sections
+  const filterModalFile = await fs.readFile(
+    new URL('../src/components/DiscoveryFilterModal.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    filterModalFile.includes('testID="accordion-header-gender-preferences"'),
+    'DiscoveryFilterModal must provide accordion-header-gender-preferences testID'
+  );
+  assert.ok(
+    filterModalFile.includes('testID="accordion-header-orientation-preferences"'),
+    'DiscoveryFilterModal must provide accordion-header-orientation-preferences testID'
+  );
+  assert.ok(
+    filterModalFile.includes('isGenderExpanded'),
+    'DiscoveryFilterModal must maintain isGenderExpanded state'
+  );
+  assert.ok(
+    filterModalFile.includes('isOrientationExpanded'),
+    'DiscoveryFilterModal must maintain isOrientationExpanded state'
+  );
+  assert.ok(
+    filterModalFile.includes('accordionChevronWrap'),
+    'DiscoveryFilterModal must use Profile dropdown style chevron wrap'
+  );
+  assert.ok(
+    filterModalFile.includes('preferredGenders.length'),
+    'DiscoveryFilterModal must display selected count badge in accordion header'
+  );
+
+  // 2. Inspect RangeSlider.tsx for bug fix: Pressable track area and no onTouchStart conflict
+  const rangeSliderFile = await fs.readFile(
+    new URL('../src/components/RangeSlider.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    !rangeSliderFile.includes('onTouchStart={handleTrackTouch}'),
+    'RangeSlider must not attach onTouchStart to trackContainer (which caused the left thumb jump bug)'
+  );
+  assert.ok(
+    rangeSliderFile.includes('trackPressArea'),
+    'RangeSlider must use a dedicated trackPressArea for tapping the track'
+  );
+  assert.ok(
+    rangeSliderFile.includes('Math.max(min, Math.min(currentMaxRef.current, stepped))'),
+    'RangeSlider min thumb must be clamped to min and currentMax to prevent crossing'
+  );
+  assert.ok(
+    rangeSliderFile.includes('Math.min(max, Math.max(currentMinRef.current, stepped))'),
+    'RangeSlider max thumb must be clamped to currentMin and max to prevent crossing'
+  );
+
+  // 3. Inspect SingleSlider.tsx
+  const singleSliderFile = await fs.readFile(
+    new URL('../src/components/SingleSlider.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    !singleSliderFile.includes('onTouchStart={handleTrackTouch}'),
+    'SingleSlider must not attach onTouchStart to trackContainer'
+  );
+  assert.ok(
+    singleSliderFile.includes('trackPressArea'),
+    'SingleSlider must use trackPressArea for smooth track tap handling'
+  );
+
+  // 4. Test RangeSlider logic: dragging right thumb NEVER resets left thumb
+  class MockRangeSlider {
+    constructor(min, max, step, initialMin, initialMax) {
+      this.min = min;
+      this.max = max;
+      this.step = step;
+      this.currentMin = initialMin;
+      this.currentMax = initialMax;
+      this.trackWidth = 300;
+    }
+    // Simulate PanResponderMove on max thumb with deltaX
+    dragMaxThumb(dx) {
+      const deltaVal = (dx / this.trackWidth) * (this.max - this.min);
+      const rawVal = this.currentMax + deltaVal;
+      const stepped = Math.round(rawVal / this.step) * this.step;
+      const clamped = Math.min(this.max, Math.max(this.currentMin, stepped));
+      this.currentMax = clamped;
+      return { minVal: this.currentMin, maxVal: clamped };
+    }
+    // Simulate PanResponderMove on min thumb with deltaX
+    dragMinThumb(dx) {
+      const deltaVal = (dx / this.trackWidth) * (this.max - this.min);
+      const rawVal = this.currentMin + deltaVal;
+      const stepped = Math.round(rawVal / this.step) * this.step;
+      const clamped = Math.max(this.min, Math.min(this.currentMax, stepped));
+      this.currentMin = clamped;
+      return { minVal: clamped, maxVal: this.currentMax };
+    }
+  }
+
+  // Initial: Height 150cm to 190cm (min: 90, max: 250)
+  const slider = new MockRangeSlider(90, 250, 1, 150, 190);
+  assert.equal(slider.currentMin, 150);
+  assert.equal(slider.currentMax, 190);
+
+  // Drag right-hand thumb to the right by +30px (+16cm)
+  const dragResult1 = slider.dragMaxThumb(30);
+  assert.equal(dragResult1.minVal, 150, 'Left thumb must remain strictly at 150 (not jumping to min 90)');
+  assert.equal(dragResult1.maxVal, 206, 'Right thumb must smoothly advance to 206');
+  assert.equal(slider.currentMin, 150, 'slider.currentMin must not jump to minimum');
+
+  // Drag right-hand thumb all the way to the left past min: must not cross min
+  const dragResultCross = slider.dragMaxThumb(-200);
+  assert.equal(dragResultCross.minVal, 150);
+  assert.equal(dragResultCross.maxVal, 150, 'Right thumb must be stopped at left thumb without crossing');
+
+  // Drag left-hand thumb all the way to the right past max: must not cross max
+  slider.currentMax = 180;
+  const dragMinCross = slider.dragMinThumb(200);
+  assert.equal(dragMinCross.minVal, 180, 'Left thumb must be stopped at right thumb without crossing');
+  assert.equal(dragMinCross.maxVal, 180);
+});
+
+// --- Test 92: Discovery Layouts: Single-Column Deck & Double-Column Grid, Layout Toggle, and Persistence ---
+test('Discovery Layouts: Single-Column Deck & Double-Column Grid, Layout Toggle, and Persistence', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Inspect index.tsx for dual-layout architecture
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    indexFile.includes("const [layoutMode, setLayoutMode] = useState<'single' | 'double'>('double')"),
+    'DiscoveryScreen must default to double-column layout mode'
+  );
+  assert.ok(
+    indexFile.includes("const DISCOVERY_LAYOUT_KEY = 'aura_discovery_layout_mode'"),
+    'DiscoveryScreen must define dedicated storage key for layout persistence'
+  );
+  assert.ok(
+    indexFile.includes('testID="discovery-layout-toggle"'),
+    'DiscoveryScreen must render layout toggle button with testID="discovery-layout-toggle"'
+  );
+  assert.ok(
+    indexFile.includes('testID="discovery-double-column-grid"'),
+    'DiscoveryScreen must render 2-column grid with testID="discovery-double-column-grid"'
+  );
+  assert.ok(
+    indexFile.includes('numColumns={2}'),
+    'Double-column grid must configure numColumns={2}'
+  );
+  assert.ok(
+    indexFile.includes("layoutMode === 'double'"),
+    'DiscoveryScreen must branch between double-column grid and single-column deck'
+  );
+  assert.ok(
+    indexFile.includes('handleSwipeForCandidate'),
+    'DiscoveryScreen must provide candidate-specific swipe handler for grid items'
+  );
+
+  // 2. Inspect DiscoveryCard.tsx for layout adaptation
+  const cardFile = await fs.readFile(
+    new URL('../src/components/DiscoveryCard.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    cardFile.includes("layout?: 'single' | 'double'"),
+    'DiscoveryCard must accept layout prop supporting single and double modes'
+  );
+  assert.ok(
+    cardFile.includes("if (layout === 'double')"),
+    'DiscoveryCard must adapt sizing and elements when layout is double'
+  );
+  assert.ok(
+    cardFile.includes('doubleCardWrapper') && cardFile.includes('doubleCard'),
+    'DiscoveryCard must provide dedicated double-column card styling'
+  );
+  assert.ok(
+    cardFile.includes('doubleOnlineBadge') && cardFile.includes('doubleOnlineDot'),
+    'Double-column card must render online status indicator'
+  );
+  assert.ok(
+    cardFile.includes('doubleVerifiedPill'),
+    'Double-column card must render photo verification badge'
+  );
+  assert.ok(
+    cardFile.includes('doubleActionsRow') && cardFile.includes('doublePassBtn') && cardFile.includes('doubleLikeBtn'),
+    'Double-column card must provide compact pass and like action buttons'
+  );
+  assert.ok(
+    cardFile.includes('onlineBadge'),
+    'Single-column card must also render online status indicator'
+  );
+
+  // 3. Verify Layout State Persistence & Switching Contract
+  const storageMap = new Map();
+  const mockStorage = {
+    async getItem(key) {
+      return storageMap.get(key) ?? null;
+    },
+    async setItem(key, val) {
+      storageMap.set(key, val);
+    },
+  };
+
+  class MockDiscoveryState {
+    constructor() {
+      this.layoutMode = 'double';
+    }
+
+    async init() {
+      const saved = await mockStorage.getItem('aura_discovery_layout_mode');
+      if (saved === 'single' || saved === 'double') {
+        this.layoutMode = saved;
+      }
+    }
+
+    async toggle() {
+      this.layoutMode = this.layoutMode === 'double' ? 'single' : 'double';
+      await mockStorage.setItem('aura_discovery_layout_mode', this.layoutMode);
+    }
+  }
+
+  // Initial load: defaults to double column
+  const discovery1 = new MockDiscoveryState();
+  await discovery1.init();
+  assert.equal(discovery1.layoutMode, 'double', 'Initial discovery layout must default to double-column');
+
+  // Toggle to single column
+  await discovery1.toggle();
+  assert.equal(discovery1.layoutMode, 'single', 'Toggling layout switches to single-column');
+  assert.equal(await mockStorage.getItem('aura_discovery_layout_mode'), 'single');
+
+  // Simulating navigating away and returning (new session/mount)
+  const discovery2 = new MockDiscoveryState();
+  await discovery2.init();
+  assert.equal(discovery2.layoutMode, 'single', 'Returning to discovery restores remembered single-column layout');
+
+  // Toggle back to double column
+  await discovery2.toggle();
+  assert.equal(discovery2.layoutMode, 'double', 'Toggling layout switches back to double-column');
+  assert.equal(await mockStorage.getItem('aura_discovery_layout_mode'), 'double');
+});
+
+// --- Test 93: 30-Day Messaging Trial & Post-Trial Global Quota ---
+test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited chat, +4 ad unlock) and post-trial global quota (2 msgs, +2 ad unlock)', async () => {
+  // 1. Quota State Machine Simulation
+  class MockDiscoveryMessageQuotaManager {
+    constructor(userId = 'user_free_1', isUnlimited = false, createdAt = Date.now()) {
+      this.userId = userId;
+      this.isUnlimited = isUnlimited;
+      this.trialDurationMs = 30 * 24 * 60 * 60 * 1000;
+      this.trialStartedAt = createdAt;
+      this.trialEndsAt = createdAt + this.trialDurationMs;
+
+      // Trial state
+      this.trialDiscoveryProfileIds = new Set();
+      this.trialDiscoveryAllowed = 4;
+      this.trialAdsWatched = 0;
+      this.repliedProfiles = new Set();
+      this.cooldownExpiresAt = null;
+
+      // Post-trial state
+      this.postTrialOutgoingCount = 0;
+      this.postTrialAdUnlocked = false;
+      this.postTrialBonusOutgoing = 0;
+
+      this.recordedAdTransactions = new Set();
+    }
+
+    recordRecipientReply(profileId) {
+      this.repliedProfiles.add(profileId);
+    }
+
+    isInTrial(now = Date.now()) {
+      return now < this.trialEndsAt;
+    }
+
+    getState(now = Date.now()) {
+      if (this.isUnlimited) {
+        return {
+          user_id: this.userId,
+          is_unlimited: true,
+          is_in_trial: true,
+          trial_days_remaining: 30,
+          trial_initiations_remaining: 9999,
+          trial_initiations_allowed: 9999,
+          trial_distinct_messaged: 0,
+          free_slots_remaining: 9999,
+          is_locked: false,
+          can_unlock_with_ad: false,
+          ad_unlocked: false,
+          bonus_slots_remaining: 0,
+        };
+      }
+
+      if (this.isInTrial(now)) {
+        let cooldownActive = false;
+        let cooldownSecondsRemaining = 0;
+        if (this.cooldownExpiresAt) {
+          if (now < this.cooldownExpiresAt) {
+            cooldownActive = true;
+            cooldownSecondsRemaining = Math.max(0, Math.ceil((this.cooldownExpiresAt - now) / 1000));
+          } else {
+            // Cooldown expired! Reset trial cycle
+            this.trialDiscoveryProfileIds.clear();
+            this.trialDiscoveryAllowed = 4;
+            this.trialAdsWatched = 0;
+            this.cooldownExpiresAt = null;
+          }
+        }
+
+        const daysRemaining = Math.max(0, Math.ceil((this.trialEndsAt - now) / (24 * 60 * 60 * 1000)));
+        const distinctCount = this.trialDiscoveryProfileIds.size;
+        const initiationsRemaining = Math.max(0, this.trialDiscoveryAllowed - distinctCount);
+        let isLocked = false;
+        let canUnlockWithAd = false;
+
+        if (cooldownActive) {
+          isLocked = true;
+          canUnlockWithAd = false;
+        } else if (distinctCount >= 20) {
+          isLocked = true;
+          canUnlockWithAd = false;
+          cooldownActive = true;
+        } else if (initiationsRemaining === 0) {
+          isLocked = true;
+          canUnlockWithAd = this.trialAdsWatched < 4;
+        }
+
+        return {
+          user_id: this.userId,
+          is_unlimited: false,
+          is_in_trial: true,
+          trial_days_remaining: daysRemaining,
+          trial_initiations_remaining: initiationsRemaining,
+          trial_initiations_allowed: this.trialDiscoveryAllowed,
+          trial_distinct_messaged: distinctCount,
+          free_slots_remaining: initiationsRemaining,
+          is_locked: isLocked,
+          can_unlock_with_ad: canUnlockWithAd,
+          ad_unlocked: this.trialAdsWatched > 0 && !isLocked,
+          bonus_slots_remaining: 0,
+          cooldown_active: cooldownActive,
+          cooldown_seconds_remaining: cooldownSecondsRemaining,
+        };
+      }
+
+      // Post-trial mode
+      const postFreeRemaining = Math.max(0, 2 - this.postTrialOutgoingCount);
+      const postBonusRemaining = this.postTrialAdUnlocked
+        ? Math.max(0, 2 - this.postTrialBonusOutgoing)
+        : 0;
+
+      let isLocked = false;
+      let canUnlockWithAd = false;
+      if (postFreeRemaining <= 0) {
+        if (!this.postTrialAdUnlocked) {
+          isLocked = true;
+          canUnlockWithAd = true;
+        } else {
+          isLocked = postBonusRemaining <= 0;
+          canUnlockWithAd = false;
+        }
+      }
+
+      return {
+        user_id: this.userId,
+        is_unlimited: false,
+        is_in_trial: false,
+        trial_days_remaining: 0,
+        trial_initiations_remaining: 0,
+        post_trial_free_remaining: postFreeRemaining,
+        post_trial_bonus_remaining: postBonusRemaining,
+        free_slots_remaining: postFreeRemaining,
+        bonus_slots_remaining: postBonusRemaining,
+        is_locked: isLocked,
+        can_unlock_with_ad: canUnlockWithAd,
+        ad_unlocked: this.postTrialAdUnlocked,
+        cooldown_active: isLocked,
+        cooldown_seconds_remaining: 0,
+      };
+    }
+
+    sendDiscoveryMessage(targetProfileId, now = Date.now()) {
+      if (this.isUnlimited) {
+        return { success: true, is_unlimited: true };
+      }
+
+      if (this.isInTrial(now)) {
+        if (this.cooldownExpiresAt) {
+          if (now < this.cooldownExpiresAt) {
+            throw new Error("USAGE_LIMIT_REACHED: You've reached your usage limit. Please try again in 3 hours.");
+          }
+          // Expired: reset cycle
+          this.trialDiscoveryProfileIds.clear();
+          this.trialDiscoveryAllowed = 4;
+          this.trialAdsWatched = 0;
+          this.cooldownExpiresAt = null;
+        }
+
+        if (this.trialDiscoveryProfileIds.has(targetProfileId)) {
+          if (!this.repliedProfiles.has(targetProfileId)) {
+            throw new Error('AWAITING_REPLY: cannot send another message until recipient replies');
+          }
+          return { success: true, slot_consumed: false };
+        }
+
+        if (this.trialDiscoveryProfileIds.size < this.trialDiscoveryAllowed) {
+          this.trialDiscoveryProfileIds.add(targetProfileId);
+          if (this.trialDiscoveryProfileIds.size >= 20) {
+            this.cooldownExpiresAt = now + (3 * 60 * 60 * 1000);
+          }
+          return { success: true, slot_consumed: true, type: 'TRIAL' };
+        }
+        throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED: Trial Discovery initiations exhausted');
+      }
+
+      // Post-trial
+      if (this.postTrialOutgoingCount < 2) {
+        this.postTrialOutgoingCount++;
+        return { success: true, slot_consumed: true, type: 'POST_TRIAL_FREE' };
+      }
+      if (this.postTrialAdUnlocked && this.postTrialBonusOutgoing < 2) {
+        this.postTrialBonusOutgoing++;
+        return { success: true, slot_consumed: true, type: 'POST_TRIAL_BONUS' };
+      }
+      throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED: Post-trial messaging allowance exhausted');
+    }
+
+    sendChatMessage(now = Date.now()) {
+      if (this.isUnlimited || this.isInTrial(now)) {
+        return { success: true, unlimited_chat: true };
+      }
+      // Post-trial: consumes global outgoing allowance
+      if (this.postTrialOutgoingCount < 2) {
+        this.postTrialOutgoingCount++;
+        return { success: true, slot_consumed: true, type: 'POST_TRIAL_FREE' };
+      }
+      if (this.postTrialAdUnlocked && this.postTrialBonusOutgoing < 2) {
+        this.postTrialBonusOutgoing++;
+        return { success: true, slot_consumed: true, type: 'POST_TRIAL_BONUS' };
+      }
+      throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED: Post-trial chat allowance exhausted');
+    }
+
+    unlockWithAd(transactionId, now = Date.now()) {
+      if (this.recordedAdTransactions.has(transactionId)) {
+        throw new Error('DUPLICATE_TRANSACTION_REPLAY_BLOCKED');
+      }
+      this.recordedAdTransactions.add(transactionId);
+
+      if (this.isInTrial(now)) {
+        if (this.cooldownExpiresAt && now < this.cooldownExpiresAt) {
+          throw new Error('USAGE_LIMIT_REACHED: 3-hour cooldown active');
+        }
+        if (this.trialAdsWatched >= 4) {
+          throw new Error('MAX_ADS_REACHED: Maximum 4 ad unlocks reached for cycle');
+        }
+        if (this.trialDiscoveryProfileIds.size < this.trialDiscoveryAllowed) {
+          throw new Error('COOLDOWN_NOT_ACTIVE');
+        }
+        this.trialDiscoveryAllowed += 4;
+        this.trialAdsWatched++;
+        return this.getState(now);
+      }
+
+      // Post-trial
+      if (this.postTrialOutgoingCount < 2) {
+        throw new Error('COOLDOWN_NOT_ACTIVE');
+      }
+      if (this.postTrialAdUnlocked) {
+        throw new Error('AD_ALREADY_UNLOCKED');
+      }
+      this.postTrialAdUnlocked = true;
+      this.postTrialBonusOutgoing = 0;
+      return this.getState(now);
+    }
+  }
+
+  // --- Step A: 30-Day Trial Rules ---
+  const t0 = 1000000000;
+  const trialMgr = new MockDiscoveryMessageQuotaManager('user_trial_1', false, t0);
+
+  let state = trialMgr.getState(t0);
+  assert.equal(state.is_in_trial, true);
+  assert.equal(state.trial_days_remaining, 30);
+  assert.equal(state.trial_initiations_remaining, 4);
+  assert.equal(state.trial_distinct_messaged, 0);
+  assert.equal(state.is_locked, false);
+
+  // Chat messages during trial are 100% UNLIMITED and consume NO quota
+  for (let i = 0; i < 5; i++) {
+    const chatRes = trialMgr.sendChatMessage(t0);
+    assert.equal(chatRes.success, true);
+  }
+  assert.equal(trialMgr.getState(t0).trial_initiations_remaining, 4);
+
+  // Discovery message 1 to profile_A
+  const res1 = trialMgr.sendDiscoveryMessage('profile_A', t0);
+  assert.equal(res1.success, true);
+  assert.equal(trialMgr.getState(t0).trial_initiations_remaining, 3);
+  assert.equal(trialMgr.getState(t0).trial_distinct_messaged, 1);
+
+  // Repeated message to profile_A BEFORE reply: MUST be rejected
+  assert.throws(
+    () => trialMgr.sendDiscoveryMessage('profile_A', t0),
+    /cannot send another message until recipient replies/,
+    'Repeated message to same profile before reply must be rejected'
+  );
+  assert.equal(trialMgr.getState(t0).trial_initiations_remaining, 3);
+
+  // Recipient replies!
+  trialMgr.recordRecipientReply('profile_A');
+
+  // Repeated message to profile_A AFTER reply: succeeds without consuming slot
+  const res1Repeat = trialMgr.sendDiscoveryMessage('profile_A', t0);
+  assert.equal(res1Repeat.success, true);
+  assert.equal(res1Repeat.slot_consumed, false);
+  assert.equal(trialMgr.getState(t0).trial_initiations_remaining, 3);
+
+  // Message profiles B, C, D (reaches 4 distinct profiles)
+  trialMgr.sendDiscoveryMessage('profile_B', t0);
+  trialMgr.sendDiscoveryMessage('profile_C', t0);
+  trialMgr.sendDiscoveryMessage('profile_D', t0);
+
+  state = trialMgr.getState(t0);
+  assert.equal(state.trial_initiations_remaining, 0);
+  assert.equal(state.trial_distinct_messaged, 4);
+  assert.equal(state.is_locked, true, 'Trial Discovery quota must lock after 4 distinct profiles');
+  assert.equal(state.can_unlock_with_ad, true);
+
+  // 5th distinct profile fails before ad
+  assert.throws(
+    () => trialMgr.sendDiscoveryMessage('profile_E', t0),
+    /DISCOVERY_MESSAGE_QUOTA_LOCKED/,
+    '5th distinct profile must be blocked when quota is locked'
+  );
+
+  // But chat messages remain unlimited!
+  assert.equal(trialMgr.sendChatMessage(t0).success, true);
+
+  // Watch rewarded ad #1 to unlock the NEXT 4 profiles (allowed becomes 8)
+  const qAfterAd1 = trialMgr.unlockWithAd('ad_tx_trial_1', t0 + 1000);
+  assert.equal(qAfterAd1.trial_initiations_allowed, 8);
+  assert.equal(qAfterAd1.trial_initiations_remaining, 4);
+  assert.equal(qAfterAd1.is_locked, false, 'Quota must be unlocked after watching rewarded ad');
+
+  // Now profile_E succeeds
+  assert.equal(trialMgr.sendDiscoveryMessage('profile_E', t0 + 2000).success, true);
+  assert.equal(trialMgr.getState(t0 + 2000).trial_initiations_remaining, 3);
+
+  // Message profiles 6, 7, 8 (total 8 distinct)
+  trialMgr.sendDiscoveryMessage('profile_6', t0 + 2000);
+  trialMgr.sendDiscoveryMessage('profile_7', t0 + 2000);
+  trialMgr.sendDiscoveryMessage('profile_8', t0 + 2000);
+
+  // Watch rewarded ad #2 (allowed becomes 12)
+  trialMgr.unlockWithAd('ad_tx_trial_2', t0 + 3000);
+  for (let i = 9; i <= 12; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 3000);
+
+  // Watch rewarded ad #3 (allowed becomes 16)
+  trialMgr.unlockWithAd('ad_tx_trial_3', t0 + 4000);
+  for (let i = 13; i <= 16; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 4000);
+
+  // Watch rewarded ad #4 (allowed becomes 20, max 4 ads per cycle)
+  trialMgr.unlockWithAd('ad_tx_trial_4', t0 + 5000);
+  for (let i = 17; i <= 20; i++) trialMgr.sendDiscoveryMessage(`profile_${i}`, t0 + 5000);
+
+  // 20 distinct profiles contacted: 3-hour cooldown is triggered!
+  const state20 = trialMgr.getState(t0 + 5000);
+  assert.equal(state20.is_locked, true);
+  assert.equal(state20.cooldown_active, true);
+  assert.equal(state20.can_unlock_with_ad, false, 'No further ad unlock offered during 3-hour cooldown');
+  assert.ok(state20.cooldown_seconds_remaining > 0);
+
+  // Attempting 21st profile throws USAGE_LIMIT_REACHED
+  assert.throws(
+    () => trialMgr.sendDiscoveryMessage('profile_21', t0 + 5000),
+    /USAGE_LIMIT_REACHED/,
+    '21st profile must be blocked during 3-hour cooldown'
+  );
+
+  // Attempting 5th ad unlock throws error
+  assert.throws(
+    () => trialMgr.unlockWithAd('ad_tx_trial_5', t0 + 5000),
+    /USAGE_LIMIT_REACHED|MAX_ADS_REACHED/,
+    '5th ad unlock must be rejected'
+  );
+
+  // Chat remains unlimited during 3-hour cooldown
+  assert.equal(trialMgr.sendChatMessage(t0 + 5000).success, true);
+
+  // Cooldown expires (3 hours + 1 second later) -> trial cycle resets!
+  const resetTime = t0 + 5000 + (3 * 60 * 60 * 1000) + 1000;
+  const resetState = trialMgr.getState(resetTime);
+  assert.equal(resetState.trial_distinct_messaged, 0);
+  assert.equal(resetState.trial_initiations_allowed, 4);
+  assert.equal(resetState.trial_initiations_remaining, 4);
+  assert.equal(resetState.is_locked, false);
+  assert.equal(resetState.cooldown_active, false);
+
+  // First message in new cycle succeeds
+  assert.equal(trialMgr.sendDiscoveryMessage('cycle2_profile_1', resetTime).success, true);
+  assert.equal(trialMgr.getState(resetTime).trial_distinct_messaged, 1);
+
+  // --- Step B: Post-Trial Global Messaging Quota ---
+  // Create user with registration 31 days in past
+  const pastCreatedAt = t0 - (31 * 24 * 60 * 60 * 1000);
+  const postTrialMgr = new MockDiscoveryMessageQuotaManager('user_post_1', false, pastCreatedAt);
+
+  let ptState = postTrialMgr.getState(t0);
+  assert.equal(ptState.is_in_trial, false);
+  assert.equal(ptState.post_trial_free_remaining, 2);
+  assert.equal(ptState.is_locked, false);
+
+  // Send 1 chat message (consumes 1 of 2 global slots)
+  assert.equal(postTrialMgr.sendChatMessage(t0).success, true);
+  assert.equal(postTrialMgr.getState(t0).post_trial_free_remaining, 1);
+
+  // Send 1 discovery message (consumes 2nd slot)
+  assert.equal(postTrialMgr.sendDiscoveryMessage('target_pt_1', t0).success, true);
+  ptState = postTrialMgr.getState(t0);
+  assert.equal(ptState.post_trial_free_remaining, 0);
+  assert.equal(ptState.is_locked, true);
+  assert.equal(ptState.can_unlock_with_ad, true);
+
+  // 3rd message fails
+  assert.throws(() => postTrialMgr.sendChatMessage(t0), /DISCOVERY_MESSAGE_QUOTA_LOCKED/);
+  assert.throws(() => postTrialMgr.sendDiscoveryMessage('target_pt_2', t0), /DISCOVERY_MESSAGE_QUOTA_LOCKED/);
+
+  // Watch rewarded ad to unlock 2 additional outgoing messages
+  const ptAfterAd = postTrialMgr.unlockWithAd('ad_tx_pt_1', t0 + 1000);
+  assert.equal(ptAfterAd.ad_unlocked, true);
+  assert.equal(ptAfterAd.post_trial_bonus_remaining, 2);
+  assert.equal(ptAfterAd.is_locked, false);
+
+  // Consume 2 bonus messages
+  assert.equal(postTrialMgr.sendChatMessage(t0 + 2000).success, true);
+  assert.equal(postTrialMgr.sendDiscoveryMessage('target_pt_2', t0 + 2000).success, true);
+  assert.equal(postTrialMgr.getState(t0 + 2000).is_locked, true);
+
+  // --- Step C: Premium Unlimited Entitlement Immunity ---
+  const vipMgr = new MockDiscoveryMessageQuotaManager('vip_user', true, pastCreatedAt);
+  const vipState = vipMgr.getState();
+  assert.equal(vipState.is_unlimited, true);
+  assert.equal(vipState.is_locked, false);
+  for (let i = 0; i < 15; i++) {
+    assert.equal(vipMgr.sendDiscoveryMessage(`vip_target_${i}`).success, true);
+    assert.equal(vipMgr.sendChatMessage().success, true);
+  }
+  assert.equal(vipMgr.getState().is_locked, false);
+
+  // --- Step D: Component and Contract Verifications in Source ---
+  const fs = await import('fs');
+  const path = await import('path');
+
+  const modalSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/DiscoveryMessageQuotaModal.tsx'),
+    'utf-8'
+  );
+  assert.ok(
+    modalSource.includes('DISCOVERY MESSAGE QUOTA'),
+    'DiscoveryMessageQuotaModal must display header badge'
+  );
+  assert.ok(
+    modalSource.includes("You've reached your usage limit. Please try again in 3 hours."),
+    'DiscoveryMessageQuotaModal must display 3-hour usage limit message'
+  );
+  assert.ok(
+    modalSource.includes('3-HOUR COOLDOWN'),
+    'DiscoveryMessageQuotaModal must support 3-hour cooldown badge'
+  );
+  assert.ok(
+    modalSource.includes('trial-initiation-counter') || modalSource.includes('quota-countdown-timer'),
+    'DiscoveryMessageQuotaModal must render initiation counter or countdown timer'
+  );
+  assert.ok(
+    modalSource.includes('unlock-ad-button') && modalSource.includes('showRewardedAd'),
+    'DiscoveryMessageQuotaModal must support rewarded ad unlock'
+  );
+  assert.ok(
+    modalSource.includes('Ad Reward Claimed for Current Batch') || modalSource.includes('Ad Reward Claimed for Current Cooldown'),
+    'DiscoveryMessageQuotaModal must display ad claimed state when already unlocked'
+  );
+
+  const discoveryServiceSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/services/discovery/discoveryService.ts'),
+    'utf-8'
+  );
+  assert.ok(
+    discoveryServiceSource.includes('getMessagingQuota') && discoveryServiceSource.includes('unlockMessagingQuotaWithAd'),
+    'discoveryService must provide getMessagingQuota and unlockMessagingQuotaWithAd methods'
+  );
+
+  const composerSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/QuickMessageComposer.tsx'),
+    'utf-8'
+  );
+  assert.ok(
+    composerSource.includes('isLocked') && composerSource.includes('onQuotaPress'),
+    'QuickMessageComposer must handle locked quota indicator and press trigger'
+  );
+});

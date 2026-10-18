@@ -10,6 +10,7 @@ import {
   Keyboard,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
+import { DiscoveryMessagingQuota } from '../types';
 
 interface QuickMessageComposerProps {
   recipientId?: string;
@@ -18,6 +19,8 @@ interface QuickMessageComposerProps {
   disabled?: boolean;
   onFocus?: () => void;
   onBlur?: () => void;
+  quota?: DiscoveryMessagingQuota | null;
+  onQuotaPress?: () => void;
 }
 
 export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
@@ -27,6 +30,8 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
   disabled = false,
   onFocus,
   onBlur,
+  quota,
+  onQuotaPress,
 }) => {
   const { colors } = useTheme();
   const [text, setText] = useState('');
@@ -39,9 +44,14 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
 
   const trimmed = text.trim();
   const charLimit = 500;
+  const isLocked = Boolean(quota?.is_locked);
   const canSend = trimmed.length > 0 && trimmed.length <= charLimit && !isSending && !disabled;
 
   const handleSend = async () => {
+    if (isLocked) {
+      if (onQuotaPress) onQuotaPress();
+      return;
+    }
     if (!canSend) return;
     setIsSending(true);
     const draftText = trimmed;
@@ -60,6 +70,39 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
 
   return (
     <View style={styles.container}>
+      {isLocked && (
+        <TouchableOpacity
+          style={[styles.quotaIndicator, { backgroundColor: 'rgba(212,175,55,0.12)', borderColor: colors.gold }]}
+          onPress={onQuotaPress}
+          activeOpacity={0.7}
+          testID="composer-quota-locked-indicator"
+        >
+          <Text style={[styles.quotaIndicatorText, { color: colors.gold }]}>
+            🔒 Limit Reached · {quota?.can_unlock_with_ad ? 'Watch Ad to Unlock' : 'Limit Active'}
+          </Text>
+        </TouchableOpacity>
+      )}
+      {!isLocked && quota?.is_in_trial && (
+        <View
+          style={[styles.quotaIndicator, { backgroundColor: 'rgba(212,175,55,0.08)', borderColor: 'rgba(212,175,55,0.3)' }]}
+          testID="composer-quota-trial-indicator"
+        >
+          <Text style={[styles.quotaIndicatorText, { color: colors.gold }]}>
+            ✦ Trial: {quota.trial_initiations_remaining ?? quota.free_slots_remaining} of {quota.trial_initiations_allowed ?? 4} Discovery initiations left
+          </Text>
+        </View>
+      )}
+      {!isLocked && !quota?.is_in_trial && quota?.ad_unlocked && (quota.bonus_slots_remaining ?? 0) > 0 && (
+        <View
+          style={[styles.quotaIndicator, { backgroundColor: 'rgba(212,175,55,0.08)', borderColor: 'rgba(212,175,55,0.3)' }]}
+          testID="composer-quota-bonus-indicator"
+        >
+          <Text style={[styles.quotaIndicatorText, { color: colors.gold }]}>
+            ✦ {quota.bonus_slots_remaining} bonus intro note{quota.bonus_slots_remaining > 1 ? 's' : ''} available
+          </Text>
+        </View>
+      )}
+      <View style={styles.inputRow}>
       <View style={[styles.inputWrapper, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
         <TextInput
           style={[styles.input, { color: colors.text }]}
@@ -111,19 +154,37 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
           </Text>
         )}
       </TouchableOpacity>
+      </View>
     </View>
   );
 };
 
 const styles = StyleSheet.create({
   container: {
+    width: '100%',
+    maxWidth: 420,
+    alignSelf: 'center',
+    alignItems: 'center',
+  },
+  inputRow: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: spacing.md,
     paddingVertical: spacing.xs,
     width: '100%',
-    maxWidth: 420,
+  },
+  quotaIndicator: {
+    paddingHorizontal: spacing.md,
+    paddingVertical: 3,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    marginBottom: 4,
     alignSelf: 'center',
+  },
+  quotaIndicatorText: {
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
   inputWrapper: {
     flex: 1,

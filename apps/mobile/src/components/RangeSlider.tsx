@@ -6,6 +6,7 @@ import {
   PanResponder,
   LayoutChangeEvent,
   GestureResponderEvent,
+  Pressable,
 } from 'react-native';
 import { colors, spacing, borderRadius, useTheme } from '../theme';
 
@@ -36,8 +37,9 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
 }) => {
   const { colors } = useTheme();
   const [trackWidth, setTrackWidth] = useState(300);
+  const [activeThumb, setActiveThumb] = useState<'min' | 'max' | null>(null);
 
-  // Keep references to latest values for pan responders
+  // Keep references to latest values for pan responders and track touches
   const currentMinRef = useRef(minValue);
   const currentMaxRef = useRef(maxValue);
   const trackWidthRef = useRef(trackWidth);
@@ -45,9 +47,9 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
   const startMaxRef = useRef(maxValue);
 
   useEffect(() => {
-    currentMinRef.current = minValue;
-    currentMaxRef.current = maxValue;
-  }, [minValue, maxValue]);
+    currentMinRef.current = Math.max(min, Math.min(max, minValue));
+    currentMaxRef.current = Math.max(min, Math.min(max, maxValue));
+  }, [minValue, maxValue, min, max]);
 
   useEffect(() => {
     trackWidthRef.current = trackWidth;
@@ -67,6 +69,7 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
+        setActiveThumb('min');
         startMinRef.current = currentMinRef.current;
       },
       onPanResponderMove: (_, gestureState) => {
@@ -75,11 +78,18 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
         const deltaVal = (gestureState.dx / width) * (max - min);
         const rawVal = startMinRef.current + deltaVal;
         const stepped = Math.round(rawVal / step) * step;
+        // Enforce valid bounds and prevent thumbs from crossing: min <= stepped <= currentMaxRef.current
         const clamped = Math.max(min, Math.min(currentMaxRef.current, stepped));
         if (clamped !== currentMinRef.current) {
           currentMinRef.current = clamped;
           onChange(clamped, currentMaxRef.current);
         }
+      },
+      onPanResponderRelease: () => {
+        setActiveThumb(null);
+      },
+      onPanResponderTerminate: () => {
+        setActiveThumb(null);
       },
       onPanResponderTerminationRequest: () => false,
     })
@@ -91,6 +101,7 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
       onPanResponderGrant: () => {
+        setActiveThumb('max');
         startMaxRef.current = currentMaxRef.current;
       },
       onPanResponderMove: (_, gestureState) => {
@@ -99,18 +110,25 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
         const deltaVal = (gestureState.dx / width) * (max - min);
         const rawVal = startMaxRef.current + deltaVal;
         const stepped = Math.round(rawVal / step) * step;
+        // Enforce valid bounds and prevent thumbs from crossing: currentMinRef.current <= stepped <= max
         const clamped = Math.min(max, Math.max(currentMinRef.current, stepped));
         if (clamped !== currentMaxRef.current) {
           currentMaxRef.current = clamped;
           onChange(currentMinRef.current, clamped);
         }
       },
+      onPanResponderRelease: () => {
+        setActiveThumb(null);
+      },
+      onPanResponderTerminate: () => {
+        setActiveThumb(null);
+      },
       onPanResponderTerminationRequest: () => false,
     })
   ).current;
 
-  // Track tap handler
-  const handleTrackTouch = (e: GestureResponderEvent) => {
+  // Track tap handler (only triggers when tapping the track itself, not a thumb)
+  const handleTrackPress = (e: GestureResponderEvent) => {
     const width = trackWidthRef.current;
     if (width <= 0) return;
     const x = e.nativeEvent.locationX;
@@ -145,21 +163,28 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
   return (
     <View style={styles.container} testID={testID}>
       {/* Slider Track Container */}
-      <View style={styles.trackContainer} onLayout={handleLayout} onTouchStart={handleTrackTouch}>
-        {/* Inactive Track */}
-        <View style={styles.inactiveTrack} />
+      <View style={styles.trackContainer} onLayout={handleLayout}>
+        {/* Tappable Track Area */}
+        <Pressable
+          style={styles.trackPressArea}
+          onPress={handleTrackPress}
+          hitSlop={{ top: 10, bottom: 10 }}
+        >
+          {/* Inactive Track */}
+          <View style={styles.inactiveTrack} />
 
-        {/* Active Highlight Track */}
-        <View
-          style={[
-            styles.activeTrack,
-            {
-              backgroundColor: colors.gold,
-              left: Math.max(0, minPos),
-              width: Math.max(0, maxPos - minPos),
-            },
-          ]}
-        />
+          {/* Active Highlight Track */}
+          <View
+            style={[
+              styles.activeTrack,
+              {
+                backgroundColor: colors.gold,
+                left: Math.max(0, minPos),
+                width: Math.max(0, maxPos - minPos),
+              },
+            ]}
+          />
+        </Pressable>
 
         {/* Min Thumb Handle */}
         <View
@@ -169,10 +194,12 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
               borderColor: colors.gold,
               backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, minPos - THUMB_SIZE / 2)),
+              zIndex: activeThumb === 'min' ? 10 : 3,
+              transform: [{ scale: activeThumb === 'min' ? 1.15 : 1 }],
             },
           ]}
           {...minPan.panHandlers}
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
           testID={`${testID}-min-thumb`}
         >
           <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
@@ -186,10 +213,12 @@ export const RangeSlider: React.FC<RangeSliderProps> = ({
               borderColor: colors.gold,
               backgroundColor: colors.cardElevated,
               left: Math.max(-THUMB_SIZE / 2, Math.min(trackWidth - THUMB_SIZE / 2, maxPos - THUMB_SIZE / 2)),
+              zIndex: activeThumb === 'max' ? 10 : 3,
+              transform: [{ scale: activeThumb === 'max' ? 1.15 : 1 }],
             },
           ]}
           {...maxPan.panHandlers}
-          hitSlop={{ top: 16, bottom: 16, left: 16, right: 16 }}
+          hitSlop={{ top: 20, bottom: 20, left: 20, right: 20 }}
           testID={`${testID}-max-thumb`}
         >
           <View style={[styles.thumbCenterDot, { backgroundColor: colors.gold }]} />
@@ -216,6 +245,11 @@ const styles = StyleSheet.create({
     height: 40,
     justifyContent: 'center',
     position: 'relative',
+    width: '100%',
+  },
+  trackPressArea: {
+    height: 40,
+    justifyContent: 'center',
     width: '100%',
   },
   inactiveTrack: {

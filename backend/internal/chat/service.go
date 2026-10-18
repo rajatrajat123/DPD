@@ -10,6 +10,12 @@ import (
 	"github.com/auradating/platform/backend/internal/identity"
 )
 
+type QuotaChecker interface {
+	ConsumeChatOutgoingSlot(ctx context.Context, userID string) error
+	CheckCanSendChat(ctx context.Context, senderID, recipientID string) error
+	RecordRecipientReply(ctx context.Context, senderID, recipientID string) error
+}
+
 type Service struct {
 	repo         Repository
 	hub          *Hub
@@ -17,6 +23,11 @@ type Service struct {
 	identRepo    identity.Repository
 	logger       *slog.Logger
 	jwtSecret    string
+	quotaChecker QuotaChecker
+}
+
+func (s *Service) SetQuotaChecker(qc QuotaChecker) {
+	s.quotaChecker = qc
 }
 
 func NewService(
@@ -90,6 +101,17 @@ func (s *Service) SendMessage(ctx context.Context, senderUserID string, conversa
 		return nil, ErrMatchInactive
 	}
 
+	recipientID := conv.OtherParticipantID(senderUserID)
+
+	if s.quotaChecker != nil {
+		if err := s.quotaChecker.CheckCanSendChat(ctx, senderUserID, recipientID); err != nil {
+			return nil, err
+		}
+		if err := s.quotaChecker.ConsumeChatOutgoingSlot(ctx, senderUserID); err != nil {
+			return nil, err
+		}
+	}
+
 	// 3. Persist message idempotently
 	var audioDuration *int
 	if req.AudioDurationMs != nil {
@@ -121,8 +143,11 @@ func (s *Service) SendMessage(ctx context.Context, senderUserID string, conversa
 		return saved, nil
 	}
 
+	if s.quotaChecker != nil {
+		_ = s.quotaChecker.RecordRecipientReply(ctx, recipientID, senderUserID)
+	}
+
 	// 4. Real-time delivery
-	recipientID := conv.OtherParticipantID(senderUserID)
 	event, err := NewWSEvent(EventMessageNew, saved)
 	if err == nil {
 		delivered := s.hub.DeliverToUser(recipientID, event)

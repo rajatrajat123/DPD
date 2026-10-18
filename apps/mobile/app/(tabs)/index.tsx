@@ -12,12 +12,14 @@ import {
   TouchableWithoutFeedback,
   Dimensions,
   LayoutChangeEvent,
+  FlatList,
+  RefreshControl,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { useAuth } from '../../src/context/AuthContext';
-import { DiscoveryCandidate, SwipeResponse, DiscoveryPreferences } from '../../src/types';
+import { DiscoveryCandidate, SwipeResponse, DiscoveryPreferences, DiscoveryMessagingQuota } from '../../src/types';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
 import { DiscoveryCard } from '../../src/components/DiscoveryCard';
 import { SponsoredCard } from '../../src/components/SponsoredCard';
@@ -25,12 +27,16 @@ import { DealbreakerEmptyState } from '../../src/components/DealbreakerEmptyStat
 import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanner';
 import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModal';
 import { SwipeQuotaModal } from '../../src/components/SwipeQuotaModal';
+import { DiscoveryMessageQuotaModal } from '../../src/components/DiscoveryMessageQuotaModal';
 import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
 import { QuickMessageComposer } from '../../src/components/QuickMessageComposer';
 import { computeAndroidKeyboardCompensation } from '../../src/utils/keyboardAvoidance';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { authService } from '../../src/services/auth/authService';
 import { admobService, adBreakManager, SwipeAllowance, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
+import { secureStorage } from '../../src/services/storage/secureStore';
+
+const DISCOVERY_LAYOUT_KEY = 'aura_discovery_layout_mode';
 
 export default function DiscoveryScreen() {
   const router = useRouter();
@@ -38,6 +44,7 @@ export default function DiscoveryScreen() {
   const { isAgeVerified, profile, refreshProfile } = useAuth();
   const { colors } = useTheme();
 
+  const [layoutMode, setLayoutMode] = useState<'single' | 'double'>('double');
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [showFilterModal, setShowFilterModal] = useState(false);
   const [preferences, setPreferences] = useState<DiscoveryPreferences | null>(null);
@@ -60,14 +67,57 @@ export default function DiscoveryScreen() {
   const lastKeyboardScreenYRef = useRef<number>(0);
   const [cardRegionHeight, setCardRegionHeight] = useState<number>(0);
 
-  // Ensure keyboard dismisses cleanly when leaving the Discovery tab
+  // Load saved layout preference on initial mount
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      try {
+        const saved = await secureStorage.getItem(DISCOVERY_LAYOUT_KEY);
+        if (isMounted && (saved === 'single' || saved === 'double')) {
+          setLayoutMode(saved);
+        }
+      } catch {
+        // default remains 'double'
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  // Ensure keyboard dismisses cleanly when leaving the Discovery tab & sync saved layout on refocus
   useFocusEffect(
     useCallback(() => {
+      let isMounted = true;
+      (async () => {
+        try {
+          const saved = await secureStorage.getItem(DISCOVERY_LAYOUT_KEY);
+          if (isMounted && (saved === 'single' || saved === 'double')) {
+            setLayoutMode(saved);
+          }
+        } catch {
+          // ignore
+        }
+      })();
       return () => {
+        isMounted = false;
         Keyboard.dismiss();
       };
     }, [])
   );
+
+  const selectLayoutMode = useCallback((mode: 'single' | 'double') => {
+    setLayoutMode(mode);
+    secureStorage.setItem(DISCOVERY_LAYOUT_KEY, mode).catch(() => {});
+  }, []);
+
+  const toggleLayoutMode = useCallback(() => {
+    setLayoutMode((prev) => {
+      const next = prev === 'double' ? 'single' : 'double';
+      secureStorage.setItem(DISCOVERY_LAYOUT_KEY, next).catch(() => {});
+      return next;
+    });
+  }, []);
 
   const composerRef = useRef<View>(null);
 
@@ -136,6 +186,8 @@ export default function DiscoveryScreen() {
       if (idleContainerHeightRef.current === 0 || height >= idleContainerHeightRef.current - 50) {
         idleContainerHeightRef.current = height;
       }
+    } else if (isKeyboardOpenRef.current && Platform.OS === 'android') {
+      updateAndroidAvoidance(lastKeyboardHeightRef.current, lastKeyboardScreenYRef.current);
     }
   };
 
@@ -190,6 +242,21 @@ export default function DiscoveryScreen() {
   // Daily Swipe Quota & Rewarded Ad Modal state
   const [allowance, setAllowance] = useState<SwipeAllowance | null>(null);
   const [showQuotaModal, setShowQuotaModal] = useState(false);
+
+  // Discovery Messaging Quota (2 distinct profiles, 10m cooldown, rewarded ad unlock)
+  const [messageQuota, setMessageQuota] = useState<DiscoveryMessagingQuota | null>(null);
+  const [showMessageQuotaModal, setShowMessageQuotaModal] = useState(false);
+
+  const loadMessagingQuota = useCallback(async () => {
+    try {
+      const q = await discoveryService.getMessagingQuota();
+      setMessageQuota(q);
+      return q;
+    } catch {
+      // non-blocking
+      return null;
+    }
+  }, []);
 
   const isLoadingMoreRef = useRef(false);
   const nextCursorRef = useRef<string | null>(null);
@@ -248,6 +315,7 @@ export default function DiscoveryScreen() {
 
       const allowRes = await admobService.getSwipeAllowance();
       setAllowance(allowRes);
+      loadMessagingQuota();
 
       try {
         const prefs = await discoveryService.getPreferences();
@@ -292,10 +360,10 @@ export default function DiscoveryScreen() {
 
   // Auto-replenish: when the user reaches near the end of the current deck, automatically load the next batch
   useEffect(() => {
-    if (currentIndex > 0 && currentIndex >= candidates.length - 2 && !isLoading && hasMoreRef.current) {
+    if (candidates.length <= 4 && !isLoading && hasMoreRef.current) {
       prefetchNextBatch();
     }
-  }, [currentIndex, candidates.length, isLoading, prefetchNextBatch]);
+  }, [candidates.length, isLoading, prefetchNextBatch]);
 
   const handleCheckVerificationStatus = async () => {
     try {
@@ -329,7 +397,7 @@ export default function DiscoveryScreen() {
   const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK', introNote?: string) => {
     Keyboard.dismiss();
     if (isSwipingRef.current) return;
-    const candidate = candidates[currentIndex];
+    const candidate = candidates[0];
     if (!candidate) return;
 
     // Check client-side quota if limited and trying to LIKE
@@ -338,13 +406,18 @@ export default function DiscoveryScreen() {
       return;
     }
 
+    // Check Discovery messaging quota if initiating an Intro Note
+    if (introNote && messageQuota && !messageQuota.is_unlimited && messageQuota.is_locked) {
+      setShowMessageQuotaModal(true);
+      return;
+    }
+
     isSwipingRef.current = true;
     setLastSwipedCandidate(candidate);
-    const nextIdx = currentIndex + 1;
-    setCurrentIndex(nextIdx);
+    setCandidates((prev) => prev.slice(1));
 
     // Continuous browsing: prefetch next batch when approaching end of deck
-    if (nextIdx >= candidates.length - 3) {
+    if (candidates.length <= 4) {
       prefetchNextBatch();
     }
 
@@ -382,10 +455,37 @@ export default function DiscoveryScreen() {
           `Your message request was delivered to ${candidate.display_name}. When they like you back, you'll be connected in Chat.`
         );
       }
+      if (introNote) {
+        loadMessagingQuota().then((updated) => {
+          if (updated && !updated.is_unlimited && updated.is_locked) {
+            setShowMessageQuotaModal(true);
+          }
+        });
+      }
       return res;
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
+      if (
+        errMsg.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED') ||
+        errMsg.includes('USAGE_LIMIT_REACHED') ||
+        errMsg.includes('usage limit') ||
+        errMsg.includes('cooldown is active') ||
+        errMsg.includes('quota exhausted')
+      ) {
+        setShowMessageQuotaModal(true);
+        loadMessagingQuota();
+        setCandidates((prev) => [candidate, ...prev]);
+      } else if (
+        errMsg.includes('AWAITING_REPLY') ||
+        errMsg.includes('cannot send another message until recipient replies')
+      ) {
+        Alert.alert(
+          'Waiting for Reply',
+          'You can only send one initial message to this profile until they reply.',
+          [{ text: 'OK', style: 'default' }]
+        );
+        setCandidates((prev) => [candidate, ...prev]);
+      } else if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
         Alert.alert(
           'Photo-Verified Profiles Only',
           'Bonus likes earned from sponsored videos can only be used on photo-verified profiles. You can continue passing or upgrade for unlimited likes.',
@@ -394,14 +494,14 @@ export default function DiscoveryScreen() {
             { text: 'Got It', style: 'cancel' },
           ]
         );
-        setCurrentIndex((prev) => Math.max(0, prev - 1));
+        setCandidates((prev) => [candidate, ...prev]);
       } else if (errMsg.includes('SWIPE_LIMIT_REACHED') || errMsg.includes('limit reached')) {
         setShowQuotaModal(true);
-        setCurrentIndex((prev) => Math.max(0, prev - 1));
+        setCandidates((prev) => [candidate, ...prev]);
       } else {
         if (introNote) {
           Alert.alert('Send Failed', 'Could not deliver intro note. Please check your connection and try again.');
-          setCurrentIndex((prev) => Math.max(0, prev - 1));
+          setCandidates((prev) => [candidate, ...prev]);
         }
       }
       if (introNote) {
@@ -427,8 +527,8 @@ export default function DiscoveryScreen() {
 
     try {
       await discoveryService.rewind();
-      if (currentIndex > 0 && lastSwipedCandidate) {
-        setCurrentIndex((prev) => prev - 1);
+      if (lastSwipedCandidate) {
+        setCandidates((prev) => [lastSwipedCandidate, ...prev]);
         Alert.alert('Rewound', `Restored ${lastSwipedCandidate.display_name} to your deck.`);
       }
     } catch (err) {
@@ -436,7 +536,85 @@ export default function DiscoveryScreen() {
     }
   };
 
-  const activeCandidate = candidates[currentIndex];
+  const handleSwipeForCandidate = async (
+    candidate: DiscoveryCandidate,
+    direction: 'LIKE' | 'PASS' | 'SUPER_SPARK'
+  ) => {
+    Keyboard.dismiss();
+    if (candidates.length > 0 && candidate.user_id === candidates[0].user_id) {
+      return await handleSwipe(direction);
+    }
+
+    if (isSwipingRef.current) return;
+
+    if (direction !== 'PASS' && allowance && !allowance.isUnlimited && allowance.remainingLikes <= 0) {
+      setShowQuotaModal(true);
+      return;
+    }
+
+    isSwipingRef.current = true;
+    setLastSwipedCandidate(candidate);
+
+    setCandidates((prev) => prev.filter((c) => c.user_id !== candidate.user_id));
+
+    if (candidates.length <= 4) {
+      prefetchNextBatch();
+    }
+
+    if (direction !== 'PASS' && allowance && !allowance.isUnlimited) {
+      setAllowance((prev) =>
+        prev ? { ...prev, remainingLikes: Math.max(0, prev.remainingLikes - 1) } : null
+      );
+    }
+
+    const isFreeUser = !allowance || !allowance.isUnlimited;
+    if (isFreeUser && isGoogleMobileAdsAvailable()) {
+      const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
+      if (shouldTriggerBreak) {
+        admobService
+          .showInterstitialAd()
+          .then((completed) => {
+            if (completed) {
+              adBreakManager.onAdCompleted();
+            } else {
+              adBreakManager.onAdFailed();
+            }
+          })
+          .catch(() => {
+            adBreakManager.onAdFailed();
+          });
+      }
+    }
+
+    try {
+      const res: SwipeResponse = await discoveryService.swipe(candidate.user_id, direction);
+      if (res.is_mutual_match) {
+        setMatchedCandidate(candidate);
+        setActiveConversationId(res.conversation_id || null);
+      }
+      return res;
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
+        Alert.alert(
+          'Photo-Verified Profiles Only',
+          'Bonus likes earned from sponsored videos can only be used on photo-verified profiles. You can continue passing or upgrade for unlimited likes.',
+          [
+            { text: 'Upgrade to Plus', onPress: () => router.push('/(tabs)/membership') },
+            { text: 'Got It', style: 'cancel' },
+          ]
+        );
+        setCandidates((prev) => [candidate, ...prev]);
+      } else if (errMsg.includes('SWIPE_LIMIT_REACHED') || errMsg.includes('limit reached')) {
+        setShowQuotaModal(true);
+        setCandidates((prev) => [candidate, ...prev]);
+      }
+    } finally {
+      isSwipingRef.current = false;
+    }
+  };
+
+  const activeCandidate = candidates[0];
 
   return (
     <SafeAreaView edges={['top', 'left', 'right']} style={[styles.safeArea, { backgroundColor: colors.background }]}>
@@ -520,6 +698,56 @@ export default function DiscoveryScreen() {
           </TouchableOpacity>
         )}
 
+        {/* Discovery Layout Toggle: Single Column vs Double Column (Positioned below banners, directly above profile cards) */}
+        {!isKeyboardOpen && (
+          <View style={styles.layoutToggleBarContainer}>
+            <View
+              style={[styles.layoutSegmentedContainer, { backgroundColor: colors.card, borderColor: colors.border }]}
+              testID="discovery-layout-toggle"
+            >
+              <TouchableOpacity
+                style={[
+                  styles.layoutSegmentBtn,
+                  layoutMode === 'single' && styles.layoutSegmentBtnActive,
+                ]}
+                onPress={() => selectLayoutMode('single')}
+                activeOpacity={0.7}
+                testID="discovery-layout-single"
+                accessibilityLabel="Single column layout"
+                accessibilityRole="button"
+                accessibilityState={{ selected: layoutMode === 'single' }}
+              >
+                <View
+                  style={[
+                    styles.layoutIconSingle,
+                    { borderColor: layoutMode === 'single' ? colors.gold : colors.textMuted },
+                  ]}
+                />
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.layoutSegmentBtn,
+                  layoutMode === 'double' && styles.layoutSegmentBtnActive,
+                ]}
+                onPress={() => selectLayoutMode('double')}
+                activeOpacity={0.7}
+                testID="discovery-layout-double"
+                accessibilityLabel="Double column layout"
+                accessibilityRole="button"
+                accessibilityState={{ selected: layoutMode === 'double' }}
+              >
+                <View style={styles.layoutIconGrid}>
+                  <View style={[styles.layoutGridDot, { backgroundColor: layoutMode === 'double' ? colors.gold : colors.textMuted }]} />
+                  <View style={[styles.layoutGridDot, { backgroundColor: layoutMode === 'double' ? colors.gold : colors.textMuted }]} />
+                  <View style={[styles.layoutGridDot, { backgroundColor: layoutMode === 'double' ? colors.gold : colors.textMuted }]} />
+                  <View style={[styles.layoutGridDot, { backgroundColor: layoutMode === 'double' ? colors.gold : colors.textMuted }]} />
+                </View>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
         {/* Main Deck Container */}
         <View
           style={[styles.content, isKeyboardOpen && styles.contentKeyboard]}
@@ -538,55 +766,98 @@ export default function DiscoveryScreen() {
               }}
             />
           ) : activeCandidate ? (
-            <View
-              style={[
-                styles.deckContainer,
-                isKeyboardOpen && styles.deckContainerKeyboard,
-                Platform.OS === 'android' && avoidancePadding > 0 && { paddingBottom: avoidancePadding },
-              ]}
-            >
-              {/* Region 1: Flexible Card Area (Takes remaining space, scales down to fit) */}
-              <TouchableWithoutFeedback
-                disabled={!isKeyboardOpen}
-                onPress={Keyboard.dismiss}
-                accessible={false}
-              >
-                <View
-                  style={[styles.cardRegion, isKeyboardOpen && styles.cardRegionKeyboard]}
-                  onLayout={(e) => {
-                    const h = e.nativeEvent.layout.height;
-                    if (h > 0 && Math.abs(h - cardRegionHeight) > 2) {
-                      setCardRegionHeight(h);
+            layoutMode === 'double' ? (
+              <View style={styles.doubleGridWrapper}>
+                <FlatList
+                  testID="discovery-double-column-grid"
+                  data={candidates}
+                  keyExtractor={(item, index) => item.user_id || item.id || `candidate-${index}`}
+                  numColumns={2}
+                  columnWrapperStyle={styles.doubleColumnWrapper}
+                  contentContainerStyle={[
+                    styles.doubleGridContent,
+                    { paddingBottom: insets.bottom + 90 },
+                  ]}
+                  showsVerticalScrollIndicator={false}
+                  renderItem={({ item }) => (
+                    <DiscoveryCard
+                      candidate={item}
+                      layout="double"
+                      onLike={() => handleSwipeForCandidate(item, 'LIKE')}
+                      onPass={() => handleSwipeForCandidate(item, 'PASS')}
+                      onSuperSpark={() => handleSwipeForCandidate(item, 'SUPER_SPARK')}
+                    />
+                  )}
+                  onEndReached={() => {
+                    if (hasMoreRef.current && !isLoadingMore) {
+                      prefetchNextBatch();
                     }
                   }}
-                >
-                  <DiscoveryCard
-                    key={activeCandidate.user_id || activeCandidate.id || `candidate-${currentIndex}`}
-                    candidate={activeCandidate}
-                    onLike={() => handleSwipe('LIKE')}
-                    onPass={() => handleSwipe('PASS')}
-                    onSuperSpark={() => handleSwipe('SUPER_SPARK')}
-                    onRewind={handleRewind}
-                    canRewind={canRewind && currentIndex > 0}
-                    isKeyboardOpen={isKeyboardOpen}
-                    maxCardHeight={cardRegionHeight}
-                  />
-                </View>
-              </TouchableWithoutFeedback>
-
-              {/* Region 2: Dedicated Composer Area (Pinned right above keyboard) */}
-              <View ref={composerRef} style={[styles.composerRegion, isKeyboardOpen && styles.composerRegionKeyboard]}>
-                <QuickMessageComposer
-                  recipientId={activeCandidate.user_id || activeCandidate.id}
-                  recipientName={activeCandidate.display_name}
-                  onFocus={() => setIsKeyboardOpen(true)}
-                  onSend={async (note) => {
-                    await handleSwipe('LIKE', note);
-                  }}
+                  onEndReachedThreshold={0.4}
+                  refreshControl={
+                    <RefreshControl
+                      refreshing={isLoading}
+                      onRefresh={loadFeed}
+                      tintColor={colors.gold}
+                      colors={[colors.gold]}
+                    />
+                  }
                 />
               </View>
-            </View>
-            ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
+            ) : (
+              <View
+                style={[
+                  styles.deckContainer,
+                  isKeyboardOpen && styles.deckContainerKeyboard,
+                  Platform.OS === 'android' && avoidancePadding > 0 && { paddingBottom: avoidancePadding },
+                ]}
+              >
+                {/* Region 1: Flexible Card Area (Takes remaining space, scales down to fit) */}
+                <TouchableWithoutFeedback
+                  disabled={!isKeyboardOpen}
+                  onPress={Keyboard.dismiss}
+                  accessible={false}
+                >
+                  <View
+                    style={[styles.cardRegion, isKeyboardOpen && styles.cardRegionKeyboard]}
+                    onLayout={(e) => {
+                      const h = e.nativeEvent.layout.height;
+                      if (h > 0 && Math.abs(h - cardRegionHeight) > 2) {
+                        setCardRegionHeight(h);
+                      }
+                    }}
+                  >
+                    <DiscoveryCard
+                      key={activeCandidate.user_id || activeCandidate.id || 'candidate-active'}
+                      candidate={activeCandidate}
+                      layout="single"
+                      onLike={() => handleSwipe('LIKE')}
+                      onPass={() => handleSwipe('PASS')}
+                      onSuperSpark={() => handleSwipe('SUPER_SPARK')}
+                      onRewind={handleRewind}
+                      canRewind={canRewind && Boolean(lastSwipedCandidate)}
+                      isKeyboardOpen={isKeyboardOpen}
+                      maxCardHeight={cardRegionHeight}
+                    />
+                  </View>
+                </TouchableWithoutFeedback>
+
+                {/* Region 2: Dedicated Composer Area (Pinned right above keyboard) */}
+                <View ref={composerRef} style={[styles.composerRegion, isKeyboardOpen && styles.composerRegionKeyboard]}>
+                  <QuickMessageComposer
+                    recipientId={activeCandidate.user_id || activeCandidate.id}
+                    recipientName={activeCandidate.display_name}
+                    onFocus={() => setIsKeyboardOpen(true)}
+                    quota={messageQuota}
+                    onQuotaPress={() => setShowMessageQuotaModal(true)}
+                    onSend={async (note) => {
+                      await handleSwipe('LIKE', note);
+                    }}
+                  />
+                </View>
+              </View>
+            )
+          ) : emptyStateReason === 'PHOTO_MINIMUM_REQUIRED' ? (
           <View style={styles.lockContainer} testID="photo-minimum-feed-state">
             <View style={[styles.lockIconCircle, { backgroundColor: colors.card, borderColor: colors.gold }]}>
               <Text style={styles.lockIcon}>📸</Text>
@@ -715,6 +986,18 @@ export default function DiscoveryScreen() {
         onUpgradePress={() => router.push('/(tabs)/membership')}
       />
 
+      {/* Discovery Message Quota & Rewarded Ad Modal */}
+      <DiscoveryMessageQuotaModal
+        visible={showMessageQuotaModal}
+        userId={profile?.id || 'aura_user'}
+        quota={messageQuota}
+        onClose={() => setShowMessageQuotaModal(false)}
+        onQuotaUpdated={(updated) => {
+          setMessageQuota(updated);
+        }}
+        onUpgradePress={() => router.push('/(tabs)/membership')}
+      />
+
       {/* Discovery Preferences & Dealbreakers Filter Sheet */}
       <DiscoveryFilterModal
         visible={showFilterModal}
@@ -752,6 +1035,65 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: spacing.sm,
+  },
+  layoutToggleBarContainer: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'flex-start',
+    paddingHorizontal: spacing.md,
+    paddingTop: 6,
+    paddingBottom: 2,
+  },
+  layoutSegmentedContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    height: 36,
+    borderRadius: 18,
+    borderWidth: 1,
+    padding: 2,
+    marginRight: 2,
+  },
+  layoutSegmentBtn: {
+    width: 30,
+    height: 30,
+    borderRadius: 15,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  layoutSegmentBtnActive: {
+    backgroundColor: 'rgba(212, 175, 55, 0.16)',
+    borderWidth: 1,
+    borderColor: 'rgba(212, 175, 55, 0.4)',
+  },
+  layoutIconSingle: {
+    width: 13,
+    height: 14,
+    borderWidth: 1.5,
+    borderRadius: 2,
+  },
+  layoutIconGrid: {
+    width: 13,
+    height: 13,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignContent: 'space-between',
+  },
+  layoutGridDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 1,
+  },
+  doubleGridWrapper: {
+    flex: 1,
+    width: '100%',
+  },
+  doubleColumnWrapper: {
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.md,
+  },
+  doubleGridContent: {
+    paddingTop: spacing.sm,
   },
   searchButton: {
     width: 36,

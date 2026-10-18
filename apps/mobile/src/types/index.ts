@@ -110,6 +110,7 @@ export interface DiscoveryCandidate {
   compatibility_score: number;
   is_verified: boolean;
   relationship_structure?: string;
+  is_online?: boolean;
 }
 
 export type MessageRequestStatus = 'PENDING' | 'ACCEPTED' | 'DECLINED' | 'BLOCKED';
@@ -278,4 +279,28 @@ export interface ApiErrorEnvelope {
     timestamp?: string;
     fields?: Record<string, string>;
   };
+}
+
+export interface DiscoveryMessagingQuota {
+  user_id: string;
+  is_unlimited: boolean;
+  is_in_trial?: boolean;
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  trial_days_remaining?: number;
+  is_locked: boolean;
+  can_unlock_with_ad: boolean;
+  ad_unlocked: boolean;
+  trial_initiations_remaining?: number;
+  trial_initiations_allowed?: number;
+  trial_distinct_messaged?: number;
+  post_trial_free_remaining?: number;
+  post_trial_bonus_remaining?: number;
+  free_quota: number;
+  free_slots_remaining: number;
+  distinct_profiles_messaged: number;
+  cooldown_active: boolean;
+  cooldown_seconds_remaining: number;
+  cooldown_expires_at?: string;
+  bonus_slots_remaining: number;
 }

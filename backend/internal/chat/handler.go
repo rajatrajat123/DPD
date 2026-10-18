@@ -223,7 +223,7 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Cannot message: match is unmatched, blocked, or inactive"))
 	case errors.Is(err, ErrEmptyMessage), errors.Is(err, ErrMessageTooLong), errors.Is(err, ErrInvalidClientMessageID):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
-	case errors.Is(err, ErrRateLimitExceeded):
+	case errors.Is(err, ErrRateLimitExceeded), errors.Is(err, discovery.ErrDiscoveryMessageQuotaLocked):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, apperror.CodeRateLimitExceeded, err.Error()))
 	default:
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))

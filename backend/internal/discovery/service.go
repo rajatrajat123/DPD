@@ -153,6 +153,9 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 		_ = s.repo.SaveUserLikesUnlockState(ctx, state)
 	}
 
+	// Unlock discovery messaging quota ad bonus if active cooldown
+	_, _ = s.repo.UnlockDiscoveryMessageAdBonus(ctx, reward.UserID)
+
 	reward.RewardAmount = grantAmount
 	return reward, nil
 }
@@ -864,6 +867,10 @@ func (s *Service) SendMessageRequest(ctx context.Context, senderID string, req S
 		return nil, errors.New("cannot send message request to yourself")
 	}
 
+	if err := s.repo.ConsumeDiscoveryMessageSlot(ctx, senderID, req.RecipientUserID); err != nil {
+		return nil, err
+	}
+
 	mr := &MessageRequest{
 		ID:              generateUUIDv4(),
 		SenderUserID:    senderID,
@@ -877,6 +884,63 @@ func (s *Service) SendMessageRequest(ctx context.Context, senderID string, req S
 		return nil, err
 	}
 	return mr, nil
+}
+
+func (s *Service) GetDiscoveryMessageQuota(ctx context.Context, userID string) (*DiscoveryMessagingQuota, error) {
+	quota, err := s.repo.GetDiscoveryMessageQuota(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if !quota.IsUnlimited && s.entitlementChecker != nil {
+		if s.entitlementChecker(ctx, userID, "UNLIMITED_SWIPES") {
+			quota.IsUnlimited = true
+			quota.IsInTrial = true
+			quota.IsLocked = false
+			quota.CooldownActive = false
+			quota.CanUnlockWithAd = false
+			quota.TrialInitiationsRemaining = 9999
+			quota.TrialInitiationsAllowed = 9999
+			quota.FreeQuota = 9999
+			quota.FreeSlotsRemaining = 9999
+		}
+	}
+	return quota, nil
+}
+
+func (s *Service) UnlockDiscoveryMessageAdBonus(ctx context.Context, userID string, rawQuery string, transactionID string) (*DiscoveryMessagingQuota, error) {
+	rawQuery = strings.TrimSpace(rawQuery)
+	transactionID = strings.TrimSpace(transactionID)
+
+	if rawQuery != "" {
+		reward, err := s.verifier.VerifyCallback(rawQuery)
+		if err != nil {
+			return nil, err
+		}
+		if reward.UserID != "" && reward.UserID != userID {
+			return nil, errors.New("reward user_id does not match authenticated user")
+		}
+		if err := s.repo.RecordAdReward(ctx, userID, reward.TransactionID, 2); err != nil {
+			return nil, err
+		}
+	} else if transactionID != "" {
+		if !s.verifier.isTestSignatureAllowed() {
+			return nil, errors.New("raw_query cryptographic SSV callback is required")
+		}
+		if err := s.repo.RecordAdReward(ctx, userID, transactionID, 2); err != nil {
+			return nil, err
+		}
+	} else {
+		if s.verifier.isTestSignatureAllowed() {
+			txID := fmt.Sprintf("test-ad-%s-%d", userID, time.Now().UnixNano())
+			if err := s.repo.RecordAdReward(ctx, userID, txID, 2); err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, errors.New("raw_query cryptographic SSV callback is required")
+		}
+	}
+
+	return s.repo.UnlockDiscoveryMessageAdBonus(ctx, userID)
 }
 
 func (s *Service) ListMessageRequests(ctx context.Context, userID, folder string) ([]MessageRequest, error) {

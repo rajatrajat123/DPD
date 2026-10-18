@@ -28,6 +28,8 @@ interface DiscoveryCardProps {
   canRewind?: boolean;
   isKeyboardOpen?: boolean;
   maxCardHeight?: number;
+  layout?: 'single' | 'double';
+  onPressProfile?: () => void;
 }
 
 export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
@@ -39,25 +41,22 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   canRewind = false,
   isKeyboardOpen = false,
   maxCardHeight = 0,
+  layout = 'single',
+  onPressProfile,
 }) => {
   const { colors } = useTheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
   const cardWidth = Math.min(windowWidth - spacing.md * 2, 420);
 
-  // Responsively scale photo height:
-  // When keyboard is closed: scale to fit between top header/banners and bottom tab bar (~400-450px)
-  // When keyboard is open: scale down (~120-190px) to strictly budget within the measured card region
+  // Stable card dimensions & aspect ratio:
+  // Maintain the profile card's intended 1.34 portrait aspect ratio and dimensions consistently,
+  // preventing the card photo from collapsing, compressing into a thin sliver, or jumping when the keyboard opens.
   const normalMaxPhotoHeight = Math.max(windowHeight - 330, 260);
-  const actionsBarBudget = isKeyboardOpen ? 46 : 74;
-  const keyboardBudgetedHeight = maxCardHeight > 0
-    ? Math.max(maxCardHeight - actionsBarBudget - 12, 100)
-    : Math.max(windowHeight - 560, 140);
-
   const photoHeight = Math.min(
-    cardWidth * (isKeyboardOpen ? 0.75 : 1.34),
-    isKeyboardOpen ? keyboardBudgetedHeight : normalMaxPhotoHeight,
-    isKeyboardOpen ? keyboardBudgetedHeight : windowHeight * 0.52,
-    isKeyboardOpen ? 310 : 450
+    cardWidth * 1.34,
+    normalMaxPhotoHeight,
+    windowHeight * 0.52,
+    450
   );
 
   const [photoIndex, setPhotoIndex] = useState(0);
@@ -172,6 +171,325 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     }
   };
 
+  if (layout === 'double') {
+    const doubleCardWidth = Math.floor((windowWidth - spacing.md * 2 - spacing.sm) / 2);
+    const doublePhotoHeight = Math.min(doubleCardWidth * 1.25, 210);
+
+    return (
+      <View style={[styles.doubleCardWrapper, { width: doubleCardWidth }]}>
+        <TouchableOpacity
+          style={[styles.doubleCard, { backgroundColor: colors.card, borderColor: colors.border }]}
+          activeOpacity={0.88}
+          onPress={() => {
+            if (onPressProfile) {
+              onPressProfile();
+            } else {
+              setShowDetailsModal(true);
+            }
+          }}
+          testID={`discovery-double-card-${candidate.user_id || candidate.id}`}
+        >
+          {/* Photo Container */}
+          <View style={[styles.doublePhotoContainer, { height: doublePhotoHeight, backgroundColor: colors.backgroundElevated }]}>
+            {currentPhoto.url && !imageError ? (
+              <Image
+                source={{ uri: currentPhoto.url }}
+                style={styles.doublePhoto}
+                resizeMode="cover"
+                onError={() => setImageError(true)}
+              />
+            ) : (
+              <View style={[styles.doublePlaceholderPhoto, { backgroundColor: colors.cardMuted }]}>
+                <Text style={[styles.doublePlaceholderMonogram, { color: colors.gold }]}>
+                  {candidate.display_name ? candidate.display_name.charAt(0).toUpperCase() : 'A'}
+                </Text>
+              </View>
+            )}
+
+            {/* Top Badges */}
+            <View style={styles.doubleTopBadgesRow} pointerEvents="none">
+              {/* Online Indicator */}
+              <View style={styles.doubleOnlineBadge}>
+                <View style={[styles.doubleOnlineDot, { backgroundColor: colors.emerald || '#10B981' }]} />
+                <Text style={styles.doubleOnlineText}>Active</Text>
+              </View>
+
+              {/* 18+ Verified Badge */}
+              {candidate.is_verified && (
+                <View
+                  style={[
+                    styles.doubleVerifiedPill,
+                    {
+                      backgroundColor: colors.emeraldMuted || 'rgba(16, 185, 129, 0.15)',
+                      borderColor: colors.emerald || '#10B981',
+                    },
+                  ]}
+                >
+                  <Text style={[styles.doubleVerifiedText, { color: colors.emerald || '#10B981' }]}>✓ 18+</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Distance Overlay at bottom of photo */}
+            {candidate.distance_bucket_km > 0 && (
+              <View style={styles.doubleBottomBadge}>
+                <Text style={styles.doubleBottomBadgeText}>📍 {candidate.distance_bucket_km} km</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Details Section */}
+          <View style={styles.doubleDetails}>
+            <View style={styles.doubleNameRow}>
+              <Text style={[styles.doubleName, { color: colors.text }]} numberOfLines={1}>
+                {candidate.display_name}
+              </Text>
+              <Text style={[styles.doubleAge, { color: colors.gold }]}> {candidate.age}</Text>
+            </View>
+
+            {/* Compatibility or Pronouns/Bio */}
+            {candidate.compatibility_score > 0 ? (
+              <Text style={[styles.doubleScoreText, { color: colors.gold }]} numberOfLines={1}>
+                ★ {candidate.compatibility_score}% Compatibility
+              </Text>
+            ) : candidate.pronouns && candidate.pronouns.length > 0 ? (
+              <Text style={[styles.doubleSubtitle, { color: colors.textMuted }]} numberOfLines={1}>
+                {candidate.pronouns.join('/')}
+              </Text>
+            ) : candidate.bio ? (
+              <Text style={[styles.doubleSubtitle, { color: colors.textMuted }]} numberOfLines={1}>
+                {candidate.bio}
+              </Text>
+            ) : (
+              <Text style={[styles.doubleSubtitle, { color: colors.textMuted }]} numberOfLines={1}>
+                Aura Member
+              </Text>
+            )}
+
+            {/* Compact Action Buttons */}
+            <View style={[styles.doubleActionsRow, { borderTopColor: colors.borderSubtle }]}>
+              <TouchableOpacity
+                style={[
+                  styles.doubleActionBtn,
+                  styles.doublePassBtn,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.border },
+                ]}
+                onPress={onPass}
+                activeOpacity={0.7}
+                testID={`double-pass-${candidate.user_id || candidate.id}`}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Pass"
+              >
+                <Text style={[styles.doublePassIcon, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.doubleActionBtn,
+                  styles.doubleSuperSparkBtn,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.gold },
+                ]}
+                onPress={onSuperSpark}
+                activeOpacity={0.7}
+                testID={`double-superspark-${candidate.user_id || candidate.id}`}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Super Spark"
+              >
+                <Text style={[styles.doubleSuperSparkIcon, { color: colors.gold }]}>★</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.doubleActionBtn,
+                  styles.doubleLikeBtn,
+                  {
+                    backgroundColor: colors.cardElevated,
+                    borderColor: colors.like || colors.gold,
+                  },
+                ]}
+                onPress={onLike}
+                activeOpacity={0.7}
+                testID={`double-like-${candidate.user_id || candidate.id}`}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityLabel="Like"
+              >
+                <Text style={[styles.doubleLikeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+
+        {/* Profile Details Modal */}
+        <Modal
+          visible={showDetailsModal}
+          animationType="slide"
+          presentationStyle="pageSheet"
+          onRequestClose={() => setShowDetailsModal(false)}
+        >
+          <SafeAreaView style={[styles.modalContainer, { backgroundColor: colors.background }]}>
+            <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
+              <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
+              <TouchableOpacity
+                style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+                onPress={() => setShowDetailsModal(false)}
+                activeOpacity={0.7}
+              >
+                <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
+
+            <ScrollView contentContainerStyle={styles.modalScroll}>
+              <View style={[styles.modalImageContainer, { backgroundColor: colors.card }]}>
+                {photos[0]?.url ? (
+                  <Image source={{ uri: photos[0].url }} style={styles.modalImage} resizeMode="cover" />
+                ) : (
+                  <View style={[styles.modalImage, styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
+                    <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>{candidate.display_name.charAt(0)}</Text>
+                  </View>
+                )}
+              </View>
+
+              <View style={styles.modalBody}>
+                <View style={styles.modalNameRow}>
+                  <Text style={[styles.modalName, { color: colors.text }]}>{candidate.display_name},</Text>
+                  <Text style={[styles.modalAge, { color: colors.gold }]}> {candidate.age}</Text>
+                  {candidate.is_verified && (
+                    <View style={styles.modalVerifiedBadge}>
+                      <Text style={styles.modalVerifiedText}>✓ 18+ Verified</Text>
+                    </View>
+                  )}
+                </View>
+
+                {candidate.distance_bucket_km > 0 && (
+                  <Text style={styles.modalDistance}>📍 {candidate.distance_bucket_km} km away</Text>
+                )}
+
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>About</Text>
+                  <Text style={[styles.modalBioText, { color: colors.text }]}>
+                    {candidate.bio || 'This member has not written a bio yet.'}
+                  </Text>
+                </View>
+
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Details & Lifestyle</Text>
+                  <View style={styles.tagsRow}>
+                    {candidate.compatibility_score > 0 && (
+                      <View style={[styles.scoreTag, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                        <Text style={[styles.scoreTagText, { color: colors.gold }]}>★ {candidate.compatibility_score}% Compatibility</Text>
+                      </View>
+                    )}
+                    {Boolean(candidate.height_cm) && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>📏 {candidate.height_cm} cm</Text>
+                      </View>
+                    )}
+                    {Boolean(candidate.weight_kg) && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>⚖️ {candidate.weight_kg} kg</Text>
+                      </View>
+                    )}
+                    {candidate.pronouns && candidate.pronouns.length > 0 && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.pronouns.join('/')}</Text>
+                      </View>
+                    )}
+                    {candidate.gender_identities && candidate.gender_identities.length > 0 && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.gender_identities.join(', ')}</Text>
+                      </View>
+                    )}
+                    {candidate.sexual_orientations && candidate.sexual_orientations.length > 0 && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.sexual_orientations.join(', ')}</Text>
+                      </View>
+                    )}
+                    {candidate.relationship_structure && (
+                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                        <Text style={[styles.tagText, { color: colors.textMuted }]}>🔗 {candidate.relationship_structure}</Text>
+                      </View>
+                    )}
+                    {candidate.smoking_preference && (
+                      <View
+                        style={[
+                          styles.tag,
+                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                          candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.tagText,
+                            { color: colors.textMuted },
+                            candidate.smoking_preference === 'NON_SMOKER' ? styles.tagTextNonSmoker : null,
+                          ]}
+                        >
+                          🚭 {candidate.smoking_preference === 'NON_SMOKER' ? 'Non-smoker' : 'Smoker'}
+                        </Text>
+                      </View>
+                    )}
+                  </View>
+                </View>
+
+                {photos.length > 1 && (
+                  <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                    <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Gallery</Text>
+                    <View style={styles.galleryGrid}>
+                      {photos.slice(1).map((p, idx) => (
+                        <View key={p.id || idx} style={[styles.galleryItem, { backgroundColor: colors.cardElevated }]}>
+                          <Image source={{ uri: p.url }} style={styles.galleryPhoto} resizeMode="cover" />
+                        </View>
+                      ))}
+                    </View>
+                  </View>
+                )}
+              </View>
+            </ScrollView>
+
+            <View style={[styles.modalActions, { backgroundColor: colors.card, borderTopColor: colors.borderSubtle }]}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.passBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onPass();
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.passIcon, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.superSparkBtn, { backgroundColor: colors.cardElevated, borderColor: colors.gold }]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onSuperSpark();
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.superSparkIcon, { color: colors.gold }]}>★</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.actionBtn,
+                  styles.likeBtn,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.like || colors.gold, shadowColor: colors.like || colors.gold },
+                ]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onLike();
+                }}
+                activeOpacity={0.8}
+              >
+                <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        </Modal>
+      </View>
+    );
+  }
+
   return (
     <View style={[styles.cardContainer, isKeyboardOpen && styles.cardContainerKeyboard]}>
       <Animated.View
@@ -222,11 +540,19 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
           {/* Top Info Badges */}
           <View style={styles.topBadgesRow} pointerEvents="box-none">
-            {candidate.distance_bucket_km > 0 ? (
-              <View style={[styles.badgePill, { borderColor: colors.border }]}>
-                <Text style={styles.badgePillText}>📍 {candidate.distance_bucket_km} km away</Text>
+            <View style={styles.badgeLeftGroup}>
+              {/* Online Indicator */}
+              <View style={styles.onlineBadge}>
+                <View style={[styles.onlineDot, { backgroundColor: colors.emerald || '#10B981' }]} />
+                <Text style={styles.onlineBadgeText}>Active</Text>
               </View>
-            ) : <View />}
+
+              {candidate.distance_bucket_km > 0 ? (
+                <View style={[styles.badgePill, { borderColor: colors.border }]}>
+                  <Text style={styles.badgePillText}>📍 {candidate.distance_bucket_km} km away</Text>
+                </View>
+              ) : null}
+            </View>
 
             {candidate.is_verified && (
               <View style={styles.verifiedPill}>
@@ -1066,5 +1392,191 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(9, 10, 14, 0.95)',
     borderTopWidth: 1,
     borderTopColor: colors.borderSubtle,
+  },
+  badgeLeftGroup: {
+    flexDirection: 'row',
+    gap: 6,
+    alignItems: 'center',
+  },
+  onlineBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(9, 10, 14, 0.72)',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 4,
+    borderRadius: borderRadius.full,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    gap: 4,
+  },
+  onlineDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  onlineBadgeText: {
+    ...typography.caption,
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  doubleCardWrapper: {
+    marginBottom: spacing.md,
+  },
+  doubleCard: {
+    borderRadius: 16,
+    overflow: 'hidden',
+    borderWidth: 1,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  doublePhotoContainer: {
+    width: '100%',
+    position: 'relative',
+  },
+  doublePhoto: {
+    width: '100%',
+    height: '100%',
+  },
+  doublePlaceholderPhoto: {
+    width: '100%',
+    height: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  doublePlaceholderMonogram: {
+    fontSize: 42,
+    fontWeight: '700',
+  },
+  doubleTopBadgesRow: {
+    position: 'absolute',
+    top: 8,
+    left: 8,
+    right: 8,
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    zIndex: 5,
+  },
+  doubleOnlineBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(9, 10, 14, 0.72)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    gap: 4,
+  },
+  doubleOnlineDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  doubleOnlineText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  doubleVerifiedPill: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+  },
+  doubleVerifiedText: {
+    fontSize: 10,
+    fontWeight: '700',
+  },
+  doubleBottomBadge: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    backgroundColor: 'rgba(9, 10, 14, 0.75)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  doubleBottomBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: colors.textMuted,
+  },
+  doubleDetails: {
+    padding: 8,
+  },
+  doubleNameRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+  },
+  doubleName: {
+    fontSize: 14,
+    fontWeight: '700',
+    flexShrink: 1,
+  },
+  doubleAge: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  doubleScoreText: {
+    fontSize: 11,
+    fontWeight: '600',
+    marginTop: 2,
+  },
+  doubleSubtitle: {
+    fontSize: 11,
+    marginTop: 2,
+  },
+  doubleActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-around',
+    alignItems: 'center',
+    marginTop: 8,
+    paddingTop: 6,
+    borderTopWidth: 1,
+  },
+  doubleActionBtn: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  doublePassBtn: {},
+  doubleSuperSparkBtn: {},
+  doubleLikeBtn: {},
+  doublePassIcon: {
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  doubleSuperSparkIcon: {
+    fontSize: 13,
+  },
+  doubleLikeIcon: {
+    fontSize: 15,
+  },
+  galleryGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.sm,
+    marginTop: spacing.xs,
+  },
+  galleryItem: {
+    width: (SCREEN_WIDTH - spacing.lg * 2 - spacing.sm) / 2,
+    height: 160,
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+  },
+  galleryPhoto: {
+    width: '100%',
+    height: '100%',
   },
 });
