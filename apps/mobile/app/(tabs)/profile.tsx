@@ -20,7 +20,8 @@ import { useAuth } from '../../src/context/AuthContext';
 import { mediaUploader } from '../../src/services/media/mediaUploader';
 import { authService } from '../../src/services/auth/authService';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
-import { SmokingPreference, ProfilePhoto } from '../../src/types';
+import { SmokingPreference, ProfilePhoto, DiscoveryPreferences } from '../../src/types';
+import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
 import {
   GENDER_IDENTITY_OPTIONS,
   LOOKING_FOR_OPTIONS,
@@ -111,6 +112,64 @@ function buildFinalList(selected: string[], customText: string): string[] {
   return list;
 }
 
+function formatGendersSummary(genders?: string[]): string {
+  if (!genders || genders.length === 0) return 'All genders';
+  return genders
+    .map((g) => {
+      if (g.startsWith('custom:')) return g.slice(7);
+      const opt = LOOKING_FOR_OPTIONS.find((o) => o.value === g);
+      return opt ? opt.label : g;
+    })
+    .join(', ');
+}
+
+function formatOrientationsSummary(orientations?: string[]): string {
+  if (!orientations || orientations.length === 0) return 'Any orientation';
+  return orientations
+    .map((o) => {
+      if (o.startsWith('custom:')) return o.slice(7);
+      const opt = SEXUAL_ORIENTATION_OPTIONS.find((item) => item.value === o);
+      return opt ? opt.label : o;
+    })
+    .join(', ');
+}
+
+function formatIntentsSummary(intents?: string[]): string {
+  if (!intents || intents.length === 0) return 'Any intention';
+  const labelMap: Record<string, string> = {
+    dating: 'Dating',
+    long_term: 'Long-term',
+    friendship: 'Friendship',
+    casual: 'Casual / Hookups',
+    exploring: 'Open to Explore',
+  };
+  return intents
+    .map((intent) => {
+      if (labelMap[intent]) return labelMap[intent];
+      const opt = RELATIONSHIP_INTENT_OPTIONS.find((o) => o.value === intent);
+      return opt ? opt.label : intent;
+    })
+    .join(', ');
+}
+
+function formatHeightBoundsSummary(minCm?: number, maxCm?: number): string {
+  const hasMin = minCm !== undefined && minCm > 90;
+  const hasMax = maxCm !== undefined && maxCm < 250;
+  if (!hasMin && !hasMax) return 'Any height';
+  if (hasMin && hasMax) return `${minCm} cm – ${maxCm} cm`;
+  if (hasMin) return `Min ${minCm} cm`;
+  return `Max ${maxCm} cm`;
+}
+
+function formatWeightBoundsSummary(minKg?: number, maxKg?: number): string {
+  const hasMin = minKg !== undefined && minKg > 30;
+  const hasMax = maxKg !== undefined && maxKg < 300;
+  if (!hasMin && !hasMax) return 'Any weight';
+  if (hasMin && hasMax) return `${minKg} kg – ${maxKg} kg`;
+  if (hasMin) return `Min ${minKg} kg`;
+  return `Max ${maxKg} kg`;
+}
+
 export default function ProfileScreen() {
   const router = useRouter();
   const { profile, refreshProfile } = useAuth();
@@ -175,16 +234,29 @@ export default function ProfileScreen() {
   const [relationshipStructure, setRelationshipStructure] = useState<string>(profile?.relationship_structure || 'MONOGAMOUS');
   const [selectedInterests, setSelectedInterests] = useState<string[]>(profile?.interests || []);
 
-  // Section E: Relationship Preferences & Dealbreakers
-  const [selectedLookingFor, setSelectedLookingFor] = useState<string[]>([]);
-  const [customLookingForText, setCustomLookingForText] = useState('');
-  const [nonSmokerDealbreaker, setNonSmokerDealbreaker] = useState<boolean>(profile?.non_smoker_dealbreaker ?? true);
-  const [requireVerifiedDealbreaker, setRequireVerifiedDealbreaker] = useState<boolean>(
-    profile?.dealbreakers?.require_verified ?? profile?.visibility_settings?.require_verified ?? false
-  );
-  const [requireMonogamousDealbreaker, setRequireMonogamousDealbreaker] = useState<boolean>(
-    profile?.dealbreakers?.require_monogamous ?? profile?.visibility_settings?.require_monogamous ?? false
-  );
+  // Section E: Discovery Preferences Summary (Partner search preferences owned by Discovery filters)
+  const [discoveryPrefs, setDiscoveryPrefs] = useState<DiscoveryPreferences | null>(null);
+  const [isLoadingPrefs, setIsLoadingPrefs] = useState<boolean>(true);
+  const [prefsError, setPrefsError] = useState<string | null>(null);
+  const [isFilterModalOpen, setIsFilterModalOpen] = useState<boolean>(false);
+
+  const loadDiscoveryPrefs = useCallback(async () => {
+    setIsLoadingPrefs(true);
+    setPrefsError(null);
+    try {
+      const prefs = await discoveryService.getPreferences();
+      setDiscoveryPrefs(prefs);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not load discovery preferences.';
+      setPrefsError(msg);
+    } finally {
+      setIsLoadingPrefs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadDiscoveryPrefs();
+  }, [loadDiscoveryPrefs]);
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -226,7 +298,6 @@ export default function ProfileScreen() {
       setDisplayName(profile.display_name || '');
       setBio(profile.bio || '');
       setSmokingPref(profile.smoking_preference || 'NON_SMOKER');
-      setNonSmokerDealbreaker(profile.non_smoker_dealbreaker ?? true);
 
       const parsedPronouns = parseInitialTaxonomy(profile.pronouns);
       setSelectedPronouns(parsedPronouns.selected.length > 0 ? parsedPronouns.selected : ['they/them']);
@@ -235,11 +306,6 @@ export default function ProfileScreen() {
       const parsedGenders = parseInitialTaxonomy(profile.gender_identities);
       setSelectedGenders(parsedGenders.selected);
       setCustomGenderText(parsedGenders.customText);
-
-      const lookingList = profile.preferred_genders || profile.looking_for;
-      const parsedLooking = parseInitialTaxonomy(lookingList);
-      setSelectedLookingFor(parsedLooking.selected);
-      setCustomLookingForText(parsedLooking.customText);
 
       const parsedOrientations = parseInitialTaxonomy(profile.sexual_orientations);
       setSelectedOrientations(parsedOrientations.selected);
@@ -256,17 +322,6 @@ export default function ProfileScreen() {
       }
       if (profile.interests && Array.isArray(profile.interests)) {
         setSelectedInterests(profile.interests);
-      }
-      if (profile.dealbreakers?.require_verified !== undefined) {
-        setRequireVerifiedDealbreaker(Boolean(profile.dealbreakers.require_verified));
-      } else if (profile.visibility_settings?.require_verified !== undefined) {
-        setRequireVerifiedDealbreaker(Boolean(profile.visibility_settings.require_verified));
-      }
-
-      if (profile.dealbreakers?.require_monogamous !== undefined) {
-        setRequireMonogamousDealbreaker(Boolean(profile.dealbreakers.require_monogamous));
-      } else if (profile.visibility_settings?.require_monogamous !== undefined) {
-        setRequireMonogamousDealbreaker(Boolean(profile.visibility_settings.require_monogamous));
       }
 
       if (profile.height_cm) {
@@ -299,12 +354,6 @@ export default function ProfileScreen() {
   const toggleGender = (g: string) => {
     setSelectedGenders((prev) =>
       prev.includes(g) ? prev.filter((item) => item !== g) : [...prev, g]
-    );
-  };
-
-  const toggleLookingFor = (item: string) => {
-    setSelectedLookingFor((prev) =>
-      prev.includes(item) ? prev.filter((i) => i !== item) : [...prev, item]
     );
   };
 
@@ -445,15 +494,10 @@ export default function ProfileScreen() {
   const handleSaveChanges = async () => {
     const finalPronouns = buildFinalList(selectedPronouns, customPronounText);
     const finalGenders = buildFinalList(selectedGenders, customGenderText);
-    const finalLookingFor = buildFinalList(selectedLookingFor, customLookingForText);
     const finalOrientations = buildFinalList(selectedOrientations, customOrientationText);
 
     if (finalGenders.length === 0) {
       Alert.alert('Gender Identity Required', 'Please select at least one gender identity under "I am a".');
-      return;
-    }
-    if (finalLookingFor.length === 0) {
-      Alert.alert('Gender Preference Required', 'Please select who you are looking for under "Looking for".');
       return;
     }
     if (finalOrientations.length === 0) {
@@ -533,21 +577,15 @@ export default function ProfileScreen() {
         }
       }
 
-      let profileUpdateSuccess = false;
-      let preferencesUpdateSuccess = false;
-
-      // 2. Update profile details on backend using exact DTO fields
+      // 2. Update profile details on backend using exact DTO fields (Personal attributes only)
       await authService.updateMyProfile({
         display_name: displayName.trim(),
         bio: bio.trim(),
         pronouns: finalPronouns,
         gender_identities: finalGenders,
-        preferred_genders: finalLookingFor,
-        looking_for: finalLookingFor,
         sexual_orientations: finalOrientations,
         smoking_habit: smokingPref,
         smoking_preference: smokingPref,
-        non_smoker_dealbreaker: nonSmokerDealbreaker,
         drinking_habit: drinkingHabit,
         relationship_intents: selectedIntents,
         relationship_structure: relationshipStructure,
@@ -556,27 +594,8 @@ export default function ProfileScreen() {
         weight_kg: finalWeightKg,
         visibility_settings: cleanVisibility,
       });
-      profileUpdateSuccess = true;
 
-      // 3. Update discovery preferences dealbreaker and preferred genders on backend
-      try {
-        await discoveryService.updatePreferences({
-          preferred_genders: finalLookingFor,
-          preferred_intents: selectedIntents,
-          dealbreakers: {
-            non_smoker_only: nonSmokerDealbreaker,
-            require_verified: requireVerifiedDealbreaker,
-            require_monogamous: requireMonogamousDealbreaker,
-          },
-        });
-        preferencesUpdateSuccess = true;
-      } catch (prefErr) {
-        if (__DEV__) {
-          console.warn('[ProfileSave] Preferences sync warning:', prefErr);
-        }
-      }
-
-      // 4. Re-affirm active theme persistence
+      // 3. Re-affirm active theme persistence
       try {
         await setTheme(themeId);
       } catch {
@@ -584,12 +603,7 @@ export default function ProfileScreen() {
       }
 
       await refreshProfile();
-
-      if (profileUpdateSuccess && preferencesUpdateSuccess) {
-        Alert.alert('Profile Saved', 'Your profile and discovery preferences have been updated.');
-      } else if (profileUpdateSuccess) {
-        Alert.alert('Profile Saved', 'Your profile details were updated, but matching preferences could not be synchronized.');
-      }
+      Alert.alert('Profile Saved', 'Your profile details have been updated.');
     } catch (err: unknown) {
       if (__DEV__) {
         console.error('[ProfileSave] Failed:', err);
@@ -1905,7 +1919,7 @@ export default function ProfileScreen() {
           )}
         </View>
 
-        {/* SECTION E: Relationship Preferences */}
+        {/* SECTION E: Discovery Preferences Summary */}
         <View
           testID="section-relationship-preferences"
           style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}
@@ -1916,37 +1930,50 @@ export default function ProfileScreen() {
             onPress={() => toggleSection('preferences')}
             activeOpacity={0.8}
             accessibilityRole="button"
-            accessibilityLabel="Relationship Preferences section"
+            accessibilityLabel="Discovery Preferences section"
             accessibilityState={{ expanded: expandedSections.preferences }}
           >
             <View style={styles.accordionTitleCol}>
               <View style={styles.accordionTitleRow}>
                 <Text style={styles.accordionIcon}>🎯</Text>
                 <Text style={[styles.sectionTitle, { color: colors.text }]}>
-                  Relationship Preferences
+                  Discovery Preferences
                 </Text>
                 <View
                   style={[
                     styles.accordionBadge,
                     {
-                      backgroundColor:
-                        selectedLookingFor.length > 0 ? `${colors.emerald}20` : `${colors.amber}20`,
-                      borderColor: selectedLookingFor.length > 0 ? colors.emerald : colors.amber,
+                      backgroundColor: isLoadingPrefs
+                        ? `${colors.gold}20`
+                        : prefsError
+                        ? `${colors.ruby}20`
+                        : `${colors.emerald}20`,
+                      borderColor: isLoadingPrefs
+                        ? colors.gold
+                        : prefsError
+                        ? colors.ruby
+                        : colors.emerald,
                     },
                   ]}
                 >
                   <Text
                     style={[
                       styles.accordionBadgeText,
-                      { color: selectedLookingFor.length > 0 ? colors.emerald : colors.amber },
+                      {
+                        color: isLoadingPrefs
+                          ? colors.gold
+                          : prefsError
+                          ? colors.ruby
+                          : colors.emerald,
+                      },
                     ]}
                   >
-                    {selectedLookingFor.length > 0 ? '✓ Configured' : 'Required'}
+                    {isLoadingPrefs ? 'Loading...' : prefsError ? 'Error' : '✓ Active Filters'}
                   </Text>
                 </View>
               </View>
               <Text style={styles.accordionDesc}>
-                Discovery partner preferences & hard dealbreaker filters
+                Partner search preferences & deck filters managed via Discovery Filters
               </Text>
             </View>
             <View
@@ -1963,120 +1990,237 @@ export default function ProfileScreen() {
 
           {expandedSections.preferences && (
             <View style={[styles.accordionBody, { borderTopColor: colors.borderSubtle }]}>
-              {/* Looking for — Gender preferences */}
-              <View style={styles.inputGroup}>
-                <Text style={[styles.sectionHeaderLabel, { color: colors.text }]}>
-                  Looking for — Gender preferences
-                </Text>
-                <Text style={[styles.sectionSubLabel, { color: colors.gold }]}>
-                  Select all that apply
-                </Text>
-                <View style={styles.chipsRow}>
-                  {LOOKING_FOR_OPTIONS.map((item) => {
-                    const selected = selectedLookingFor.includes(item.value);
-                    return (
-                      <TouchableOpacity
-                        key={item.value}
+              {isLoadingPrefs ? (
+                <View style={styles.prefLoadingState} testID="discovery-prefs-loading">
+                  <ActivityIndicator size="small" color={colors.gold} />
+                  <Text style={[styles.prefLoadingText, { color: colors.textMuted }]}>
+                    Loading discovery preferences...
+                  </Text>
+                </View>
+              ) : prefsError && !discoveryPrefs ? (
+                <View style={styles.prefErrorState} testID="discovery-prefs-error">
+                  <Text style={[styles.prefErrorText, { color: colors.ruby }]}>
+                    ⚠️ {prefsError}
+                  </Text>
+                  <TouchableOpacity
+                    style={[styles.prefRetryBtn, { borderColor: colors.gold }]}
+                    onPress={loadDiscoveryPrefs}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.prefRetryBtnText, { color: colors.gold }]}>Retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : discoveryPrefs ? (
+                <View style={styles.prefSummaryContainer} testID="discovery-prefs-summary">
+                  <View
+                    style={[
+                      styles.noticeBox,
+                      { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
+                    ]}
+                  >
+                    <Text style={[styles.noticeBoxText, { color: colors.textMuted }]}>
+                      ✨ Discovery partner preferences and hard dealbreakers filter your discovery deck. Personal profile details (such as your own gender, habits, and intentions) are configured in the sections above.
+                    </Text>
+                  </View>
+
+                  {/* Summary Rows */}
+                  <View style={styles.prefSummaryGrid}>
+                    {/* Looking For Genders */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Looking For</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]} numberOfLines={2}>
+                        {formatGendersSummary(discoveryPrefs.preferred_genders)}
+                      </Text>
+                    </View>
+
+                    {/* Age Range */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Age Range</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]}>
+                        {discoveryPrefs.min_age ?? 18} – {discoveryPrefs.max_age ?? 99} years
+                      </Text>
+                    </View>
+
+                    {/* Maximum Distance */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Maximum Distance</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]}>
+                        {Math.round((discoveryPrefs.max_distance_km ?? 50) / 1.60934)} miles ({discoveryPrefs.max_distance_km ?? 50} km)
+                      </Text>
+                    </View>
+
+                    {/* Preferred Orientations */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Sexual Orientations</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]} numberOfLines={2}>
+                        {formatOrientationsSummary(discoveryPrefs.preferred_orientations)}
+                      </Text>
+                    </View>
+
+                    {/* Preferred Intentions */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Relationship Intentions</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]} numberOfLines={2}>
+                        {formatIntentsSummary(discoveryPrefs.preferred_intents)}
+                      </Text>
+                    </View>
+
+                    {/* Height Filter Bounds */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Height Range</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]}>
+                        {formatHeightBoundsSummary(discoveryPrefs.min_height_cm, discoveryPrefs.max_height_cm)}
+                      </Text>
+                    </View>
+
+                    {/* Weight Filter Bounds */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Weight Range</Text>
+                      <Text style={[styles.prefSummaryValue, { color: colors.text }]}>
+                        {formatWeightBoundsSummary(discoveryPrefs.min_weight_kg, discoveryPrefs.max_weight_kg)}
+                      </Text>
+                    </View>
+
+                    {/* Non-Smoker Dealbreaker */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Non-Smoker Dealbreaker</Text>
+                      <View
                         style={[
-                          styles.chip,
-                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                          selected && [
-                            styles.chipSelected,
-                            { borderColor: colors.gold, backgroundColor: colors.goldMuted },
-                          ],
+                          styles.prefStatusBadge,
+                          {
+                            backgroundColor: Boolean(
+                              discoveryPrefs.dealbreaker_non_smoker ||
+                                discoveryPrefs.dealbreakers?.non_smoker_only
+                            )
+                              ? `${colors.emerald}20`
+                              : `${colors.border}`,
+                          },
                         ]}
-                        onPress={() => toggleLookingFor(item.value)}
-                        activeOpacity={0.7}
                       >
                         <Text
                           style={[
-                            styles.chipText,
-                            { color: colors.textMuted },
-                            selected && [styles.chipTextSelected, { color: colors.gold }],
+                            styles.prefStatusBadgeText,
+                            {
+                              color: Boolean(
+                                discoveryPrefs.dealbreaker_non_smoker ||
+                                  discoveryPrefs.dealbreakers?.non_smoker_only
+                              )
+                                ? colors.emerald
+                                : colors.textMuted,
+                            },
                           ]}
                         >
-                          {item.label}
+                          {Boolean(
+                            discoveryPrefs.dealbreaker_non_smoker ||
+                              discoveryPrefs.dealbreakers?.non_smoker_only
+                          )
+                            ? 'Strictly Required'
+                            : 'Off'}
                         </Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-                {selectedLookingFor.includes('custom') && (
-                  <TextInput
-                    style={[
-                      styles.input,
-                      styles.customInput,
-                      {
-                        backgroundColor: colors.backgroundElevated,
-                        borderColor: colors.border,
-                        color: colors.text,
-                      },
-                    ]}
-                    value={customLookingForText}
-                    onChangeText={setCustomLookingForText}
-                    placeholder="Enter gender preference..."
-                    placeholderTextColor={colors.textSubtle}
-                    maxLength={40}
-                  />
-                )}
-              </View>
+                      </View>
+                    </View>
 
-              {/* Dealbreaker: Non-Smoker */}
-              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
-                <View style={styles.switchTextContainer}>
-                  <Text style={[styles.switchTitle, { color: colors.text }]}>
-                    Non-Smoker Dealbreaker
-                  </Text>
-                  <Text style={styles.switchDesc}>
-                    Strictly exclude smokers from your discovery deck. Aura never compromises this rule.
-                  </Text>
-                </View>
-                <Switch
-                  value={nonSmokerDealbreaker}
-                  onValueChange={setNonSmokerDealbreaker}
-                  trackColor={{ false: colors.border, true: colors.gold }}
-                  thumbColor={colors.text}
-                />
-              </View>
+                    {/* 18+ Verified Dealbreaker */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: colors.borderSubtle }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>18+ Verified Only</Text>
+                      <View
+                        style={[
+                          styles.prefStatusBadge,
+                          {
+                            backgroundColor: Boolean(
+                              discoveryPrefs.verified_only ||
+                                discoveryPrefs.verified_profiles_only ||
+                                discoveryPrefs.dealbreakers?.require_verified
+                            )
+                              ? `${colors.emerald}20`
+                              : `${colors.border}`,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.prefStatusBadgeText,
+                            {
+                              color: Boolean(
+                                discoveryPrefs.verified_only ||
+                                  discoveryPrefs.verified_profiles_only ||
+                                  discoveryPrefs.dealbreakers?.require_verified
+                              )
+                                ? colors.emerald
+                                : colors.textMuted,
+                            },
+                          ]}
+                        >
+                          {Boolean(
+                            discoveryPrefs.verified_only ||
+                              discoveryPrefs.verified_profiles_only ||
+                              discoveryPrefs.dealbreakers?.require_verified
+                          )
+                            ? 'Strictly Required'
+                            : 'Off'}
+                        </Text>
+                      </View>
+                    </View>
 
-              {/* Dealbreaker: 18+ Age Verified Required */}
-              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
-                <View style={styles.switchTextContainer}>
-                  <Text style={[styles.switchTitle, { color: colors.text }]}>
-                    18+ Verified Only
-                  </Text>
-                  <Text style={styles.switchDesc}>
-                    Only receive discovery likes and deck cards from members verified 18+.
-                  </Text>
-                </View>
-                <Switch
-                  value={requireVerifiedDealbreaker}
-                  onValueChange={setRequireVerifiedDealbreaker}
-                  trackColor={{ false: colors.border, true: colors.gold }}
-                  thumbColor={colors.text}
-                />
-              </View>
+                    {/* Monogamous Intentions Dealbreaker */}
+                    <View style={[styles.prefSummaryRow, { borderBottomColor: 'transparent' }]}>
+                      <Text style={[styles.prefSummaryLabel, { color: colors.textMuted }]}>Monogamous Intentions</Text>
+                      <View
+                        style={[
+                          styles.prefStatusBadge,
+                          {
+                            backgroundColor: Boolean(discoveryPrefs.dealbreakers?.require_monogamous)
+                              ? `${colors.emerald}20`
+                              : `${colors.border}`,
+                          },
+                        ]}
+                      >
+                        <Text
+                          style={[
+                            styles.prefStatusBadgeText,
+                            {
+                              color: Boolean(discoveryPrefs.dealbreakers?.require_monogamous)
+                                ? colors.emerald
+                                : colors.textMuted,
+                            },
+                          ]}
+                        >
+                          {Boolean(discoveryPrefs.dealbreakers?.require_monogamous)
+                            ? 'Strictly Required'
+                            : 'Off'}
+                        </Text>
+                      </View>
+                    </View>
+                  </View>
 
-              {/* Dealbreaker: Monogamous Required */}
-              <View style={[styles.switchRow, { borderTopColor: colors.borderSubtle }]}>
-                <View style={styles.switchTextContainer}>
-                  <Text style={[styles.switchTitle, { color: colors.text }]}>
-                    Monogamous Intentions Only
-                  </Text>
-                  <Text style={styles.switchDesc}>
-                    Filter out non-monogamous profiles from your discovery deck matches.
-                  </Text>
+                  {/* Edit Filters Button */}
+                  <TouchableOpacity
+                    testID="edit-discovery-filters-btn"
+                    style={[styles.editFiltersBtn, { backgroundColor: colors.gold }]}
+                    onPress={() => setIsFilterModalOpen(true)}
+                    activeOpacity={0.8}
+                    accessibilityRole="button"
+                    accessibilityLabel="Edit Discovery Filters"
+                  >
+                    <Text style={[styles.editFiltersBtnText, { color: colors.textInverse }]}>
+                      Edit Filters
+                    </Text>
+                  </TouchableOpacity>
                 </View>
-                <Switch
-                  value={requireMonogamousDealbreaker}
-                  onValueChange={setRequireMonogamousDealbreaker}
-                  trackColor={{ false: colors.border, true: colors.gold }}
-                  thumbColor={colors.text}
-                />
-              </View>
+              ) : null}
             </View>
           )}
         </View>
+
+        {/* Discovery Filter Modal Integration */}
+        <DiscoveryFilterModal
+          visible={isFilterModalOpen}
+          onClose={() => setIsFilterModalOpen(false)}
+          onApply={(updated) => {
+            setDiscoveryPrefs(updated);
+          }}
+          currentPreferences={discoveryPrefs}
+        />
 
         {/* App Appearance & Themes Section */}
         <View style={[styles.sectionCard, { backgroundColor: colors.card, borderColor: colors.border }]}>
@@ -3355,6 +3499,84 @@ const styles = StyleSheet.create({
     ...typography.caption,
     fontSize: 11,
     lineHeight: 15,
+  },
+  prefLoadingState: {
+    paddingVertical: spacing.xl,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  prefLoadingText: {
+    ...typography.caption,
+    fontSize: 12,
+  },
+  prefErrorState: {
+    paddingVertical: spacing.lg,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.md,
+  },
+  prefErrorText: {
+    ...typography.bodySmall,
+    textAlign: 'center',
+  },
+  prefRetryBtn: {
+    borderWidth: 1,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.xs,
+    borderRadius: borderRadius.md,
+  },
+  prefRetryBtnText: {
+    ...typography.bodySmall,
+    fontWeight: '600',
+  },
+  prefSummaryContainer: {
+    gap: spacing.md,
+  },
+  prefSummaryGrid: {
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+  },
+  prefSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: spacing.sm,
+    borderBottomWidth: 1,
+    gap: spacing.md,
+  },
+  prefSummaryLabel: {
+    ...typography.bodySmall,
+    fontWeight: '500',
+    flex: 1,
+  },
+  prefSummaryValue: {
+    ...typography.bodySmall,
+    fontWeight: '600',
+    textAlign: 'right',
+    flex: 1.2,
+  },
+  prefStatusBadge: {
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: borderRadius.sm,
+  },
+  prefStatusBadgeText: {
+    ...typography.caption,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  editFiltersBtn: {
+    marginTop: spacing.sm,
+    paddingVertical: spacing.sm + 2,
+    borderRadius: borderRadius.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editFiltersBtnText: {
+    ...typography.body,
+    fontWeight: '700',
+    letterSpacing: 0.5,
   },
 });
 
