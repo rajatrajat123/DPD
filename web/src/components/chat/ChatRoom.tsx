@@ -35,9 +35,8 @@ export function ChatRoom({
 
   const partner = conversation.partner;
   const partnerName = partner?.display_name || 'Match';
-  const partnerPhoto =
-    partner?.avatar_url ||
-    'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160&h=160&fit=crop';
+  const partnerPhoto = partner?.avatar_url || '';
+  const [photoError, setPhotoError] = useState(false);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -282,17 +281,39 @@ export function ChatRoom({
           )}
 
           <div style={{ position: 'relative', width: '42px', height: '42px', flexShrink: 0 }}>
-            <img
-              src={partnerPhoto}
-              alt={partnerName}
-              style={{
-                width: '100%',
-                height: '100%',
-                borderRadius: '50%',
-                objectFit: 'cover',
-                border: '1px solid var(--border-gold)',
-              }}
-            />
+            {partnerPhoto && !photoError ? (
+              <img
+                src={partnerPhoto}
+                alt={partnerName}
+                onError={() => setPhotoError(true)}
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  borderRadius: '50%',
+                  objectFit: 'cover',
+                  border: '1px solid var(--border-gold)',
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: '100%',
+                  height: '100%',
+                  borderRadius: '50%',
+                  backgroundColor: 'var(--aura-charcoal)',
+                  border: '1px solid var(--border-gold)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: 'var(--aura-gold)',
+                  fontWeight: 700,
+                  fontSize: '1.1rem',
+                  fontFamily: 'var(--font-serif)',
+                }}
+              >
+                {partnerName ? partnerName.charAt(0).toUpperCase() : 'M'}
+              </div>
+            )}
             {partner?.is_online && (
               <div
                 style={{

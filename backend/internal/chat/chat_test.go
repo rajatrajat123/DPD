@@ -793,3 +793,75 @@ func TestChat_PhotoAndVideoAttachmentSharingAndAuthorization(t *testing.T) {
 	}
 }
 
+func TestChat_ListConversationsEnrichesAvatarURL(t *testing.T) {
+	ctx := context.Background()
+	svc, chatRepo, identRepo, _ := setupTestChatSystem(t)
+
+	tempDir := t.TempDir()
+	storage, err := media.NewFileStorageEngine(tempDir, "test-media-signing-secret-key-32b-long")
+	if err != nil {
+		t.Fatalf("failed to create storage engine: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	processor := media.NewProcessor(logger, 15*1024*1024, 100*1024*1024)
+	mediaRepo := media.NewMemoryRepository()
+	mediaSvc := media.NewService(mediaRepo, storage, processor, logger)
+	t.Cleanup(func() {
+		mediaSvc.Stop()
+	})
+	svc.SetMediaService(mediaSvc)
+
+	userA := "usr_avatar_a"
+	userB := "usr_avatar_b"
+	createTestUser(t, identRepo, userA, "userA@example.com", "Alice")
+	createTestUser(t, identRepo, userB, "userB@example.com", "Bob")
+
+	match := &discovery.Match{
+		ID:         "match_avatar_1",
+		UserLowID:  userA,
+		UserHighID: userB,
+		Status:     discovery.MatchActive,
+		MatchedAt:  time.Now().UTC(),
+	}
+	chatRepo.SeedMatch(match)
+	conv, err := chatRepo.GetOrCreateConversationForMatch(ctx, match.ID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+
+	// Upload gallery photo for UserB
+	testJPEG := media.GenerateTestJPEG(640, 800)
+	_, err = mediaSvc.UploadDirect(
+		ctx,
+		userB,
+		string(media.PurposeProfileGallery),
+		string(media.MediaTypeImage),
+		"bob_avatar.jpg",
+		bytes.NewReader(testJPEG),
+		int64(len(testJPEG)),
+		"idemp_avatar_b",
+	)
+	if err != nil {
+		t.Fatalf("failed to upload avatar for UserB: %v", err)
+	}
+
+	// UserA lists conversations: partner (UserB) must have non-empty AvatarURL
+	convs, err := svc.ListConversations(ctx, userA)
+	if err != nil {
+		t.Fatalf("ListConversations failed: %v", err)
+	}
+	if len(convs) != 1 {
+		t.Fatalf("expected 1 conversation, got %d", len(convs))
+	}
+	if convs[0].ID != conv.ID {
+		t.Errorf("expected conv ID %s, got %s", conv.ID, convs[0].ID)
+	}
+	if convs[0].Partner == nil {
+		t.Fatalf("expected non-nil Partner")
+	}
+	if convs[0].Partner.AvatarURL == "" {
+		t.Errorf("expected partner AvatarURL to be enriched from gallery media, got empty string")
+	}
+}
+
+

@@ -124,13 +124,22 @@ export function MatchesList() {
             {matches.length} {matches.length === 1 ? 'mutual connection' : 'mutual connections'}
           </p>
         </div>
-        <Link
-          href="/app/discovery"
-          className="btn-gold"
-          style={{ textDecoration: 'none', fontSize: '0.88rem', padding: '0.55rem 1.1rem' }}
-        >
-          ✨ Explore Discovery
-        </Link>
+        <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+          <Link
+            href="/app/likes"
+            className="btn-secondary"
+            style={{ textDecoration: 'none', fontSize: '0.88rem', padding: '0.55rem 1.1rem' }}
+          >
+            ⭐ Likes You
+          </Link>
+          <Link
+            href="/app/discovery"
+            className="btn-gold"
+            style={{ textDecoration: 'none', fontSize: '0.88rem', padding: '0.55rem 1.1rem' }}
+          >
+            ✨ Explore Discovery
+          </Link>
+        </div>
       </div>
 
       {error && (
@@ -191,7 +200,8 @@ export function MatchesList() {
             const photoUrl =
               profile?.photos?.[0]?.card_url ||
               profile?.photos?.[0]?.thumb_url ||
-              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160&h=160&fit=crop';
+              profile?.avatar_url ||
+              '';
             const displayName = profile?.display_name || 'Aura Member';
             const age = profile?.age;
             const distance = profile?.approximate_distance_km;
@@ -223,13 +233,30 @@ export function MatchesList() {
                       overflow: 'hidden',
                       flexShrink: 0,
                       border: '2px solid var(--border-gold)',
+                      backgroundColor: 'var(--aura-charcoal)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
                     }}
                   >
-                    <img
-                      src={photoUrl}
-                      alt={displayName}
-                      style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-                    />
+                    {photoUrl ? (
+                      <img
+                        src={photoUrl}
+                        alt={displayName}
+                        style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                      />
+                    ) : (
+                      <span
+                        style={{
+                          fontFamily: 'var(--font-serif)',
+                          fontSize: '1.75rem',
+                          color: 'var(--aura-gold)',
+                          fontWeight: 700,
+                        }}
+                      >
+                        {displayName ? displayName.charAt(0).toUpperCase() : 'A'}
+                      </span>
+                    )}
                   </div>
 
                   {/* Profile Details */}

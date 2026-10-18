@@ -394,11 +394,73 @@ export default function DiscoveryScreen() {
     }
   };
 
+  const [superLikeToast, setSuperLikeToast] = useState<string | null>(null);
+  const showSuperLikeToast = useCallback((msg: string = 'Super Like sent ⭐') => {
+    setSuperLikeToast(msg);
+    setTimeout(() => {
+      setSuperLikeToast(null);
+    }, 3200);
+  }, []);
+
+  const handleSuperSpark = async (candidate: DiscoveryCandidate): Promise<SwipeResponse> => {
+    if (allowance && !allowance.isUnlimited && allowance.remainingLikes <= 0) {
+      setShowQuotaModal(true);
+      throw new Error('SWIPE_LIMIT_REACHED');
+    }
+
+    isSwipingRef.current = true;
+    try {
+      const res = await discoveryService.swipe(candidate.user_id, 'SUPER_SPARK');
+      if (allowance && !allowance.isUnlimited) {
+        setAllowance((prev) =>
+          prev ? { ...prev, remainingLikes: Math.max(0, prev.remainingLikes - 1) } : null
+        );
+      }
+      return res;
+    } catch (err: unknown) {
+      isSwipingRef.current = false;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (errMsg.includes('SWIPE_LIMIT_REACHED') || errMsg.includes('limit reached')) {
+        setShowQuotaModal(true);
+      } else {
+        Alert.alert('Super Like Failed', 'Could not deliver Super Like. Please try again.');
+      }
+      throw err;
+    }
+  };
+
+  const handleSuperSparkComplete = (candidate: DiscoveryCandidate, res?: SwipeResponse | null) => {
+    isSwipingRef.current = false;
+    setLastSwipedCandidate(candidate);
+    setCandidates((prev) => prev.filter((c) => c.user_id !== candidate.user_id));
+
+    if (candidates.length <= 4) {
+      prefetchNextBatch();
+    }
+
+    if (res?.is_mutual_match) {
+      setMatchedCandidate(candidate);
+      setActiveConversationId(res.conversation_id || null);
+    } else {
+      showSuperLikeToast('Super Like sent ⭐');
+    }
+  };
+
   const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK', introNote?: string) => {
     Keyboard.dismiss();
     if (isSwipingRef.current) return;
     const candidate = candidates[0];
     if (!candidate) return;
+
+    if (direction === 'SUPER_SPARK') {
+      try {
+        const res = await handleSuperSpark(candidate);
+        handleSuperSparkComplete(candidate, res);
+        return res;
+      } catch (err) {
+        return;
+      }
+    }
 
     // Check client-side quota if limited and trying to LIKE
     if (direction !== 'PASS' && allowance && !allowance.isUnlimited && allowance.remainingLikes <= 0) {
@@ -547,6 +609,16 @@ export default function DiscoveryScreen() {
     }
 
     if (isSwipingRef.current) return;
+
+    if (direction === 'SUPER_SPARK') {
+      try {
+        const res = await handleSuperSpark(candidate);
+        handleSuperSparkComplete(candidate, res);
+        return res;
+      } catch (err) {
+        return;
+      }
+    }
 
     if (direction !== 'PASS' && allowance && !allowance.isUnlimited && allowance.remainingLikes <= 0) {
       setShowQuotaModal(true);
@@ -814,6 +886,11 @@ export default function DiscoveryScreen() {
           ) : activeCandidate ? (
             layoutMode === 'double' ? (
               <View style={styles.doubleGridWrapper}>
+                {superLikeToast && (
+                  <View style={styles.superLikeToastPill} pointerEvents="none">
+                    <Text style={styles.superLikeToastText}>{superLikeToast}</Text>
+                  </View>
+                )}
                 <FlatList
                   testID="discovery-double-column-grid"
                   data={candidates}
@@ -831,7 +908,8 @@ export default function DiscoveryScreen() {
                       layout="double"
                       onLike={() => handleSwipeForCandidate(item, 'LIKE')}
                       onPass={() => handleSwipeForCandidate(item, 'PASS')}
-                      onSuperSpark={() => handleSwipeForCandidate(item, 'SUPER_SPARK')}
+                      onSuperSpark={() => handleSuperSpark(item)}
+                      onSuperSparkComplete={(res) => handleSuperSparkComplete(item, res)}
                       messageQuota={messageQuota}
                       onQuotaPress={() => setShowMessageQuotaModal(true)}
                       onQuotaUpdated={setMessageQuota}
@@ -864,6 +942,11 @@ export default function DiscoveryScreen() {
                   Platform.OS === 'android' && avoidancePadding > 0 && { paddingBottom: avoidancePadding },
                 ]}
               >
+                {superLikeToast && (
+                  <View style={styles.superLikeToastPill} pointerEvents="none">
+                    <Text style={styles.superLikeToastText}>{superLikeToast}</Text>
+                  </View>
+                )}
                 {/* Region 1: Flexible Card Area (Takes remaining space, scales down to fit) */}
                 <TouchableWithoutFeedback
                   disabled={!isKeyboardOpen}
@@ -885,7 +968,8 @@ export default function DiscoveryScreen() {
                       layout="single"
                       onLike={() => handleSwipe('LIKE')}
                       onPass={() => handleSwipe('PASS')}
-                      onSuperSpark={() => handleSwipe('SUPER_SPARK')}
+                      onSuperSpark={() => handleSuperSpark(activeCandidate)}
+                      onSuperSparkComplete={(res) => handleSuperSparkComplete(activeCandidate, res)}
                       onRewind={handleRewind}
                       canRewind={canRewind && Boolean(lastSwipedCandidate)}
                       isKeyboardOpen={isKeyboardOpen}
@@ -1399,5 +1483,26 @@ const styles = StyleSheet.create({
     ...typography.button,
     color: colors.text,
     fontWeight: '600',
+  },
+  superLikeToastPill: {
+    position: 'absolute',
+    top: 10,
+    alignSelf: 'center',
+    backgroundColor: colors.gold,
+    paddingHorizontal: 18,
+    paddingVertical: 7,
+    borderRadius: borderRadius.full,
+    zIndex: 999,
+    shadowColor: colors.gold,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 10,
+    elevation: 10,
+  },
+  superLikeToastText: {
+    color: colors.textInverse || '#0D0E12',
+    fontWeight: '700',
+    fontSize: 13,
+    letterSpacing: 0.3,
   },
 });

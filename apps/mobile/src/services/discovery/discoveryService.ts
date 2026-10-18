@@ -38,6 +38,17 @@ export function normalizeCandidate(raw: any): DiscoveryCandidate {
     };
   });
 
+  if (photos.length === 0 && (raw.avatar_url || raw.photo_url)) {
+    const fallbackUrl = raw.avatar_url || raw.photo_url;
+    photos.push({
+      id: 'photo_avatar',
+      url: buildMediaUrl(fallbackUrl),
+      thumb_url: buildMediaUrl(fallbackUrl),
+      is_primary: true,
+      order: 0,
+    });
+  }
+
   return {
     id: raw.user_id || raw.id,
     user_id: raw.user_id || raw.id,

@@ -272,6 +272,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, reqID string, err er
 		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Match not found or access denied"))
 	case errors.Is(err, ErrSelfSwipe):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Cannot swipe on yourself"))
+	case errors.Is(err, ErrSelfFavourite):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Cannot add yourself to favourites"))
 	case errors.Is(err, ErrCandidateBlocked):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Interaction between users is blocked"))
 	case errors.Is(err, ErrSwipePhotoMinimumRequired):
@@ -609,3 +611,87 @@ func (h *Handler) UnlockMessagingQuotaAd(w http.ResponseWriter, r *http.Request)
 
 	apperror.WriteJSON(w, http.StatusOK, quota)
 }
+
+// Favourites handles GET, POST, and DELETE /api/v1/discovery/favourites.
+func (h *Handler) Favourites(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		resp, err := h.svc.ListFavourites(r.Context(), authUser.ID)
+		if err != nil {
+			h.handleServiceError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, resp)
+
+	case http.MethodPost:
+		var req AddFavouriteRequest
+		if err := validator.DecodeAndValidate(w, r, 16*1024, &req); err != nil {
+			apperror.WriteError(w, reqID, err)
+			return
+		}
+		resp, err := h.svc.AddFavourite(r.Context(), authUser.ID, req.TargetUserID)
+		if err != nil {
+			h.handleServiceError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusCreated, resp)
+
+	case http.MethodDelete:
+		targetID := r.URL.Query().Get("target_user_id")
+		if targetID == "" {
+			var req AddFavouriteRequest
+			_ = validator.DecodeAndValidate(w, r, 16*1024, &req)
+			targetID = req.TargetUserID
+		}
+		if targetID == "" {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "target_user_id is required"))
+			return
+		}
+		resp, err := h.svc.RemoveFavourite(r.Context(), authUser.ID, targetID)
+		if err != nil {
+			h.handleServiceError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, resp)
+
+	default:
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+	}
+}
+
+// FavouriteDetail handles DELETE /api/v1/discovery/favourites/{id}.
+func (h *Handler) FavouriteDetail(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	targetID := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/v1/discovery/favourites/"), "/")
+	if targetID == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Target user ID required in path"))
+		return
+	}
+
+	if r.Method != http.MethodDelete && r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only DELETE is allowed"))
+		return
+	}
+
+	resp, err := h.svc.RemoveFavourite(r.Context(), authUser.ID, targetID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, resp)
+}
+

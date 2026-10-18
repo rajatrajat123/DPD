@@ -127,6 +127,36 @@ export function normalizeConversation(raw: any, currentUserId?: string): Convers
   };
 }
 
+export function normalizeMessageRequest(raw: any): MessageRequest {
+  const sender = raw.sender || {};
+  const senderId = raw.sender_user_id || raw.sender_id || sender.user_id || '';
+  const senderName = raw.sender_name || sender.display_name || 'Member';
+  const rawAvatar = raw.sender_avatar || sender.avatar_url || '';
+  const avatarUrl = rawAvatar ? buildMediaUrl(rawAvatar) : undefined;
+
+  return {
+    id: raw.id,
+    sender_user_id: senderId,
+    recipient_user_id: raw.recipient_user_id,
+    body: raw.body || '',
+    status: raw.status || 'PENDING',
+    created_at: raw.created_at || new Date().toISOString(),
+    responded_at: raw.responded_at,
+    sender_id: senderId,
+    sender_name: senderName,
+    sender_age: raw.sender_age ?? sender.age,
+    sender_avatar: avatarUrl,
+    sender_is_verified: Boolean(raw.sender_is_verified || sender.is_photo_verified),
+    sender: {
+      user_id: senderId,
+      display_name: senderName,
+      age: raw.sender_age ?? sender.age ?? 0,
+      avatar_url: avatarUrl,
+      is_photo_verified: Boolean(raw.sender_is_verified || sender.is_photo_verified),
+    },
+  };
+}
+
 /**
  * Authoritatively counts unread incoming messages from a message history list.
  * Strictly excludes messages sent by the current user and messages already marked as read.
@@ -517,8 +547,8 @@ export const chatService = {
    * Fetches incoming pending message requests
    */
   async getMessageRequests(): Promise<MessageRequest[]> {
-    const res = await api.get<{ requests: MessageRequest[] }>('/api/v1/message-requests');
-    return res.requests || [];
+    const res = await api.get<{ requests: any[] }>('/api/v1/message-requests');
+    return (res.requests || []).map(normalizeMessageRequest);
   },
 
   /**

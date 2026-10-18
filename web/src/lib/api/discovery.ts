@@ -27,6 +27,10 @@ export interface DiscoveryCandidate {
   is_photo_verified: boolean;
   compatibility_score: number;
   photos: PhotoCard[];
+  avatar_url?: string;
+  has_super_liked?: boolean;
+  is_super_like?: boolean;
+  is_favourite?: boolean;
 }
 
 export interface DiscoveryFeedResponse {
@@ -218,3 +222,172 @@ export async function blockUser(targetUserId: string, reason?: string): Promise<
 
   return res.json();
 }
+
+export interface IncomingLikeCard {
+  user_id: string;
+  display_name: string;
+  age: number;
+  bio: string;
+  approximate_distance_km: number;
+  is_photo_verified: boolean;
+  is_revealed: boolean;
+  liked_at: string;
+  photos: PhotoCard[];
+  blurred_photo_url?: string;
+  interaction_type?: string;
+  is_super_like?: boolean;
+}
+
+export interface LikesYouResponse {
+  total_likes: number;
+  revealed_count: number;
+  unrevealed_count: number;
+  free_reveals_remaining: number;
+  bonus_reveals_remaining: number;
+  cooldown_active: boolean;
+  cooldown_remaining_seconds: number;
+  rewarded_ad_enabled: boolean;
+  likes: IncomingLikeCard[];
+}
+
+export interface FavouriteProfileCard {
+  user_id: string;
+  display_name: string;
+  age: number;
+  bio: string;
+  photo_url?: string;
+  added_at: string;
+}
+
+export interface ListFavouritesResponse {
+  count: number;
+  favourites: FavouriteProfileCard[];
+}
+
+export interface AddFavouriteResponse {
+  success: boolean;
+  target_user_id: string;
+  added_at: string;
+}
+
+export interface RemoveFavouriteResponse {
+  success: boolean;
+  target_user_id: string;
+}
+
+/**
+ * Fetch incoming likes for the current member.
+ */
+export async function getLikesYou(limit: number = 20, offset: number = 0): Promise<LikesYouResponse> {
+  const params = new URLSearchParams({ limit: limit.toString(), offset: offset.toString() });
+  const res = await fetch(`/api/v1/discovery/likes-you?${params.toString()}`, {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    const message = errorBody?.error?.message || errorBody?.message || `Failed to fetch incoming likes (${res.status})`;
+    const err = new Error(message);
+    (err as any).status = res.status;
+    (err as any).code = errorBody?.error?.code || errorBody?.code;
+    throw err;
+  }
+
+  return res.json();
+}
+
+/**
+ * Reveal an incoming like.
+ */
+export async function revealLike(targetUserId: string): Promise<{ status: string; card: IncomingLikeCard; source: string }> {
+  const res = await fetch('/api/v1/discovery/likes-you/reveal', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ target_user_id: targetUserId }),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    const message = errorBody?.error?.message || errorBody?.message || `Failed to reveal profile (${res.status})`;
+    const err = new Error(message);
+    (err as any).status = res.status;
+    (err as any).code = errorBody?.error?.code || errorBody?.code;
+    throw err;
+  }
+
+  return res.json();
+}
+
+/**
+ * List all saved favourite profiles.
+ */
+export async function getFavourites(): Promise<ListFavouritesResponse> {
+  const res = await fetch('/api/v1/discovery/favourites', {
+    method: 'GET',
+    headers: { 'Accept': 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    const message = errorBody?.error?.message || errorBody?.message || `Failed to fetch favourites (${res.status})`;
+    const err = new Error(message);
+    (err as any).status = res.status;
+    (err as any).code = errorBody?.error?.code || errorBody?.code;
+    throw err;
+  }
+
+  return res.json();
+}
+
+/**
+ * Add a profile to favourites.
+ */
+export async function addFavourite(targetUserId: string): Promise<AddFavouriteResponse> {
+  const res = await fetch('/api/v1/discovery/favourites', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({ target_user_id: targetUserId }),
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    const message = errorBody?.error?.message || errorBody?.message || `Failed to save favourite (${res.status})`;
+    const err = new Error(message);
+    (err as any).status = res.status;
+    (err as any).code = errorBody?.error?.code || errorBody?.code;
+    throw err;
+  }
+
+  return res.json();
+}
+
+/**
+ * Remove a profile from favourites.
+ */
+export async function removeFavourite(targetUserId: string): Promise<RemoveFavouriteResponse> {
+  const res = await fetch(`/api/v1/discovery/favourites/${encodeURIComponent(targetUserId)}`, {
+    method: 'DELETE',
+    headers: { 'Accept': 'application/json' },
+  });
+
+  if (!res.ok) {
+    const errorBody = await res.json().catch(() => ({}));
+    const message = errorBody?.error?.message || errorBody?.message || `Failed to remove favourite (${res.status})`;
+    const err = new Error(message);
+    (err as any).status = res.status;
+    (err as any).code = errorBody?.error?.code || errorBody?.code;
+    throw err;
+  }
+
+  return res.json();
+}
+

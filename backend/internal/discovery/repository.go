@@ -38,6 +38,7 @@ var (
 	ErrDiscoveryMessageAwaitingReply     = errors.New("cannot send another message until recipient replies")
 	ErrDiscoveryMessageUsageLimitReached = errors.New("You've reached your usage limit. Please try again in 3 hours.")
 	ErrDiscoveryMessageMaxAdsReached     = errors.New("maximum rewarded ad unlocks reached for current cycle")
+	ErrSelfFavourite                     = errors.New("cannot add yourself to favourites")
 )
 
 type Repository interface {
@@ -70,6 +71,10 @@ type Repository interface {
 	CheckCanSendChat(ctx context.Context, senderID, recipientID string) error
 	HasRecipientReplied(ctx context.Context, senderID, recipientID string) (bool, error)
 	RecordRecipientReply(ctx context.Context, senderID, recipientID string) error
+	AddFavourite(ctx context.Context, userID, targetUserID string) (*UserFavourite, error)
+	RemoveFavourite(ctx context.Context, userID, targetUserID string) error
+	ListFavourites(ctx context.Context, userID string) ([]FavouriteProfileCard, error)
+	IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error)
 }
 
 type UserLikesUnlockState struct {
@@ -112,6 +117,7 @@ type MemoryRepository struct {
 	messageRequests  map[string]*MessageRequest
 	messagingQuotas  map[string]*DiscoveryMessageQuotaState
 	repliedPairs     map[string]bool // key: senderID:recipientID
+	favourites       map[string]map[string]time.Time // key: userID -> targetUserID -> addedAt
 }
 
 type swipeRecord struct {
@@ -153,6 +159,7 @@ func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 		messageRequests:  make(map[string]*MessageRequest),
 		messagingQuotas:  make(map[string]*DiscoveryMessageQuotaState),
 		repliedPairs:     make(map[string]bool),
+		favourites:       make(map[string]map[string]time.Time),
 	}
 }
 
@@ -1177,12 +1184,17 @@ func (m *MemoryRepository) GetIncomingLikes(ctx context.Context, userID string, 
 				IsRevealed:            isRevealed,
 				LikedAt:               s.CreatedAt,
 				Photos:                []PhotoCard{},
+				InteractionType:       string(s.Direction),
+				IsSuperLike:           s.Direction == SwipeSuperSpark,
 			}
 			incoming = append(incoming, card)
 		}
 	}
 
 	sort.Slice(incoming, func(i, j int) bool {
+		if incoming[i].IsSuperLike != incoming[j].IsSuperLike {
+			return incoming[i].IsSuperLike
+		}
 		return incoming[i].LikedAt.After(incoming[j].LikedAt)
 	})
 
@@ -1812,6 +1824,106 @@ func (m *MemoryRepository) UnlockDiscoveryMessageAdBonus(_ context.Context, acto
 	state.UpdatedAt = now
 	return evaluateMessageQuotaState(state, now, false), nil
 }
+
+func (m *MemoryRepository) AddFavourite(ctx context.Context, userID, targetUserID string) (*UserFavourite, error) {
+	if userID == targetUserID {
+		return nil, ErrSelfFavourite
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Check if blocked
+	k1 := fmt.Sprintf("%s:%s", userID, targetUserID)
+	k2 := fmt.Sprintf("%s:%s", targetUserID, userID)
+	if _, b1 := m.blocks[k1]; b1 {
+		return nil, ErrCandidateBlocked
+	}
+	if _, b2 := m.blocks[k2]; b2 {
+		return nil, ErrCandidateBlocked
+	}
+
+	if m.favourites[userID] == nil {
+		m.favourites[userID] = make(map[string]time.Time)
+	}
+	now := time.Now().UTC()
+	m.favourites[userID][targetUserID] = now
+
+	return &UserFavourite{
+		ID:           uuid.New().String(),
+		UserID:       userID,
+		TargetUserID: targetUserID,
+		CreatedAt:    now,
+	}, nil
+}
+
+func (m *MemoryRepository) RemoveFavourite(ctx context.Context, userID, targetUserID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.favourites[userID] != nil {
+		delete(m.favourites[userID], targetUserID)
+	}
+	return nil
+}
+
+func (m *MemoryRepository) ListFavourites(ctx context.Context, userID string) ([]FavouriteProfileCard, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	userFavs, ok := m.favourites[userID]
+	if !ok || len(userFavs) == 0 {
+		return []FavouriteProfileCard{}, nil
+	}
+
+	var results []FavouriteProfileCard
+	for targetID, addedAt := range userFavs {
+		// Check blocks
+		k1 := fmt.Sprintf("%s:%s", userID, targetID)
+		k2 := fmt.Sprintf("%s:%s", targetID, userID)
+		if _, b1 := m.blocks[k1]; b1 {
+			continue
+		}
+		if _, b2 := m.blocks[k2]; b2 {
+			continue
+		}
+
+		prof, err := m.identRepo.GetProfile(ctx, targetID)
+		if err != nil || prof == nil {
+			continue
+		}
+
+		age := calculateAge(prof.Birthdate, time.Now().UTC())
+		results = append(results, FavouriteProfileCard{
+			UserID:      targetID,
+			DisplayName: prof.DisplayName,
+			Age:         age,
+			Bio:         prof.Bio,
+			PhotoURL:    "",
+			AddedAt:     addedAt,
+		})
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].AddedAt.After(results[j].AddedAt)
+	})
+
+	if results == nil {
+		results = []FavouriteProfileCard{}
+	}
+	return results, nil
+}
+
+func (m *MemoryRepository) IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.favourites[userID] == nil {
+		return false, nil
+	}
+	_, ok := m.favourites[userID][targetUserID]
+	return ok, nil
+}
+
 
 // PostgresRepository implements production discovery and matching using PostGIS and SQL transactions.
 type PostgresRepository struct {
@@ -2885,7 +2997,8 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 		SELECT s.actor_user_id, p.display_name, p.birthdate,
 		       COALESCE(p.bio, ''), p.is_photo_verified, s.created_at,
 		       COALESCE(lr.source, ''),
-		       COALESCE(ROUND(ST_Distance(pl_actor.coordinates, pl_target.coordinates) / 1000.0)::INT, 1) AS distance_km
+		       COALESCE(ROUND(ST_Distance(pl_actor.coordinates, pl_target.coordinates) / 1000.0)::INT, 1) AS distance_km,
+		       s.direction
 		FROM swipes s
 		JOIN profiles p ON p.user_id = s.actor_user_id
 		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
@@ -2897,7 +3010,7 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
 			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
 		  )
-		ORDER BY s.created_at DESC
+		ORDER BY CASE WHEN s.direction = 'SUPER_SPARK' THEN 0 ELSE 1 END ASC, s.created_at DESC
 		LIMIT $2 OFFSET $3
 	`
 
@@ -2909,13 +3022,13 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 
 	var likes []IncomingLikeCard
 	for rows.Next() {
-		var actorID, displayName, bio, source string
+		var actorID, displayName, bio, source, direction string
 		var birthdate, createdAt time.Time
 		var isVerified bool
 		var dist int
 
 		if err := rows.Scan(
-			&actorID, &displayName, &birthdate, &bio, &isVerified, &createdAt, &source, &dist,
+			&actorID, &displayName, &birthdate, &bio, &isVerified, &createdAt, &source, &dist, &direction,
 		); err != nil {
 			return nil, 0, err
 		}
@@ -2935,6 +3048,8 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 			IsRevealed:            source != "",
 			LikedAt:               createdAt,
 			Photos:                []PhotoCard{},
+			InteractionType:       direction,
+			IsSuperLike:           direction == "SUPER_SPARK",
 		}
 		likes = append(likes, card)
 	}
@@ -3681,6 +3796,100 @@ func (p *PostgresRepository) CheckCanSendChat(ctx context.Context, senderID, rec
 
 	return nil
 }
+
+func (p *PostgresRepository) AddFavourite(ctx context.Context, userID, targetUserID string) (*UserFavourite, error) {
+	if userID == targetUserID {
+		return nil, ErrSelfFavourite
+	}
+
+	// Check if blocked
+	blocked, err := p.IsBlocked(ctx, userID, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+	if blocked {
+		return nil, ErrCandidateBlocked
+	}
+
+	query := `
+		INSERT INTO user_favourites (id, user_id, target_user_id, created_at)
+		VALUES (gen_random_uuid(), $1, $2, NOW())
+		ON CONFLICT (user_id, target_user_id) DO UPDATE SET created_at = NOW()
+		RETURNING id, user_id, target_user_id, created_at
+	`
+	var fav UserFavourite
+	err = p.pool.QueryRow(ctx, query, userID, targetUserID).Scan(
+		&fav.ID, &fav.UserID, &fav.TargetUserID, &fav.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to add favourite: %w", err)
+	}
+	return &fav, nil
+}
+
+func (p *PostgresRepository) RemoveFavourite(ctx context.Context, userID, targetUserID string) error {
+	query := `DELETE FROM user_favourites WHERE user_id = $1 AND target_user_id = $2`
+	_, err := p.pool.Exec(ctx, query, userID, targetUserID)
+	if err != nil {
+		return fmt.Errorf("failed to remove favourite: %w", err)
+	}
+	return nil
+}
+
+func (p *PostgresRepository) ListFavourites(ctx context.Context, userID string) ([]FavouriteProfileCard, error) {
+	query := `
+		SELECT uf.target_user_id, p.display_name, p.birthdate, COALESCE(p.bio, ''), uf.created_at
+		FROM user_favourites uf
+		JOIN profiles p ON p.user_id = uf.target_user_id
+		JOIN users u ON u.id = uf.target_user_id AND u.status = 'ACTIVE'
+		WHERE uf.user_id = $1
+		  AND NOT EXISTS (
+			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = uf.target_user_id)
+			                            OR (b.blocker_user_id = uf.target_user_id AND b.blocked_user_id = $1)
+		  )
+		ORDER BY uf.created_at DESC
+	`
+	rows, err := p.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query favourites: %w", err)
+	}
+	defer rows.Close()
+
+	var results []FavouriteProfileCard
+	for rows.Next() {
+		var targetID, displayName, bio string
+		var birthdate, createdAt time.Time
+
+		if err := rows.Scan(&targetID, &displayName, &birthdate, &bio, &createdAt); err != nil {
+			return nil, err
+		}
+
+		age := calculateAge(birthdate, time.Now().UTC())
+		results = append(results, FavouriteProfileCard{
+			UserID:      targetID,
+			DisplayName: displayName,
+			Age:         age,
+			Bio:         bio,
+			PhotoURL:    "",
+			AddedAt:     createdAt,
+		})
+	}
+	if results == nil {
+		results = []FavouriteProfileCard{}
+	}
+	return results, rows.Err()
+}
+
+func (p *PostgresRepository) IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM user_favourites WHERE user_id = $1 AND target_user_id = $2)`
+	var exists bool
+	err := p.pool.QueryRow(ctx, query, userID, targetUserID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
 
 // Helpers
 

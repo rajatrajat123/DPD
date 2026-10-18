@@ -154,6 +154,8 @@ type IncomingLikeCard struct {
 	LikedAt               time.Time   `json:"liked_at"`
 	Photos                []PhotoCard `json:"photos"`
 	BlurredPhotoURL       string      `json:"blurred_photo_url,omitempty"`
+	InteractionType       string      `json:"interaction_type,omitempty"`
+	IsSuperLike           bool        `json:"is_super_like"`
 }
 
 type LikesYouResponse struct {
@@ -266,3 +268,40 @@ type UnlockAdQuotaRequest struct {
 	RawQuery      string `json:"raw_query,omitempty"`
 	TransactionID string `json:"transaction_id,omitempty"`
 }
+
+type UserFavourite struct {
+	ID           string    `json:"id"`
+	UserID       string    `json:"user_id"`
+	TargetUserID string    `json:"target_user_id"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+type FavouriteProfileCard struct {
+	UserID      string    `json:"user_id"`
+	DisplayName string    `json:"display_name"`
+	Age         int       `json:"age"`
+	Bio         string    `json:"bio"`
+	PhotoURL    string    `json:"photo_url,omitempty"`
+	AddedAt     time.Time `json:"added_at"`
+}
+
+type AddFavouriteRequest struct {
+	TargetUserID string `json:"target_user_id"`
+}
+
+type AddFavouriteResponse struct {
+	Success      bool      `json:"success"`
+	TargetUserID string    `json:"target_user_id"`
+	AddedAt      time.Time `json:"added_at"`
+}
+
+type RemoveFavouriteResponse struct {
+	Success      bool   `json:"success"`
+	TargetUserID string `json:"target_user_id"`
+}
+
+type ListFavouritesResponse struct {
+	Count      int                    `json:"count"`
+	Favourites []FavouriteProfileCard `json:"favourites"`
+}
+

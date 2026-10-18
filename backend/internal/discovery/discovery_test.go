@@ -350,6 +350,66 @@ func TestDiscovery_HTTPRoutes(t *testing.T) {
 	if sumResp.DisplayText != "Fewer than 5 people match your preferences nearby." {
 		t.Errorf("unexpected display text: %s", sumResp.DisplayText)
 	}
+
+	// 5. POST /api/v1/swipes with SUPER_SPARK -> 200 OK
+	superSwipePayload := `{"target_user_id":"http-target","direction":"SUPER_SPARK"}`
+	superReq := httptest.NewRequest(http.MethodPost, "/api/v1/swipes", bytes.NewReader([]byte(superSwipePayload)))
+	superReq.Header.Set("Content-Type", "application/json")
+	superReq.Header.Set("Authorization", "Bearer "+token)
+	superRec := httptest.NewRecorder()
+	mux.ServeHTTP(superRec, superReq)
+	if superRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from SUPER_SPARK swipe, got %d: %s", superRec.Code, superRec.Body.String())
+	}
+
+	// 6. Favourites Routes:
+	mux.Handle("/api/v1/discovery/favourites", authMw(http.HandlerFunc(handler.Favourites)))
+	mux.Handle("/api/v1/discovery/favourites/", authMw(http.HandlerFunc(handler.FavouriteDetail)))
+
+	// 6a. POST /api/v1/discovery/favourites -> 201 Created
+	favPayload := `{"target_user_id":"http-target"}`
+	favReq := httptest.NewRequest(http.MethodPost, "/api/v1/discovery/favourites", bytes.NewReader([]byte(favPayload)))
+	favReq.Header.Set("Content-Type", "application/json")
+	favReq.Header.Set("Authorization", "Bearer "+token)
+	favRec := httptest.NewRecorder()
+	mux.ServeHTTP(favRec, favReq)
+	if favRec.Code != http.StatusCreated {
+		t.Fatalf("expected 201 Created from favourites add, got %d: %s", favRec.Code, favRec.Body.String())
+	}
+
+	// 6b. GET /api/v1/discovery/favourites -> 200 OK
+	getFavReq := httptest.NewRequest(http.MethodGet, "/api/v1/discovery/favourites", nil)
+	getFavReq.Header.Set("Authorization", "Bearer "+token)
+	getFavRec := httptest.NewRecorder()
+	mux.ServeHTTP(getFavRec, getFavReq)
+	if getFavRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from favourites list, got %d: %s", getFavRec.Code, getFavRec.Body.String())
+	}
+	var favListResp discovery.ListFavouritesResponse
+	if err := json.Unmarshal(getFavRec.Body.Bytes(), &favListResp); err != nil {
+		t.Fatalf("failed to parse favourites list: %v", err)
+	}
+	if favListResp.Count != 1 || len(favListResp.Favourites) != 1 || favListResp.Favourites[0].UserID != "http-target" {
+		t.Fatalf("expected 1 favourite with user http-target, got %+v", favListResp)
+	}
+
+	// 6c. DELETE /api/v1/discovery/favourites/http-target -> 200 OK
+	delFavReq := httptest.NewRequest(http.MethodDelete, "/api/v1/discovery/favourites/http-target", nil)
+	delFavReq.Header.Set("Authorization", "Bearer "+token)
+	delFavRec := httptest.NewRecorder()
+	mux.ServeHTTP(delFavRec, delFavReq)
+	if delFavRec.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK from favourites delete, got %d: %s", delFavRec.Code, delFavRec.Body.String())
+	}
+
+	// Verify empty list after delete
+	getFavRec2 := httptest.NewRecorder()
+	mux.ServeHTTP(getFavRec2, getFavReq)
+	var favListResp2 discovery.ListFavouritesResponse
+	_ = json.Unmarshal(getFavRec2.Body.Bytes(), &favListResp2)
+	if favListResp2.Count != 0 {
+		t.Fatalf("expected 0 favourites after delete, got %d", favListResp2.Count)
+	}
 }
 
 func TestDiscovery_DealbreakersAndEmptyStateReason(t *testing.T) {

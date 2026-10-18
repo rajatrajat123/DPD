@@ -1,6 +1,6 @@
 import { Platform, TextStyle } from 'react-native';
 
-const fontFamily = {
+export const fontFamily = {
   serif: Platform.select({
     ios: 'Georgia',
     android: 'serif',

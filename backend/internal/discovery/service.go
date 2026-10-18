@@ -955,6 +955,75 @@ func (s *Service) RespondMessageRequest(ctx context.Context, recipientID, reques
 	return s.repo.UpdateMessageRequestStatus(ctx, requestID, recipientID, action)
 }
 
+func (s *Service) AddFavourite(ctx context.Context, userID, targetUserID string) (*AddFavouriteResponse, error) {
+	targetUserID = strings.TrimSpace(targetUserID)
+	if targetUserID == "" {
+		return nil, errors.New("target user ID is required")
+	}
+	if userID == targetUserID {
+		return nil, ErrSelfFavourite
+	}
+
+	fav, err := s.repo.AddFavourite(ctx, userID, targetUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AddFavouriteResponse{
+		Success:      true,
+		TargetUserID: fav.TargetUserID,
+		AddedAt:      fav.CreatedAt,
+	}, nil
+}
+
+func (s *Service) RemoveFavourite(ctx context.Context, userID, targetUserID string) (*RemoveFavouriteResponse, error) {
+	targetUserID = strings.TrimSpace(targetUserID)
+	if targetUserID == "" {
+		return nil, errors.New("target user ID is required")
+	}
+
+	if err := s.repo.RemoveFavourite(ctx, userID, targetUserID); err != nil {
+		return nil, err
+	}
+
+	return &RemoveFavouriteResponse{
+		Success:      true,
+		TargetUserID: targetUserID,
+	}, nil
+}
+
+func (s *Service) ListFavourites(ctx context.Context, userID string) (*ListFavouritesResponse, error) {
+	favs, err := s.repo.ListFavourites(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Enrich photo URLs if mediaSvc is available and photo_url is empty
+	if s.mediaSvc != nil {
+		for i := range favs {
+			if favs[i].PhotoURL == "" {
+				gallery, err := s.mediaSvc.ListUserGallery(ctx, favs[i].UserID)
+				if err == nil && len(gallery) > 0 && len(gallery[0].Derivatives) > 0 {
+					favs[i].PhotoURL = gallery[0].Derivatives[0].URL
+				}
+			}
+		}
+	}
+
+	return &ListFavouritesResponse{
+		Count:      len(favs),
+		Favourites: favs,
+	}, nil
+}
+
+func (s *Service) IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error) {
+	targetUserID = strings.TrimSpace(targetUserID)
+	if targetUserID == "" {
+		return false, nil
+	}
+	return s.repo.IsFavourite(ctx, userID, targetUserID)
+}
+
 func generateUUIDv4() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])

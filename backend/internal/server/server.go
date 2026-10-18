@@ -341,6 +341,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/discovery/message-requests/", communityMw(http.HandlerFunc(discoHandler.RespondMessageRequest)))
 	mux.Handle("/api/v1/discovery/messaging-quota", communityMw(http.HandlerFunc(discoHandler.MessagingQuota)))
 	mux.Handle("/api/v1/discovery/messaging-quota/unlock-ad", communityMw(http.HandlerFunc(discoHandler.UnlockMessagingQuotaAd)))
+	mux.Handle("/api/v1/discovery/favourites", communityMw(http.HandlerFunc(discoHandler.Favourites)))
+	mux.Handle("/api/v1/discovery/favourites/", communityMw(http.HandlerFunc(discoHandler.FavouriteDetail)))
 	mux.Handle("/api/v1/swipes", communityMw(http.HandlerFunc(discoHandler.Swipe)))
 	mux.Handle("/api/v1/swipes/rewind", communityMw(http.HandlerFunc(discoHandler.Rewind)))
 	mux.Handle("/api/v1/swipes/allowance", communityMw(http.HandlerFunc(discoHandler.Allowance)))
@@ -396,6 +398,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	chatNotif := chat.NewNotificationDispatcher(chatRepo, logger)
 	chatSvc := chat.NewService(chatRepo, chatHub, chatNotif, identityRepo, cfg.JWTSigningSecret, logger)
 	chatSvc.SetQuotaChecker(discoRepo)
+	chatSvc.SetMediaService(mediaSvc)
 	chatHandler := chat.NewHandler(chatSvc, cfg.JWTSigningSecret)
 	chatHandler.SetAccessValidator(chat.AccessValidatorFunc(func(ctx context.Context, userID string) error {
 		u, err := identityRepo.GetUserByID(ctx, userID)

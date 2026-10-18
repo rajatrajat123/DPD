@@ -16,7 +16,7 @@ import {
   Platform,
   Alert,
 } from 'react-native';
-import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
+import { colors, typography, spacing, borderRadius, useTheme, fontFamily } from '../theme';
 import { DiscoveryCandidate, DiscoveryMessagingQuota, SwipeResponse } from '../types';
 import { discoveryService } from '../services/discovery/discoveryService';
 import { QuickMessageComposer } from './QuickMessageComposer';
@@ -28,7 +28,8 @@ interface DiscoveryCardProps {
   candidate: DiscoveryCandidate;
   onLike: () => void;
   onPass: () => void;
-  onSuperSpark: () => void;
+  onSuperSpark: () => Promise<SwipeResponse | void> | void;
+  onSuperSparkComplete?: (res?: SwipeResponse | null) => void;
   onRewind?: () => void;
   canRewind?: boolean;
   isKeyboardOpen?: boolean;
@@ -46,6 +47,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   onLike,
   onPass,
   onSuperSpark,
+  onSuperSparkComplete,
   onRewind,
   canRewind = false,
   isKeyboardOpen = false,
@@ -84,9 +86,23 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   const currentPhoto = photos[photoIndex] || photos[0] || { id: 'default', url: '', is_primary: true, order: 0 };
 
   const pan = useRef(new Animated.ValueXY()).current;
+  const cardScale = useRef(new Animated.Value(1)).current;
+  const cardLift = useRef(new Animated.Value(0)).current;
+  const cardOpacity = useRef(new Animated.Value(1)).current;
+  const starScale = useRef(new Animated.Value(1)).current;
+  const starRotate = useRef(new Animated.Value(0)).current;
+  const isActionInProgress = useRef(false);
+  const [isSuperLiking, setIsSuperLiking] = useState(false);
 
   useEffect(() => {
     pan.setValue({ x: 0, y: 0 });
+    cardScale.setValue(1);
+    cardLift.setValue(0);
+    cardOpacity.setValue(1);
+    starScale.setValue(1);
+    starRotate.setValue(0);
+    isActionInProgress.current = false;
+    setIsSuperLiking(false);
     setPhotoIndex(0);
     setImageError(false);
     setShowDetailsModal(false);
@@ -136,6 +152,11 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     outputRange: ['-18deg', '0deg', '18deg'],
   });
 
+  const starRotateDeg = starRotate.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0deg', '15deg'],
+  });
+
   const likeOpacity = pan.x.interpolate({
     inputRange: [20, 100],
     outputRange: [0, 1],
@@ -149,7 +170,113 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   });
 
   const animatedCardStyle = {
-    transform: [{ translateX: pan.x }, { translateY: pan.y }, { rotate }],
+    opacity: cardOpacity,
+    transform: [
+      { translateX: pan.x },
+      { translateY: Animated.add(pan.y, cardLift) },
+      { rotate },
+      { scale: cardScale },
+    ],
+  };
+
+  const handleSuperSparkBtn = async () => {
+    Keyboard.dismiss();
+    if (isActionInProgress.current) return;
+    isActionInProgress.current = true;
+    setIsSuperLiking(true);
+
+    // Initial stage: Star scale + rotate, active card lift & enlargement to ~1.08 with elevated shadow
+    Animated.parallel([
+      Animated.timing(cardScale, {
+        toValue: 1.08,
+        duration: 260,
+        useNativeDriver: false,
+      }),
+      Animated.timing(cardLift, {
+        toValue: -8,
+        duration: 260,
+        useNativeDriver: false,
+      }),
+      Animated.timing(starScale, {
+        toValue: 1.28,
+        duration: 260,
+        useNativeDriver: false,
+      }),
+      Animated.timing(starRotate, {
+        toValue: 1,
+        duration: 260,
+        useNativeDriver: false,
+      }),
+    ]).start();
+
+    const startTime = Date.now();
+
+    try {
+      // Backend confirmation BEFORE advance
+      const res = await onSuperSpark();
+
+      // Ensure minimum perceptible in-flight duration
+      const elapsed = Date.now() - startTime;
+      if (elapsed < 280) {
+        await new Promise((r) => setTimeout(r, 280 - elapsed));
+      }
+
+      // Confirmed backend success: Upward glide exit ~420ms
+      Animated.parallel([
+        Animated.timing(pan.y, {
+          toValue: -windowHeight * 0.85,
+          duration: 420,
+          useNativeDriver: false,
+        }),
+        Animated.timing(cardOpacity, {
+          toValue: 0,
+          duration: 420,
+          useNativeDriver: false,
+        }),
+        Animated.timing(cardScale, {
+          toValue: 0.92,
+          duration: 420,
+          useNativeDriver: false,
+        }),
+      ]).start(() => {
+        setIsSuperLiking(false);
+        isActionInProgress.current = false;
+        if (onSuperSparkComplete) {
+          onSuperSparkComplete(res as SwipeResponse | undefined);
+        }
+      });
+    } catch (err: unknown) {
+      // Backend failure: Rollback without card advance!
+      Animated.parallel([
+        Animated.spring(cardScale, {
+          toValue: 1,
+          friction: 6,
+          tension: 40,
+          useNativeDriver: false,
+        }),
+        Animated.spring(cardLift, {
+          toValue: 0,
+          friction: 6,
+          tension: 40,
+          useNativeDriver: false,
+        }),
+        Animated.spring(starScale, {
+          toValue: 1,
+          friction: 6,
+          tension: 40,
+          useNativeDriver: false,
+        }),
+        Animated.spring(starRotate, {
+          toValue: 0,
+          friction: 6,
+          tension: 40,
+          useNativeDriver: false,
+        }),
+      ]).start(() => {
+        setIsSuperLiking(false);
+        isActionInProgress.current = false;
+      });
+    }
   };
 
   const handleLikeBtn = () => {
@@ -600,14 +727,36 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
                   styles.doubleActionBtn,
                   styles.doubleSuperSparkBtn,
                   { backgroundColor: colors.cardElevated, borderColor: colors.gold },
+                  isSuperLiking && {
+                    borderColor: colors.gold,
+                    shadowColor: colors.gold,
+                    shadowOffset: { width: 0, height: 0 },
+                    shadowOpacity: 0.85,
+                    shadowRadius: 10,
+                    elevation: 8,
+                  },
                 ]}
-                onPress={onSuperSpark}
+                onPress={handleSuperSparkBtn}
+                disabled={isSuperLiking}
                 activeOpacity={0.7}
                 testID={`double-superspark-${candidate.user_id || candidate.id}`}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 accessibilityLabel="Super Spark"
               >
-                <Text style={[styles.doubleSuperSparkIcon, { color: colors.gold }]}>★</Text>
+                <Animated.Text
+                  style={[
+                    styles.doubleSuperSparkIcon,
+                    { color: colors.gold },
+                    {
+                      transform: [
+                        { scale: starScale },
+                        { rotate: starRotateDeg },
+                      ],
+                    },
+                  ]}
+                >
+                  ★
+                </Animated.Text>
               </TouchableOpacity>
 
               <TouchableOpacity
@@ -642,7 +791,14 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       <Animated.View
         style={[
           styles.card,
-          { width: cardWidth, backgroundColor: colors.card, borderColor: colors.border },
+          { width: cardWidth, backgroundColor: colors.card, borderColor: isSuperLiking ? colors.gold : colors.border },
+          isSuperLiking && {
+            shadowColor: colors.gold,
+            shadowOffset: { width: 0, height: 6 },
+            shadowOpacity: 0.55,
+            shadowRadius: 20,
+            elevation: 14,
+          },
           isKeyboardOpen && styles.cardCompact,
           animatedCardStyle,
         ]}
@@ -836,15 +992,36 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
               styles.actionBtn,
               styles.superSparkBtn,
               { backgroundColor: colors.cardElevated, borderColor: colors.gold },
+              isSuperLiking && {
+                borderColor: colors.gold,
+                shadowColor: colors.gold,
+                shadowOffset: { width: 0, height: 0 },
+                shadowOpacity: 0.85,
+                shadowRadius: 10,
+                elevation: 8,
+              },
               isKeyboardOpen && styles.superSparkBtnCompact,
             ]}
-            onPress={() => {
-              Keyboard.dismiss();
-              onSuperSpark();
-            }}
+            onPress={handleSuperSparkBtn}
+            disabled={isSuperLiking}
             activeOpacity={0.8}
+            accessibilityLabel="Super Spark"
           >
-            <Text style={[styles.superSparkIcon, { color: colors.gold }, isKeyboardOpen && styles.superSparkIconCompact]}>★</Text>
+            <Animated.Text
+              style={[
+                styles.superSparkIcon,
+                { color: colors.gold },
+                {
+                  transform: [
+                    { scale: starScale },
+                    { rotate: starRotateDeg },
+                  ],
+                },
+                isKeyboardOpen && styles.superSparkIconCompact,
+              ]}
+            >
+              ★
+            </Animated.Text>
           </TouchableOpacity>
 
           {/* Like Button: Red Like Button with heart */}
@@ -878,6 +1055,7 @@ const styles = StyleSheet.create({
     width: '100%',
     alignItems: 'center',
     paddingHorizontal: spacing.sm,
+    zIndex: 10,
   },
   card: {
     backgroundColor: colors.card,
@@ -890,6 +1068,7 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.35,
     shadowRadius: 10,
     elevation: 8,
+    zIndex: 10,
   },
   photoContainer: {
     width: '100%',
@@ -908,9 +1087,12 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   placeholderMonogram: {
-    ...typography.display,
+    fontFamily: fontFamily.serif,
+    fontSize: 64,
+    lineHeight: 76,
     color: colors.gold,
-    fontSize: 72,
+    textAlign: 'center',
+    includeFontPadding: false,
   },
   paginationRow: {
     position: 'absolute',
@@ -1002,18 +1184,21 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'baseline',
     flex: 1,
+    marginRight: 8,
   },
   name: {
     ...typography.h1,
     fontSize: 22,
     color: colors.text,
     fontWeight: '700',
+    flexShrink: 1,
   },
   age: {
     ...typography.h2,
     fontSize: 20,
     color: colors.gold,
     fontWeight: '600',
+    flexShrink: 0,
   },
   infoBtn: {
     width: 32,
@@ -1460,8 +1645,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   doublePlaceholderMonogram: {
+    fontFamily: fontFamily.serif,
     fontSize: 42,
+    lineHeight: 52,
     fontWeight: '700',
+    color: colors.gold,
+    textAlign: 'center',
+    includeFontPadding: false,
   },
   doubleTopBadgesRow: {
     position: 'absolute',

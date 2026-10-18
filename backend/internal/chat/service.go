@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/auradating/platform/backend/internal/identity"
+	"github.com/auradating/platform/backend/internal/media"
 )
 
 type QuotaChecker interface {
@@ -24,6 +25,11 @@ type Service struct {
 	logger       *slog.Logger
 	jwtSecret    string
 	quotaChecker QuotaChecker
+	mediaSvc     *media.Service
+}
+
+func (s *Service) SetMediaService(ms *media.Service) {
+	s.mediaSvc = ms
 }
 
 func (s *Service) SetQuotaChecker(qc QuotaChecker) {
@@ -203,6 +209,26 @@ func (s *Service) ListConversations(ctx context.Context, userID string) ([]*Conv
 				partner.IsPhotoVerified = prof.IsPhotoVerified
 			}
 		}
+
+		if s.mediaSvc != nil {
+			if gallery, err := s.mediaSvc.ListUserGallery(ctx, otherID); err == nil && len(gallery) > 0 {
+				for _, g := range gallery {
+					for _, d := range g.Derivatives {
+						if d.Variant == media.VariantThumbWebP || d.Variant == media.VariantCardWebP {
+							partner.AvatarURL = d.URL
+							break
+						}
+					}
+					if partner.AvatarURL != "" {
+						break
+					}
+					if len(g.Derivatives) > 0 {
+						partner.AvatarURL = g.Derivatives[0].URL
+						break
+					}
+				}
+			}
+		}
 		c.Partner = partner
 	}
 
@@ -324,7 +350,34 @@ func (s *Service) handleClientWSAction(client *Client, action WSClientMessage) {
 }
 
 func (s *Service) ListMessageRequests(ctx context.Context, userID string) ([]*MessageRequest, error) {
-	return s.repo.ListMessageRequests(ctx, userID)
+	reqs, err := s.repo.ListMessageRequests(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if s.mediaSvc != nil {
+		for _, req := range reqs {
+			if req.Sender != nil && req.Sender.AvatarURL == "" {
+				if gallery, err := s.mediaSvc.ListUserGallery(ctx, req.SenderUserID); err == nil && len(gallery) > 0 {
+					for _, g := range gallery {
+						for _, d := range g.Derivatives {
+							if d.Variant == media.VariantThumbWebP || d.Variant == media.VariantCardWebP {
+								req.Sender.AvatarURL = d.URL
+								break
+							}
+						}
+						if req.Sender.AvatarURL != "" {
+							break
+						}
+						if len(g.Derivatives) > 0 {
+							req.Sender.AvatarURL = g.Derivatives[0].URL
+							break
+						}
+					}
+				}
+			}
+		}
+	}
+	return reqs, nil
 }
 
 func (s *Service) AcceptMessageRequest(ctx context.Context, requestID, recipientID string) (*MessageRequestActionResponse, error) {

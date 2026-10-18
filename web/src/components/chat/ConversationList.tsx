@@ -68,9 +68,7 @@ export function ConversationList({
           filtered.map((c) => {
             const isSelected = c.id === selectedId;
             const partner = c.partner;
-            const photoUrl =
-              partner?.avatar_url ||
-              'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=160&h=160&fit=crop';
+            const photoUrl = partner?.avatar_url || '';
             const displayName = partner?.display_name || 'Match';
             const lastMsg = c.last_message;
 
@@ -92,17 +90,38 @@ export function ConversationList({
               >
                 {/* Avatar with Online Badge */}
                 <div style={{ position: 'relative', width: '48px', height: '48px', flexShrink: 0 }}>
-                  <img
-                    src={photoUrl}
-                    alt={displayName}
-                    style={{
-                      width: '100%',
-                      height: '100%',
-                      borderRadius: '50%',
-                      objectFit: 'cover',
-                      border: isSelected ? '2px solid var(--aura-gold)' : '1px solid var(--border-subtle)',
-                    }}
-                  />
+                  {photoUrl ? (
+                    <img
+                      src={photoUrl}
+                      alt={displayName}
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        borderRadius: '50%',
+                        objectFit: 'cover',
+                        border: isSelected ? '2px solid var(--aura-gold)' : '1px solid var(--border-subtle)',
+                      }}
+                    />
+                  ) : (
+                    <div
+                      style={{
+                        width: '100%',
+                        height: '100%',
+                        borderRadius: '50%',
+                        backgroundColor: 'var(--aura-charcoal)',
+                        border: isSelected ? '2px solid var(--aura-gold)' : '1px solid var(--border-subtle)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--aura-gold)',
+                        fontWeight: 700,
+                        fontSize: '1.15rem',
+                        fontFamily: 'var(--font-serif)',
+                      }}
+                    >
+                      {displayName ? displayName.charAt(0).toUpperCase() : 'M'}
+                    </div>
+                  )}
                   {partner?.is_online && (
                     <div
                       style={{
