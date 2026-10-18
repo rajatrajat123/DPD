@@ -9,13 +9,17 @@ import {
   ActivityIndicator,
   Dimensions,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../../src/theme';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
-import { DiscoveryCandidate } from '../../src/types';
+import { DiscoveryCandidate, DiscoveryMessagingQuota } from '../../src/types';
 import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModal';
+import { DiscoveryMessageQuotaModal } from '../../src/components/DiscoveryMessageQuotaModal';
+import { QuickMessageComposer } from '../../src/components/QuickMessageComposer';
 import { useAuth } from '../../src/context/AuthContext';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -34,6 +38,12 @@ export default function ProfileDetailScreen() {
   const [isSwiping, setIsSwiping] = useState(false);
   const [matchedCandidate, setMatchedCandidate] = useState<DiscoveryCandidate | null>(null);
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null);
+  const [messageQuota, setMessageQuota] = useState<DiscoveryMessagingQuota | null>(null);
+  const [showMessageQuotaModal, setShowMessageQuotaModal] = useState(false);
+
+  useEffect(() => {
+    discoveryService.getMessagingQuota().then(setMessageQuota).catch(() => {});
+  }, []);
 
   const fetchProfile = async () => {
     if (!id) {
@@ -101,6 +111,57 @@ export default function ProfileDetailScreen() {
       Alert.alert('Action Failed', msg);
     } finally {
       setIsSwiping(false);
+    }
+  };
+
+  const handleSendIntro = async (note: string) => {
+    if (!candidate) return;
+    if (messageQuota && !messageQuota.is_unlimited && messageQuota.is_locked) {
+      setShowMessageQuotaModal(true);
+      throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED');
+    }
+
+    try {
+      const res = await discoveryService.swipe(candidate.user_id, 'LIKE', note);
+      if (res.is_mutual_match) {
+        setMatchedCandidate(candidate);
+        setActiveConversationId(res.conversation_id || null);
+      } else {
+        Alert.alert(
+          'Intro Note Sent',
+          `Your message request was delivered to ${candidate.display_name}. When they like you back, you'll be connected in Chat.`
+        );
+      }
+      discoveryService.getMessagingQuota().then((updated) => {
+        setMessageQuota(updated);
+        if (updated && !updated.is_unlimited && updated.is_locked) {
+          setShowMessageQuotaModal(true);
+        }
+      }).catch(() => {});
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        errMsg.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED') ||
+        errMsg.includes('USAGE_LIMIT_REACHED') ||
+        errMsg.includes('usage limit') ||
+        errMsg.includes('cooldown is active') ||
+        errMsg.includes('quota exhausted')
+      ) {
+        setShowMessageQuotaModal(true);
+        discoveryService.getMessagingQuota().then(setMessageQuota).catch(() => {});
+      } else if (
+        errMsg.includes('AWAITING_REPLY') ||
+        errMsg.includes('cannot send another message until recipient replies')
+      ) {
+        Alert.alert(
+          'Waiting for Reply',
+          'You can only send one initial message to this profile until they reply.',
+          [{ text: 'OK', style: 'default' }]
+        );
+      } else {
+        Alert.alert('Send Failed', 'Could not deliver intro note. Please check your connection and try again.');
+      }
+      throw err;
     }
   };
 
@@ -246,30 +307,55 @@ export default function ProfileDetailScreen() {
             </View>
           </ScrollView>
 
-          {/* Action Footer */}
-          <View style={styles.actionFooter}>
-            <TouchableOpacity
-              style={styles.passButton}
-              onPress={() => handleAction('PASS')}
-              disabled={isSwiping}
-              activeOpacity={0.8}
-              testID="profile-pass-button"
-            >
-              <Text style={styles.passButtonText}>✕ Pass</Text>
-            </TouchableOpacity>
+          {/* Action Footer with Composer */}
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+            <View style={styles.composerWrapper}>
+              <QuickMessageComposer
+                recipientId={candidate.user_id || candidate.id}
+                recipientName={candidate.display_name}
+                placeholder="Write an intro message..."
+                quota={messageQuota}
+                onQuotaPress={() => setShowMessageQuotaModal(true)}
+                onSend={handleSendIntro}
+              />
+            </View>
 
-            <TouchableOpacity
-              style={styles.likeButton}
-              onPress={() => handleAction('LIKE')}
-              disabled={isSwiping}
-              activeOpacity={0.8}
-              testID="profile-like-button"
-            >
-              <Text style={styles.likeButtonText}>♥ Like</Text>
-            </TouchableOpacity>
-          </View>
+            <View style={styles.actionFooter}>
+              <TouchableOpacity
+                style={styles.passButton}
+                onPress={() => handleAction('PASS')}
+                disabled={isSwiping}
+                activeOpacity={0.8}
+                testID="profile-pass-button"
+              >
+                <Text style={styles.passButtonText}>✕ Pass</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.likeButton}
+                onPress={() => handleAction('LIKE')}
+                disabled={isSwiping}
+                activeOpacity={0.8}
+                testID="profile-like-button"
+              >
+                <Text style={styles.likeButtonText}>♥ Like</Text>
+              </TouchableOpacity>
+            </View>
+          </KeyboardAvoidingView>
         </View>
       )}
+
+      {/* Discovery Message Quota Modal */}
+      <DiscoveryMessageQuotaModal
+        visible={showMessageQuotaModal}
+        userId={candidate?.user_id || myProfile?.id || 'aura_user'}
+        quota={messageQuota}
+        onClose={() => setShowMessageQuotaModal(false)}
+        onQuotaUpdated={(updated: DiscoveryMessagingQuota) => {
+          setMessageQuota(updated);
+        }}
+        onUpgradePress={() => router.push('/(tabs)/membership')}
+      />
 
       {/* Match Celebration Modal */}
       {matchedCandidate && (
@@ -561,12 +647,16 @@ const styles = StyleSheet.create({
     color: colors.textMuted,
     fontSize: 12,
   },
+  composerWrapper: {
+    paddingHorizontal: spacing.md,
+    paddingTop: spacing.xs,
+    paddingBottom: spacing.xs,
+    backgroundColor: colors.backgroundElevated,
+    borderTopWidth: 1,
+    borderTopColor: colors.borderSubtle,
+  },
   actionFooter: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 80,
+    height: 72,
     backgroundColor: colors.backgroundElevated,
     borderTopWidth: 1,
     borderTopColor: colors.borderSubtle,

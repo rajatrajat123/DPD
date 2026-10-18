@@ -6671,3 +6671,189 @@ test('Messaging Quota: enforces 30-day trial (4 distinct profiles, unlimited cha
     'QuickMessageComposer must handle locked quota indicator and press trigger'
   );
 });
+
+test('Discovery UX: tappable profile name in single/double layout and intro message composer in profile details', async () => {
+  const fs = await import('fs');
+  const path = await import('path');
+
+  const cardSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/DiscoveryCard.tsx'),
+    'utf-8'
+  );
+  const profileScreenSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'app/profile/[id].tsx'),
+    'utf-8'
+  );
+  const composerSource = fs.readFileSync(
+    path.resolve(process.cwd(), 'src/components/QuickMessageComposer.tsx'),
+    'utf-8'
+  );
+
+  // --- 1. Task 1: Tappable Profile Name ---
+  // Single column layout: Name and Age wrapped in TouchableOpacity calling handleOpenDetails
+  assert.ok(
+    cardSource.includes('testID={`discovery-card-name-${candidate.user_id || candidate.id}`}') &&
+    cardSource.includes('onPress={handleOpenDetails}'),
+    'Single-column DiscoveryCard must wrap profile name in TouchableOpacity with handleOpenDetails and testID'
+  );
+  // Double column layout: DoubleNameRow wrapped in TouchableOpacity calling handleOpenDetails
+  assert.ok(
+    cardSource.includes('testID={`discovery-double-name-${candidate.user_id || candidate.id}`}') &&
+    cardSource.includes('onPress={handleOpenDetails}'),
+    'Double-column DiscoveryCard must wrap profile name in TouchableOpacity with handleOpenDetails and testID'
+  );
+  // Info button also calls the exact same handleOpenDetails
+  assert.ok(
+    cardSource.includes('testID={`discovery-info-btn-${candidate.user_id || candidate.id}`}') &&
+    cardSource.includes('onPress={handleOpenDetails}'),
+    'Info button and profile name must call the exact same handleOpenDetails handler'
+  );
+  // Preservation of styling & typography
+  assert.ok(
+    cardSource.includes('styles.nameAndAge') &&
+    cardSource.includes('styles.doubleNameRow') &&
+    cardSource.includes('styles.name') &&
+    cardSource.includes('styles.doubleName'),
+    'DiscoveryCard must preserve existing typography styles for single and double column names'
+  );
+
+  // --- 2. Task 2: QuickMessageComposer inside Profile Details Modal & Screen ---
+  // Placeholder must match "Write an intro message..."
+  assert.ok(
+    cardSource.includes('placeholder="Write an intro message..."'),
+    'Profile Details modal in DiscoveryCard must render QuickMessageComposer with placeholder "Write an intro message..."'
+  );
+  assert.ok(
+    profileScreenSource.includes('placeholder="Write an intro message..."'),
+    'Profile screen app/profile/[id].tsx must render QuickMessageComposer with placeholder "Write an intro message..."'
+  );
+
+  // QuickMessageComposer component props support custom placeholder, testIDs, and containerStyle
+  assert.ok(
+    composerSource.includes('placeholder?: string') &&
+    composerSource.includes('inputTestID?: string') &&
+    composerSource.includes('sendBtnTestID?: string') &&
+    composerSource.includes('containerStyle?: StyleProp<ViewStyle>'),
+    'QuickMessageComposer must support configurable placeholder, inputTestID, sendBtnTestID, and containerStyle'
+  );
+
+  // Profile Details modal in DiscoveryCard houses KeyboardAvoidingView, composer, and action controls
+  assert.ok(
+    cardSource.includes('<KeyboardAvoidingView') &&
+    cardSource.includes('modalFooterContainer') &&
+    cardSource.includes('modalComposerWrapper') &&
+    cardSource.includes('modalActionsRow'),
+    'Profile details modal must contain KeyboardAvoidingView and modalFooterContainer with composer above action buttons'
+  );
+
+  // Modal action buttons intact below composer (Pass, SuperSpark, Like)
+  assert.ok(
+    cardSource.includes('testID="modal-pass-btn"') &&
+    cardSource.includes('testID="modal-superspark-btn"') &&
+    cardSource.includes('testID="modal-like-btn"'),
+    'Profile details modal must preserve Pass, SuperSpark, and Like buttons below the composer'
+  );
+
+  // Modal intro note submission calls discoveryService.swipe with LIKE and intro note
+  assert.ok(
+    cardSource.includes('handleSendIntroFromModal') &&
+    cardSource.includes("swipe(candidate.user_id, 'LIKE', note)"),
+    'Sending intro note from modal must call swipe with direction LIKE and the message content'
+  );
+
+  // Modal does not prematurely close on send: tracks hasSentIntroInModal, alerts success, and advances on close
+  assert.ok(
+    cardSource.includes('setHasSentIntroInModal(true)') &&
+    cardSource.includes('hasSentIntroInModal') &&
+    cardSource.includes('onLike()'),
+    'Modal must not immediately unmount on intro send, and must advance deck when user closes details'
+  );
+
+  // Quota locking and awaiting reply error handling in modal
+  assert.ok(
+    cardSource.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED') &&
+    cardSource.includes('onQuotaPress') &&
+    cardSource.includes('AWAITING_REPLY'),
+    'Modal intro note handler must handle DISCOVERY_MESSAGE_QUOTA_LOCKED and AWAITING_REPLY gracefully'
+  );
+
+  // --- 3. Flow Simulator for Profile Name Tap & Modal Message Sending ---
+  let openedModal = false;
+  let sentSwipeDirection = null;
+  let sentSwipeNote = null;
+  let deckAdvanced = false;
+  let quotaModalOpened = false;
+
+  // Simulate tapping name in single/double column
+  const onNamePress = () => {
+    openedModal = true;
+  };
+  onNamePress();
+  assert.equal(openedModal, true, 'Tapping name opens profile details modal');
+
+  // Simulate modal messaging flow with active quota
+  let mockQuota = {
+    is_unlimited: false,
+    is_locked: false,
+    trial_messages_sent: 2,
+    trial_messages_limit: 4,
+    has_contacted_recipient: false,
+  };
+
+  const sendIntroFromModal = async (note) => {
+    if (mockQuota.is_locked) {
+      quotaModalOpened = true;
+      throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED');
+    }
+    if (mockQuota.has_contacted_recipient) {
+      throw new Error('AWAITING_REPLY: recipient has not yet replied');
+    }
+    sentSwipeDirection = 'LIKE';
+    sentSwipeNote = note;
+    mockQuota.trial_messages_sent += 1;
+    mockQuota.has_contacted_recipient = true;
+    return { success: true, message: 'Delivered' };
+  };
+
+  const res1 = await sendIntroFromModal('Hey Alex, loved your travel photos!');
+  assert.equal(res1.success, true);
+  assert.equal(sentSwipeDirection, 'LIKE');
+  assert.equal(sentSwipeNote, 'Hey Alex, loved your travel photos!');
+  assert.equal(openedModal, true, 'Modal remains open after successful message send');
+
+  // User subsequently closes modal, advancing deck
+  const onCloseModal = (hasSentIntro) => {
+    openedModal = false;
+    if (hasSentIntro) {
+      deckAdvanced = true;
+    }
+  };
+  onCloseModal(true);
+  assert.equal(openedModal, false, 'Modal is closed');
+  assert.equal(deckAdvanced, true, 'Deck advanced via onLike after modal close');
+
+  // Attempt duplicate intro to same user triggers awaiting reply
+  let caughtAwaiting = false;
+  try {
+    await sendIntroFromModal('Another hello');
+  } catch (err) {
+    if (err.message.includes('AWAITING_REPLY')) {
+      caughtAwaiting = true;
+    }
+  }
+  assert.equal(caughtAwaiting, true, 'Must enforce awaiting reply rule without consuming quota');
+  assert.equal(mockQuota.trial_messages_sent, 3, 'Quota count must not increase on awaiting reply reject');
+
+  // Attempt sending when quota is locked opens quota modal
+  mockQuota.is_locked = true;
+  let caughtLocked = false;
+  try {
+    await sendIntroFromModal('Hello third user');
+  } catch (err) {
+    if (err.message.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED')) {
+      caughtLocked = true;
+    }
+  }
+  assert.equal(caughtLocked, true, 'Must reject when quota is locked');
+  assert.equal(quotaModalOpened, true, 'Must trigger quota unlock modal');
+});

@@ -12,9 +12,14 @@ import {
   ScrollView,
   useWindowDimensions,
   Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+  Alert,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
-import { DiscoveryCandidate } from '../types';
+import { DiscoveryCandidate, DiscoveryMessagingQuota, SwipeResponse } from '../types';
+import { discoveryService } from '../services/discovery/discoveryService';
+import { QuickMessageComposer } from './QuickMessageComposer';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -30,6 +35,10 @@ interface DiscoveryCardProps {
   maxCardHeight?: number;
   layout?: 'single' | 'double';
   onPressProfile?: () => void;
+  messageQuota?: DiscoveryMessagingQuota | null;
+  onQuotaPress?: () => void;
+  onSendIntroNote?: (message: string) => Promise<void> | void;
+  onQuotaUpdated?: (quota: DiscoveryMessagingQuota | null) => void;
 }
 
 export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
@@ -43,6 +52,10 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
   maxCardHeight = 0,
   layout = 'single',
   onPressProfile,
+  messageQuota,
+  onQuotaPress,
+  onSendIntroNote,
+  onQuotaUpdated,
 }) => {
   const { colors } = useTheme();
   const { width: windowWidth, height: windowHeight } = useWindowDimensions();
@@ -61,6 +74,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
   const [photoIndex, setPhotoIndex] = useState(0);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
+  const [hasSentIntroInModal, setHasSentIntroInModal] = useState(false);
   const [imageError, setImageError] = useState(false);
 
   const photos =
@@ -76,6 +90,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     setPhotoIndex(0);
     setImageError(false);
     setShowDetailsModal(false);
+    setHasSentIntroInModal(false);
   }, [candidate.id, candidate.user_id]);
 
   const panResponder = useRef(
@@ -171,6 +186,301 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
     }
   };
 
+  const handleOpenDetails = () => {
+    Keyboard.dismiss();
+    if (onPressProfile) {
+      onPressProfile();
+    } else {
+      setShowDetailsModal(true);
+    }
+  };
+
+  const handleCloseModal = () => {
+    setShowDetailsModal(false);
+    if (hasSentIntroInModal) {
+      onLike();
+    }
+  };
+
+  const handleSendIntroFromModal = async (note: string) => {
+    if (messageQuota && !messageQuota.is_unlimited && messageQuota.is_locked) {
+      if (onQuotaPress) onQuotaPress();
+      throw new Error('DISCOVERY_MESSAGE_QUOTA_LOCKED');
+    }
+
+    try {
+      if (onSendIntroNote) {
+        await onSendIntroNote(note);
+      } else {
+        await discoveryService.swipe(candidate.user_id, 'LIKE', note);
+      }
+
+      setHasSentIntroInModal(true);
+
+      if (onQuotaUpdated) {
+        try {
+          const updated = await discoveryService.getMessagingQuota();
+          onQuotaUpdated(updated);
+          if (updated && !updated.is_unlimited && updated.is_locked && onQuotaPress) {
+            onQuotaPress();
+          }
+        } catch {
+          // non-blocking
+        }
+      }
+
+      Alert.alert(
+        'Intro Note Sent',
+        `Your message request was delivered to ${candidate.display_name}. When they like you back, you'll be connected in Chat.`
+      );
+    } catch (err: unknown) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      if (
+        errMsg.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED') ||
+        errMsg.includes('USAGE_LIMIT_REACHED') ||
+        errMsg.includes('usage limit') ||
+        errMsg.includes('cooldown is active') ||
+        errMsg.includes('quota exhausted')
+      ) {
+        if (onQuotaPress) onQuotaPress();
+        if (onQuotaUpdated) {
+          discoveryService.getMessagingQuota().then(onQuotaUpdated).catch(() => {});
+        }
+      } else if (
+        errMsg.includes('AWAITING_REPLY') ||
+        errMsg.includes('cannot send another message until recipient replies')
+      ) {
+        Alert.alert(
+          'Waiting for Reply',
+          'You can only send one initial message to this profile until they reply.',
+          [{ text: 'OK', style: 'default' }]
+        );
+      } else {
+        Alert.alert('Send Failed', 'Could not deliver intro note. Please check your connection and try again.');
+      }
+      throw err;
+    }
+  };
+
+  const renderProfileDetailsModal = () => (
+    <Modal
+      visible={showDetailsModal}
+      animationType="slide"
+      presentationStyle="pageSheet"
+      onRequestClose={handleCloseModal}
+      testID="profile-details-modal"
+    >
+      <SafeAreaView style={[styles.modalContainer, { backgroundColor: colors.background }]}>
+        <KeyboardAvoidingView
+          style={styles.modalKeyboardAvoid}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          {/* Modal Header */}
+          <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
+            <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
+            <TouchableOpacity
+              style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
+              onPress={handleCloseModal}
+              activeOpacity={0.7}
+              testID="modal-close-btn"
+              accessibilityRole="button"
+              accessibilityLabel="Close profile details"
+            >
+              <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Scrollable Profile Content */}
+          <ScrollView
+            style={styles.modalScrollFlex}
+            contentContainerStyle={styles.modalScroll}
+            keyboardShouldPersistTaps="handled"
+            showsVerticalScrollIndicator={false}
+          >
+            {/* Main Modal Image */}
+            <View style={[styles.modalImageContainer, { backgroundColor: colors.card }]}>
+              {photos[0]?.url ? (
+                <Image source={{ uri: photos[0].url }} style={styles.modalImage} resizeMode="cover" />
+              ) : (
+                <View style={[styles.modalImage, styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
+                  <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>
+                    {candidate.display_name ? candidate.display_name.charAt(0).toUpperCase() : 'A'}
+                  </Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.modalBody}>
+              <View style={styles.modalNameRow}>
+                <Text style={[styles.modalName, { color: colors.text }]}>{candidate.display_name},</Text>
+                <Text style={[styles.modalAge, { color: colors.gold }]}> {candidate.age}</Text>
+                {candidate.is_verified && (
+                  <View style={styles.modalVerifiedBadge}>
+                    <Text style={styles.modalVerifiedText}>✓ 18+ Verified</Text>
+                  </View>
+                )}
+              </View>
+
+              {candidate.distance_bucket_km > 0 && (
+                <Text style={styles.modalDistance}>📍 {candidate.distance_bucket_km} km away</Text>
+              )}
+
+              {/* Bio Section */}
+              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>About</Text>
+                <Text style={[styles.modalBioText, { color: colors.text }]}>
+                  {candidate.bio || 'This member has not written a bio yet.'}
+                </Text>
+              </View>
+
+              {/* Details & Lifestyle Section */}
+              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Details & Lifestyle</Text>
+                <View style={styles.tagsRow}>
+                  {candidate.compatibility_score > 0 && (
+                    <View style={[styles.scoreTag, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
+                      <Text style={[styles.scoreTagText, { color: colors.gold }]}>★ {candidate.compatibility_score}% Compatibility</Text>
+                    </View>
+                  )}
+                  {Boolean(candidate.height_cm) && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>📏 {candidate.height_cm} cm</Text>
+                    </View>
+                  )}
+                  {Boolean(candidate.weight_kg) && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>⚖️ {candidate.weight_kg} kg</Text>
+                    </View>
+                  )}
+                  {candidate.pronouns && candidate.pronouns.length > 0 && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.pronouns.join('/')}</Text>
+                    </View>
+                  )}
+                  {candidate.gender_identities && candidate.gender_identities.length > 0 && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.gender_identities.join(', ')}</Text>
+                    </View>
+                  )}
+                  {candidate.sexual_orientations && candidate.sexual_orientations.length > 0 && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.sexual_orientations.join(', ')}</Text>
+                    </View>
+                  )}
+                  {candidate.relationship_structure && (
+                    <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
+                      <Text style={[styles.tagText, { color: colors.textMuted }]}>🔗 {candidate.relationship_structure}</Text>
+                    </View>
+                  )}
+                  {candidate.smoking_preference && (
+                    <View
+                      style={[
+                        styles.tag,
+                        { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
+                        candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.tagText,
+                          { color: colors.textMuted },
+                          candidate.smoking_preference === 'NON_SMOKER' ? styles.tagTextNonSmoker : null,
+                        ]}
+                      >
+                        🚭 {candidate.smoking_preference === 'NON_SMOKER' ? 'Non-smoker' : 'Smoker'}
+                      </Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+
+              {/* Gallery / More Photos Grid */}
+              {photos.length > 1 && (
+                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
+                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Gallery</Text>
+                  <View style={styles.modalPhotosGrid}>
+                    {photos.slice(1).map((p, idx) => (
+                      <View key={p.id || idx} style={[styles.galleryItem, { backgroundColor: colors.cardElevated }]}>
+                        <Image source={{ uri: p.url }} style={styles.modalGridPhoto} resizeMode="cover" />
+                      </View>
+                    ))}
+                  </View>
+                </View>
+              )}
+            </View>
+          </ScrollView>
+
+          {/* Fixed Bottom Footer: Message Composer + Action Controls */}
+          <View style={[styles.modalFooterContainer, { backgroundColor: colors.card, borderTopColor: colors.borderSubtle }]}>
+            {/* Intro Message Composer */}
+            <View style={styles.modalComposerWrapper}>
+              <QuickMessageComposer
+                recipientId={candidate.user_id || candidate.id}
+                recipientName={candidate.display_name}
+                placeholder="Write an intro message..."
+                quota={messageQuota}
+                onQuotaPress={onQuotaPress}
+                inputTestID={`modal-quick-message-input-${candidate.user_id || candidate.id}`}
+                sendBtnTestID={`modal-quick-message-send-btn-${candidate.user_id || candidate.id}`}
+                onSend={handleSendIntroFromModal}
+                containerStyle={styles.modalComposerContainer}
+              />
+            </View>
+
+            {/* Modal Action Controls (✕, ★, ♥) */}
+            <View style={styles.modalActionsRow}>
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.passBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onPass();
+                }}
+                activeOpacity={0.8}
+                testID="modal-pass-btn"
+                accessibilityLabel="Pass"
+                accessibilityRole="button"
+              >
+                <Text style={[styles.passIcon, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.actionBtn, styles.superSparkBtn, { backgroundColor: colors.cardElevated, borderColor: colors.gold }]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onSuperSpark();
+                }}
+                activeOpacity={0.8}
+                testID="modal-superspark-btn"
+                accessibilityLabel="Super Spark"
+                accessibilityRole="button"
+              >
+                <Text style={[styles.superSparkIcon, { color: colors.gold }]}>★</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[
+                  styles.actionBtn,
+                  styles.likeBtn,
+                  { backgroundColor: colors.cardElevated, borderColor: colors.like || colors.gold, shadowColor: colors.like || colors.gold },
+                ]}
+                onPress={() => {
+                  setShowDetailsModal(false);
+                  onLike();
+                }}
+                activeOpacity={0.8}
+                testID="modal-like-btn"
+                accessibilityLabel="Like"
+                accessibilityRole="button"
+              >
+                <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </SafeAreaView>
+    </Modal>
+  );
+
   if (layout === 'double') {
     const doubleCardWidth = Math.floor((windowWidth - spacing.md * 2 - spacing.sm) / 2);
     const doublePhotoHeight = Math.min(doubleCardWidth * 1.25, 210);
@@ -180,13 +490,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         <TouchableOpacity
           style={[styles.doubleCard, { backgroundColor: colors.card, borderColor: colors.border }]}
           activeOpacity={0.88}
-          onPress={() => {
-            if (onPressProfile) {
-              onPressProfile();
-            } else {
-              setShowDetailsModal(true);
-            }
-          }}
+          onPress={handleOpenDetails}
           testID={`discovery-double-card-${candidate.user_id || candidate.id}`}
         >
           {/* Photo Container */}
@@ -240,12 +544,20 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
 
           {/* Details Section */}
           <View style={styles.doubleDetails}>
-            <View style={styles.doubleNameRow}>
+            <TouchableOpacity
+              style={styles.doubleNameRow}
+              onPress={handleOpenDetails}
+              activeOpacity={0.7}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              testID={`discovery-double-name-${candidate.user_id || candidate.id}`}
+              accessibilityRole="button"
+              accessibilityLabel={`View details for ${candidate.display_name}`}
+            >
               <Text style={[styles.doubleName, { color: colors.text }]} numberOfLines={1}>
                 {candidate.display_name}
               </Text>
               <Text style={[styles.doubleAge, { color: colors.gold }]}> {candidate.age}</Text>
-            </View>
+            </TouchableOpacity>
 
             {/* Compatibility or Pronouns/Bio */}
             {candidate.compatibility_score > 0 ? (
@@ -320,172 +632,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
         </TouchableOpacity>
 
         {/* Profile Details Modal */}
-        <Modal
-          visible={showDetailsModal}
-          animationType="slide"
-          presentationStyle="pageSheet"
-          onRequestClose={() => setShowDetailsModal(false)}
-        >
-          <SafeAreaView style={[styles.modalContainer, { backgroundColor: colors.background }]}>
-            <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
-              <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
-              <TouchableOpacity
-                style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-                onPress={() => setShowDetailsModal(false)}
-                activeOpacity={0.7}
-              >
-                <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
-              </TouchableOpacity>
-            </View>
-
-            <ScrollView contentContainerStyle={styles.modalScroll}>
-              <View style={[styles.modalImageContainer, { backgroundColor: colors.card }]}>
-                {photos[0]?.url ? (
-                  <Image source={{ uri: photos[0].url }} style={styles.modalImage} resizeMode="cover" />
-                ) : (
-                  <View style={[styles.modalImage, styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
-                    <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>{candidate.display_name.charAt(0)}</Text>
-                  </View>
-                )}
-              </View>
-
-              <View style={styles.modalBody}>
-                <View style={styles.modalNameRow}>
-                  <Text style={[styles.modalName, { color: colors.text }]}>{candidate.display_name},</Text>
-                  <Text style={[styles.modalAge, { color: colors.gold }]}> {candidate.age}</Text>
-                  {candidate.is_verified && (
-                    <View style={styles.modalVerifiedBadge}>
-                      <Text style={styles.modalVerifiedText}>✓ 18+ Verified</Text>
-                    </View>
-                  )}
-                </View>
-
-                {candidate.distance_bucket_km > 0 && (
-                  <Text style={styles.modalDistance}>📍 {candidate.distance_bucket_km} km away</Text>
-                )}
-
-                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>About</Text>
-                  <Text style={[styles.modalBioText, { color: colors.text }]}>
-                    {candidate.bio || 'This member has not written a bio yet.'}
-                  </Text>
-                </View>
-
-                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Details & Lifestyle</Text>
-                  <View style={styles.tagsRow}>
-                    {candidate.compatibility_score > 0 && (
-                      <View style={[styles.scoreTag, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
-                        <Text style={[styles.scoreTagText, { color: colors.gold }]}>★ {candidate.compatibility_score}% Compatibility</Text>
-                      </View>
-                    )}
-                    {Boolean(candidate.height_cm) && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>📏 {candidate.height_cm} cm</Text>
-                      </View>
-                    )}
-                    {Boolean(candidate.weight_kg) && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>⚖️ {candidate.weight_kg} kg</Text>
-                      </View>
-                    )}
-                    {candidate.pronouns && candidate.pronouns.length > 0 && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.pronouns.join('/')}</Text>
-                      </View>
-                    )}
-                    {candidate.gender_identities && candidate.gender_identities.length > 0 && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.gender_identities.join(', ')}</Text>
-                      </View>
-                    )}
-                    {candidate.sexual_orientations && candidate.sexual_orientations.length > 0 && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>{candidate.sexual_orientations.join(', ')}</Text>
-                      </View>
-                    )}
-                    {candidate.relationship_structure && (
-                      <View style={[styles.tag, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.tagText, { color: colors.textMuted }]}>🔗 {candidate.relationship_structure}</Text>
-                      </View>
-                    )}
-                    {candidate.smoking_preference && (
-                      <View
-                        style={[
-                          styles.tag,
-                          { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
-                          candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            styles.tagText,
-                            { color: colors.textMuted },
-                            candidate.smoking_preference === 'NON_SMOKER' ? styles.tagTextNonSmoker : null,
-                          ]}
-                        >
-                          🚭 {candidate.smoking_preference === 'NON_SMOKER' ? 'Non-smoker' : 'Smoker'}
-                        </Text>
-                      </View>
-                    )}
-                  </View>
-                </View>
-
-                {photos.length > 1 && (
-                  <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                    <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Gallery</Text>
-                    <View style={styles.galleryGrid}>
-                      {photos.slice(1).map((p, idx) => (
-                        <View key={p.id || idx} style={[styles.galleryItem, { backgroundColor: colors.cardElevated }]}>
-                          <Image source={{ uri: p.url }} style={styles.galleryPhoto} resizeMode="cover" />
-                        </View>
-                      ))}
-                    </View>
-                  </View>
-                )}
-              </View>
-            </ScrollView>
-
-            <View style={[styles.modalActions, { backgroundColor: colors.card, borderTopColor: colors.borderSubtle }]}>
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.passBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
-                onPress={() => {
-                  setShowDetailsModal(false);
-                  onPass();
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.passIcon, { color: colors.textMuted }]}>✕</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.actionBtn, styles.superSparkBtn, { backgroundColor: colors.cardElevated, borderColor: colors.gold }]}
-                onPress={() => {
-                  setShowDetailsModal(false);
-                  onSuperSpark();
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.superSparkIcon, { color: colors.gold }]}>★</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.actionBtn,
-                  styles.likeBtn,
-                  { backgroundColor: colors.cardElevated, borderColor: colors.like || colors.gold, shadowColor: colors.like || colors.gold },
-                ]}
-                onPress={() => {
-                  setShowDetailsModal(false);
-                  onLike();
-                }}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
-              </TouchableOpacity>
-            </View>
-          </SafeAreaView>
-        </Modal>
+        {renderProfileDetailsModal()}
       </View>
     );
   }
@@ -568,22 +715,30 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
           {/* Bottom Card Info Overlay */}
           <View style={[styles.infoOverlay, { borderTopColor: colors.borderSubtle }, isKeyboardOpen && styles.infoOverlayCompact]}>
             <View style={styles.nameHeaderRow}>
-              <View style={styles.nameAndAge}>
+              <TouchableOpacity
+                style={styles.nameAndAge}
+                onPress={handleOpenDetails}
+                activeOpacity={0.7}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                testID={`discovery-card-name-${candidate.user_id || candidate.id}`}
+                accessibilityRole="button"
+                accessibilityLabel={`View details for ${candidate.display_name}`}
+              >
                 <Text style={[styles.name, { color: colors.text }, isKeyboardOpen && styles.nameCompact]} numberOfLines={1}>
                   {candidate.display_name}
                 </Text>
                 <Text style={[styles.age, { color: colors.gold }, isKeyboardOpen && styles.ageCompact]}> {candidate.age}</Text>
-              </View>
+              </TouchableOpacity>
 
               {/* Info Button to Open Details Modal */}
               <TouchableOpacity
                 style={[styles.infoBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
-                onPress={() => {
-                  Keyboard.dismiss();
-                  setShowDetailsModal(true);
-                }}
+                onPress={handleOpenDetails}
                 activeOpacity={0.8}
                 hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                testID={`discovery-info-btn-${candidate.user_id || candidate.id}`}
+                accessibilityRole="button"
+                accessibilityLabel={`Profile info for ${candidate.display_name}`}
               >
                 <Text style={[styles.infoBtnText, { color: colors.gold }]}>ⓘ</Text>
               </TouchableOpacity>
@@ -713,184 +868,7 @@ export const DiscoveryCard: React.FC<DiscoveryCardProps> = ({
       </Animated.View>
 
       {/* Profile Details Modal */}
-      <Modal
-        visible={showDetailsModal}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowDetailsModal(false)}
-      >
-        <SafeAreaView style={[styles.modalContainer, { backgroundColor: colors.background }]}>
-          <View style={[styles.modalHeader, { borderBottomColor: colors.borderSubtle }]}>
-            <Text style={[styles.modalTitle, { color: colors.text }]}>Profile Details</Text>
-            <TouchableOpacity
-              style={[styles.modalCloseBtn, { backgroundColor: colors.card, borderColor: colors.border }]}
-              onPress={() => setShowDetailsModal(false)}
-              activeOpacity={0.7}
-            >
-              <Text style={[styles.modalCloseText, { color: colors.textMuted }]}>✕</Text>
-            </TouchableOpacity>
-          </View>
-
-          <ScrollView contentContainerStyle={styles.modalScroll}>
-            {/* Main Modal Image */}
-            <View style={[styles.modalImageContainer, { backgroundColor: colors.card }]}>
-              {photos[0]?.url ? (
-                <Image source={{ uri: photos[0].url }} style={styles.modalImage} resizeMode="cover" />
-              ) : (
-                <View style={[styles.modalImage, styles.placeholderPhoto, { backgroundColor: colors.cardMuted }]}>
-                  <Text style={[styles.placeholderMonogram, { color: colors.gold }]}>{candidate.display_name.charAt(0)}</Text>
-                </View>
-              )}
-            </View>
-
-            <View style={styles.modalBody}>
-              <View style={styles.modalNameRow}>
-                <Text style={[styles.modalName, { color: colors.text }]}>{candidate.display_name},</Text>
-                <Text style={[styles.modalAge, { color: colors.gold }]}> {candidate.age}</Text>
-                {candidate.is_verified && (
-                  <View style={styles.modalVerifiedBadge}>
-                    <Text style={styles.modalVerifiedText}>✓ 18+ Verified</Text>
-                  </View>
-                )}
-              </View>
-
-              {candidate.distance_bucket_km > 0 && (
-                <Text style={styles.modalDistance}>📍 {candidate.distance_bucket_km} km away</Text>
-              )}
-
-              {/* Bio Section */}
-              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>About</Text>
-                <Text style={[styles.modalBioText, { color: colors.text }]}>
-                  {candidate.bio || 'This member has not written a bio yet.'}
-                </Text>
-              </View>
-
-              {/* Identities & Orientations */}
-              {((candidate.gender_identities && candidate.gender_identities.length > 0) ||
-                (candidate.sexual_orientations && candidate.sexual_orientations.length > 0)) && (
-                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Identity & Orientation</Text>
-                  <View style={styles.tagsRow}>
-                    {candidate.gender_identities?.map((g, i) => (
-                      <View key={`g-${i}`} style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.modalPillText, { color: colors.text }]}>{g}</Text>
-                      </View>
-                    ))}
-                    {candidate.sexual_orientations?.map((o, i) => (
-                      <View key={`o-${i}`} style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.modalPillText, { color: colors.text }]}>{o}</Text>
-                      </View>
-                    ))}
-                  </View>
-                </View>
-              )}
-
-              {/* Lifestyle & Dealbreakers */}
-              <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Lifestyle</Text>
-                <View style={styles.tagsRow}>
-                  <View
-                    style={[
-                      styles.modalPill,
-                      { backgroundColor: colors.cardElevated, borderColor: colors.border },
-                      candidate.smoking_preference === 'NON_SMOKER' ? styles.tagNonSmoker : null,
-                    ]}
-                  >
-                    <Text
-                      style={[
-                        styles.modalPillText,
-                        candidate.smoking_preference === 'NON_SMOKER' ? styles.tagTextNonSmoker : null,
-                      ]}
-                    >
-                      🚭 {candidate.smoking_preference === 'NON_SMOKER' ? 'Non-smoker' : 'Smoker'}
-                    </Text>
-                  </View>
-
-                  {candidate.relationship_structure ? (
-                    <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-                      <Text style={[styles.modalPillText, { color: colors.text }]}>
-                        🔗 {candidate.relationship_structure}
-                      </Text>
-                    </View>
-                  ) : null}
-                </View>
-              </View>
-
-              {/* Physical Attributes if visible */}
-              {(Boolean(candidate.height_cm) || Boolean(candidate.weight_kg)) && (
-                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>Physical</Text>
-                  <View style={styles.tagsRow}>
-                    {Boolean(candidate.height_cm) && (
-                      <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.modalPillText, { color: colors.text }]}>📏 {candidate.height_cm} cm</Text>
-                      </View>
-                    )}
-                    {Boolean(candidate.weight_kg) && (
-                      <View style={[styles.modalPill, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}>
-                        <Text style={[styles.modalPillText, { color: colors.text }]}>⚖️ {candidate.weight_kg} kg</Text>
-                      </View>
-                    )}
-                  </View>
-                </View>
-              )}
-
-              {/* Additional Photos Grid if present */}
-              {photos.length > 1 && (
-                <View style={[styles.modalSection, { borderTopColor: colors.borderSubtle }]}>
-                  <Text style={[styles.modalSectionTitle, { color: colors.gold }]}>More Photos</Text>
-                  <View style={styles.modalPhotosGrid}>
-                    {photos.slice(1).map((p, idx) => (
-                      <Image key={p.id || idx} source={{ uri: p.url }} style={styles.modalGridPhoto} />
-                    ))}
-                  </View>
-                </View>
-              )}
-            </View>
-          </ScrollView>
-
-          {/* Modal Action Controls */}
-          <View style={[styles.modalActions, { backgroundColor: colors.card, borderTopColor: colors.borderSubtle }]}>
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.passBtn, { backgroundColor: colors.cardElevated, borderColor: colors.border }]}
-              onPress={() => {
-                setShowDetailsModal(false);
-                handlePassBtn();
-              }}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.passIcon, { color: colors.textMuted }]}>✕</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[styles.actionBtn, styles.superSparkBtn, { backgroundColor: colors.cardElevated, borderColor: colors.gold }]}
-              onPress={() => {
-                setShowDetailsModal(false);
-                onSuperSpark();
-              }}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.superSparkIcon, { color: colors.gold }]}>★</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity
-              style={[
-                styles.actionBtn,
-                styles.likeBtn,
-                { backgroundColor: colors.cardElevated, borderColor: colors.like || colors.gold, shadowColor: colors.like || colors.gold },
-              ]}
-              onPress={() => {
-                setShowDetailsModal(false);
-                handleLikeBtn();
-              }}
-              activeOpacity={0.8}
-            >
-              <Text style={[styles.likeIcon, { color: colors.like || '#FF6584' }]}>♥</Text>
-            </TouchableOpacity>
-          </View>
-        </SafeAreaView>
-      </Modal>
+      {renderProfileDetailsModal()}
     </View>
   );
 };
@@ -1379,6 +1357,39 @@ const styles = StyleSheet.create({
     height: 200,
     borderRadius: borderRadius.md,
   },
+  galleryItem: {
+    borderRadius: borderRadius.md,
+    overflow: 'hidden',
+  },
+  modalKeyboardAvoid: {
+    flex: 1,
+  },
+  modalScrollFlex: {
+    flex: 1,
+  },
+  modalFooterContainer: {
+    borderTopWidth: 1,
+    borderTopColor: colors.borderSubtle,
+    backgroundColor: 'rgba(9, 10, 14, 0.98)',
+    paddingTop: spacing.xs,
+    paddingBottom: Platform.OS === 'ios' ? spacing.md : spacing.xs,
+    paddingHorizontal: spacing.sm,
+    width: '100%',
+  },
+  modalComposerWrapper: {
+    width: '100%',
+    marginBottom: spacing.xs,
+  },
+  modalComposerContainer: {
+    width: '100%',
+  },
+  modalActionsRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: spacing.xl,
+    paddingVertical: 2,
+  },
   modalActions: {
     position: 'absolute',
     bottom: 0,
@@ -1563,20 +1574,5 @@ const styles = StyleSheet.create({
   doubleLikeIcon: {
     fontSize: 15,
   },
-  galleryGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: spacing.sm,
-    marginTop: spacing.xs,
-  },
-  galleryItem: {
-    width: (SCREEN_WIDTH - spacing.lg * 2 - spacing.sm) / 2,
-    height: 160,
-    borderRadius: borderRadius.md,
-    overflow: 'hidden',
-  },
-  galleryPhoto: {
-    width: '100%',
-    height: '100%',
-  },
 });
+

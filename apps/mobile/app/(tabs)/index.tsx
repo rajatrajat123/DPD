@@ -538,17 +538,23 @@ export default function DiscoveryScreen() {
 
   const handleSwipeForCandidate = async (
     candidate: DiscoveryCandidate,
-    direction: 'LIKE' | 'PASS' | 'SUPER_SPARK'
+    direction: 'LIKE' | 'PASS' | 'SUPER_SPARK',
+    introNote?: string
   ) => {
     Keyboard.dismiss();
     if (candidates.length > 0 && candidate.user_id === candidates[0].user_id) {
-      return await handleSwipe(direction);
+      return await handleSwipe(direction, introNote);
     }
 
     if (isSwipingRef.current) return;
 
     if (direction !== 'PASS' && allowance && !allowance.isUnlimited && allowance.remainingLikes <= 0) {
       setShowQuotaModal(true);
+      return;
+    }
+
+    if (introNote && messageQuota && !messageQuota.is_unlimited && messageQuota.is_locked) {
+      setShowMessageQuotaModal(true);
       return;
     }
 
@@ -587,15 +593,47 @@ export default function DiscoveryScreen() {
     }
 
     try {
-      const res: SwipeResponse = await discoveryService.swipe(candidate.user_id, direction);
+      const res: SwipeResponse = await discoveryService.swipe(candidate.user_id, direction, introNote);
       if (res.is_mutual_match) {
         setMatchedCandidate(candidate);
         setActiveConversationId(res.conversation_id || null);
+      } else if (introNote) {
+        Alert.alert(
+          'Intro Note Sent',
+          `Your message request was delivered to ${candidate.display_name}. When they like you back, you'll be connected in Chat.`
+        );
+      }
+      if (introNote) {
+        loadMessagingQuota().then((updated) => {
+          if (updated && !updated.is_unlimited && updated.is_locked) {
+            setShowMessageQuotaModal(true);
+          }
+        });
       }
       return res;
     } catch (err: unknown) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
+      if (
+        errMsg.includes('DISCOVERY_MESSAGE_QUOTA_LOCKED') ||
+        errMsg.includes('USAGE_LIMIT_REACHED') ||
+        errMsg.includes('usage limit') ||
+        errMsg.includes('cooldown is active') ||
+        errMsg.includes('quota exhausted')
+      ) {
+        setShowMessageQuotaModal(true);
+        loadMessagingQuota();
+        setCandidates((prev) => [candidate, ...prev]);
+      } else if (
+        errMsg.includes('AWAITING_REPLY') ||
+        errMsg.includes('cannot send another message until recipient replies')
+      ) {
+        Alert.alert(
+          'Waiting for Reply',
+          'You can only send one initial message to this profile until they reply.',
+          [{ text: 'OK', style: 'default' }]
+        );
+        setCandidates((prev) => [candidate, ...prev]);
+      } else if (errMsg.includes('BONUS_LIKES_VERIFIED_ONLY') || errMsg.includes('photo-verified')) {
         Alert.alert(
           'Photo-Verified Profiles Only',
           'Bonus likes earned from sponsored videos can only be used on photo-verified profiles. You can continue passing or upgrade for unlimited likes.',
@@ -608,6 +646,14 @@ export default function DiscoveryScreen() {
       } else if (errMsg.includes('SWIPE_LIMIT_REACHED') || errMsg.includes('limit reached')) {
         setShowQuotaModal(true);
         setCandidates((prev) => [candidate, ...prev]);
+      } else {
+        if (introNote) {
+          Alert.alert('Send Failed', 'Could not deliver intro note. Please check your connection and try again.');
+          setCandidates((prev) => [candidate, ...prev]);
+        }
+      }
+      if (introNote) {
+        throw err;
       }
     } finally {
       isSwipingRef.current = false;
@@ -786,6 +832,12 @@ export default function DiscoveryScreen() {
                       onLike={() => handleSwipeForCandidate(item, 'LIKE')}
                       onPass={() => handleSwipeForCandidate(item, 'PASS')}
                       onSuperSpark={() => handleSwipeForCandidate(item, 'SUPER_SPARK')}
+                      messageQuota={messageQuota}
+                      onQuotaPress={() => setShowMessageQuotaModal(true)}
+                      onQuotaUpdated={setMessageQuota}
+                      onSendIntroNote={async (note) => {
+                        await handleSwipeForCandidate(item, 'LIKE', note);
+                      }}
                     />
                   )}
                   onEndReached={() => {
@@ -838,6 +890,12 @@ export default function DiscoveryScreen() {
                       canRewind={canRewind && Boolean(lastSwipedCandidate)}
                       isKeyboardOpen={isKeyboardOpen}
                       maxCardHeight={cardRegionHeight}
+                      messageQuota={messageQuota}
+                      onQuotaPress={() => setShowMessageQuotaModal(true)}
+                      onQuotaUpdated={setMessageQuota}
+                      onSendIntroNote={async (note) => {
+                        await handleSwipe('LIKE', note);
+                      }}
                     />
                   </View>
                 </TouchableWithoutFeedback>

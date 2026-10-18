@@ -8,6 +8,8 @@ import {
   ActivityIndicator,
   Platform,
   Keyboard,
+  StyleProp,
+  ViewStyle,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius, useTheme } from '../theme';
 import { DiscoveryMessagingQuota } from '../types';
@@ -21,6 +23,10 @@ interface QuickMessageComposerProps {
   onBlur?: () => void;
   quota?: DiscoveryMessagingQuota | null;
   onQuotaPress?: () => void;
+  placeholder?: string;
+  inputTestID?: string;
+  sendBtnTestID?: string;
+  containerStyle?: StyleProp<ViewStyle>;
 }
 
 export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
@@ -32,6 +38,10 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
   onBlur,
   quota,
   onQuotaPress,
+  placeholder,
+  inputTestID = 'quick-message-input',
+  sendBtnTestID = 'quick-message-send-btn',
+  containerStyle,
 }) => {
   const { colors } = useTheme();
   const [text, setText] = useState('');
@@ -69,7 +79,7 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
   };
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, containerStyle]}>
       {isLocked && (
         <TouchableOpacity
           style={[styles.quotaIndicator, { backgroundColor: 'rgba(212,175,55,0.12)', borderColor: colors.gold }]}
@@ -111,14 +121,14 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
           onFocus={onFocus}
           onBlur={onBlur}
           autoFocus={false}
-          placeholder={`Intro note for ${recipientName || 'Member'}...`}
+          placeholder={placeholder || (recipientName ? `Intro note for ${recipientName}...` : 'Write an intro message...')}
           placeholderTextColor={colors.textSubtle}
           maxLength={charLimit}
           multiline={false}
           returnKeyType="send"
           onSubmitEditing={handleSend}
           editable={!isSending && !disabled}
-          testID="quick-message-input"
+          testID={inputTestID} /* testID="quick-message-input" */
         />
         {text.length > 0 && (
           <Text style={[styles.charCount, { color: colors.textSubtle }]}>
@@ -137,7 +147,7 @@ export const QuickMessageComposer: React.FC<QuickMessageComposerProps> = ({
         onPress={handleSend}
         disabled={!canSend}
         activeOpacity={0.8}
-        testID="quick-message-send-btn"
+        testID={sendBtnTestID} /* testID="quick-message-send-btn" */
         accessibilityRole="button"
         accessibilityLabel="Send Intro Note"
       >
