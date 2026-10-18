@@ -191,6 +191,7 @@ export default function LikesScreen() {
                             id: m.id,
                             name: m.target_profile.display_name,
                             recipientId: m.target_profile.user_id,
+                            avatar: m.target_profile.avatar_url || '',
                           },
                         })
                       }

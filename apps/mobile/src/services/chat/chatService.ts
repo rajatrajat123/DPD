@@ -64,6 +64,7 @@ export function normalizeMessage(raw: any): Message {
     message_type: raw.message_type || (raw.media_asset_id ? 'IMAGE' : 'TEXT'),
     media_asset_id: raw.media_asset_id,
     media_url: raw.media_url,
+    audio_duration_ms: raw.audio_duration_ms || raw.duration_ms,
     delivered_at: raw.delivered_at || null,
     read_at: raw.read_at || null,
     status,
@@ -121,9 +122,34 @@ export function normalizeConversation(raw: any, currentUserId?: string): Convers
           read: Boolean(lastMsg.is_read || lastMsg.read),
         }
       : undefined,
-    unread_count: raw.unread_count || 0,
+    unread_count: Math.max(0, Number(raw.unread_count) || 0),
     updated_at: raw.last_message_at || raw.created_at || new Date().toISOString(),
   };
+}
+
+/**
+ * Authoritatively counts unread incoming messages from a message history list.
+ * Strictly excludes messages sent by the current user and messages already marked as read.
+ */
+export function countUnreadIncomingMessages(messages: Message[], currentUserId?: string): number {
+  if (!Array.isArray(messages)) return 0;
+  return messages.filter((m) => {
+    const isMe =
+      (currentUserId && (m.sender_user_id === currentUserId || m.sender_id === currentUserId)) ||
+      m.sender_user_id === 'me' ||
+      m.sender_id === 'me';
+    if (isMe) return false;
+    const isRead = Boolean(m.read_at) || m.status === 'READ';
+    return !isRead;
+  }).length;
+}
+
+/**
+ * Calculates total unread incoming messages across conversations without double-counting.
+ */
+export function calculateTotalUnreadCount(conversations: Conversation[]): number {
+  if (!Array.isArray(conversations)) return 0;
+  return conversations.reduce((sum, c) => sum + (c.unread_count > 0 ? c.unread_count : 0), 0);
 }
 
 class ChatWebSocketClient {
@@ -209,14 +235,15 @@ class ChatWebSocketClient {
     content: string,
     clientMessageId?: string,
     mediaAssetId?: string,
-    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO'
+    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'VOICE_NOTE',
+    durationMs?: number
   ): boolean {
     if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
       return false; // Fall back to REST
     }
 
     const resolvedType = messageType || (mediaAssetId ? 'IMAGE' : 'TEXT');
-    const frame = {
+    const frame: any = {
       action: 'message.send',
       conversation_id: conversationId,
       client_message_id: clientMessageId || generateUUID(),
@@ -224,6 +251,10 @@ class ChatWebSocketClient {
       message_type: resolvedType,
       media_asset_id: mediaAssetId,
     };
+    if (durationMs && durationMs > 0) {
+      frame.duration_ms = durationMs;
+      frame.audio_duration_ms = durationMs;
+    }
 
     this.socket.send(JSON.stringify(frame));
     return true;
@@ -354,6 +385,27 @@ class ChatWebSocketClient {
 
 export const chatWebSocket = new ChatWebSocketClient();
 
+// In-memory unread management state
+let currentAuthUserId: string | null = null;
+let activeConversationId: string | null = null;
+const conversationUnreadCounts = new Map<string, number>();
+const matchToConvMap = new Map<string, string>();
+const unreadListeners = new Set<(total: number, conversationId?: string) => void>();
+const seenMessageIds = new Set<string>();
+
+function notifyUnread(changedConvId?: string) {
+  const processedIds = new Set<string>();
+  let total = 0;
+  for (const [id, count] of conversationUnreadCounts.entries()) {
+    const canonicalId = matchToConvMap.get(id) || id;
+    if (!processedIds.has(canonicalId)) {
+      processedIds.add(canonicalId);
+      if (count > 0) total += count;
+    }
+  }
+  unreadListeners.forEach((fn) => fn(total, changedConvId));
+}
+
 export const chatService = {
   /**
    * Fetches active mutual matches
@@ -374,9 +426,30 @@ export const chatService = {
   /**
    * Fetches active conversation threads with unread indicators
    */
-  async getConversations(): Promise<Conversation[]> {
+  async getConversations(currentUserId?: string): Promise<Conversation[]> {
+    if (currentUserId) {
+      currentAuthUserId = currentUserId;
+    }
     const res = await api.get<{ conversations: any[] }>('/api/v1/conversations');
-    return (res.conversations || []).map((c) => normalizeConversation(c));
+    const convs = (res.conversations || []).map((c) => normalizeConversation(c, currentAuthUserId || currentUserId));
+
+    // Update in-memory unread counts from authoritative server state
+    conversationUnreadCounts.clear();
+    matchToConvMap.clear();
+
+    for (const c of convs) {
+      const count = Math.max(0, Number(c.unread_count) || 0);
+      conversationUnreadCounts.set(c.id, count);
+      if (c.match_id) {
+        matchToConvMap.set(c.match_id, c.id);
+        if (c.match_id !== c.id) {
+          conversationUnreadCounts.set(c.match_id, count);
+        }
+      }
+    }
+
+    notifyUnread();
+    return convs;
   },
 
   /**
@@ -398,12 +471,13 @@ export const chatService = {
     content: string,
     currentUserId = 'me',
     mediaAssetId?: string,
-    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO',
-    customClientMessageId?: string
+    messageType?: 'TEXT' | 'IMAGE' | 'VIDEO' | 'AUDIO' | 'VOICE_NOTE',
+    customClientMessageId?: string,
+    durationMs?: number
   ): Promise<Message> {
     const clientMessageId = customClientMessageId || generateUUID();
     const resolvedType = messageType || (mediaAssetId ? 'IMAGE' : 'TEXT');
-    const wsSent = chatWebSocket.sendMessage(conversationId, content, clientMessageId, mediaAssetId, resolvedType);
+    const wsSent = chatWebSocket.sendMessage(conversationId, content, clientMessageId, mediaAssetId, resolvedType, durationMs);
 
     const optimistic: Message = {
       id: clientMessageId,
@@ -415,6 +489,7 @@ export const chatService = {
       content,
       message_type: resolvedType,
       media_asset_id: mediaAssetId,
+      audio_duration_ms: durationMs,
       status: 'SENT',
       created_at: new Date().toISOString(),
     };
@@ -429,8 +504,13 @@ export const chatService = {
       body: content,
       message_type: resolvedType,
       media_asset_id: mediaAssetId,
+      duration_ms: durationMs,
+      audio_duration_ms: durationMs,
     });
-    return normalizeMessage(res);
+    return normalizeMessage({
+      ...res,
+      audio_duration_ms: durationMs || res.audio_duration_ms,
+    });
   },
 
   /**
@@ -461,4 +541,168 @@ export const chatService = {
   async blockMessageRequest(requestId: string): Promise<{ success: boolean }> {
     return api.post<{ success: boolean }>(`/api/v1/message-requests/${requestId}/block`);
   },
+
+  /**
+   * Sets current authenticated user ID for outgoing message detection
+   */
+  setCurrentUserId(userId: string | null): void {
+    currentAuthUserId = userId;
+  },
+
+  /**
+   * Sets the currently open/active chat room.
+   * Incoming messages for this conversation are immediately marked as read and do not increment unread badge.
+   */
+  setActiveConversation(conversationId: string | null): void {
+    activeConversationId = conversationId;
+    if (conversationId) {
+      const resolvedId = matchToConvMap.get(conversationId) || conversationId;
+      conversationUnreadCounts.set(resolvedId, 0);
+      conversationUnreadCounts.set(conversationId, 0);
+      notifyUnread(resolvedId);
+    }
+  },
+
+  /**
+   * Returns current active conversation ID
+   */
+  getActiveConversation(): string | null {
+    return activeConversationId;
+  },
+
+  /**
+   * Marks a conversation's incoming messages as read, clearing unread badge and informing the server
+   */
+  async markConversationAsRead(conversationId: string): Promise<boolean> {
+    if (!conversationId) return false;
+
+    const resolvedId = matchToConvMap.get(conversationId) || conversationId;
+
+    // Immediately update local in-memory unread state for instant UI responsiveness
+    conversationUnreadCounts.set(resolvedId, 0);
+    conversationUnreadCounts.set(conversationId, 0);
+    notifyUnread(resolvedId);
+
+    // 1. Send WebSocket read receipt
+    chatWebSocket.sendReadReceipt(resolvedId);
+
+    // 2. Call REST mark-read endpoint for persistent database update & REST fallback
+    try {
+      await api.post(`/api/v1/conversations/${encodeURIComponent(resolvedId)}/read`);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+
+  /**
+   * Returns the unread incoming message count for a specific conversation
+   */
+  getConversationUnreadCount(conversationId: string): number {
+    const resolvedId = matchToConvMap.get(conversationId) || conversationId;
+    return conversationUnreadCounts.get(resolvedId) ?? conversationUnreadCounts.get(conversationId) ?? 0;
+  },
+
+  /**
+   * Returns the sum of unread incoming messages across unique conversations
+   */
+  getTotalUnreadCount(): number {
+    const processedIds = new Set<string>();
+    let total = 0;
+
+    for (const [id, count] of conversationUnreadCounts.entries()) {
+      const canonicalId = matchToConvMap.get(id) || id;
+      if (!processedIds.has(canonicalId)) {
+        processedIds.add(canonicalId);
+        if (count > 0) total += count;
+      }
+    }
+    return total;
+  },
+
+  /**
+   * Subscribes to unread count updates across conversations
+   */
+  onUnreadCountChange(listener: (totalUnread: number, conversationId?: string) => void): () => void {
+    unreadListeners.add(listener);
+    // Notify listener with current total immediately
+    listener(this.getTotalUnreadCount());
+    return () => {
+      unreadListeners.delete(listener);
+    };
+  },
+
+  /**
+   * Processes an incoming message event to increment unread counts if applicable:
+   * 1. Never counts messages sent by the current user
+   * 2. Ignores messages already marked as read
+   * 3. Ignores duplicate events (by message ID)
+   * 4. If conversation is currently open, marks as read immediately without incrementing badge
+   * 5. Otherwise increments the conversation unread count by 1
+   */
+  handleIncomingMessageUnread(msg: Message, currentUserId?: string): boolean {
+    if (!msg || !msg.conversation_id) return false;
+
+    const myId = currentUserId || currentAuthUserId;
+
+    // 1. Never count messages sent by current user as unread
+    const isMe =
+      (myId && (msg.sender_user_id === myId || msg.sender_id === myId)) ||
+      msg.sender_user_id === 'me' ||
+      msg.sender_id === 'me';
+    if (isMe) return false;
+
+    // 2. Do not increment for messages already marked as read
+    const isRead = Boolean(msg.read_at) || msg.status === 'READ';
+    if (isRead) return false;
+
+    // 3. Do not increment for duplicate message events
+    const msgId = msg.id || msg.client_message_id;
+    if (msgId) {
+      if (seenMessageIds.has(msgId)) return false;
+      seenMessageIds.add(msgId);
+    }
+
+    // 4. If user is currently looking at this conversation, mark as read immediately without incrementing
+    const resolvedId = matchToConvMap.get(msg.conversation_id) || msg.conversation_id;
+    if (activeConversationId === resolvedId || activeConversationId === msg.conversation_id) {
+      chatWebSocket.sendReadReceipt(resolvedId, msg.id);
+      return false;
+    }
+
+    // 5. Increment conversation unread count by 1
+    const current = this.getConversationUnreadCount(resolvedId);
+    conversationUnreadCounts.set(resolvedId, current + 1);
+    conversationUnreadCounts.set(msg.conversation_id, current + 1);
+    notifyUnread(resolvedId);
+    return true;
+  },
+
+  /**
+   * Re-syncs unread counts from server
+   */
+  async refreshUnreadCount(): Promise<number> {
+    try {
+      await this.getConversations();
+    } catch {
+      // Offline fallback
+    }
+    return this.getTotalUnreadCount();
+  },
+
+  /**
+   * Resets local unread tracking state (e.g. for testing or logout)
+   */
+  resetUnreadState(): void {
+    conversationUnreadCounts.clear();
+    matchToConvMap.clear();
+    seenMessageIds.clear();
+    activeConversationId = null;
+    notifyUnread();
+  },
 };
+
+// Real-time unread synchronization: listen to WebSocket message events
+chatWebSocket.onMessage((msg) => {
+  chatService.handleIncomingMessageUnread(msg);
+});

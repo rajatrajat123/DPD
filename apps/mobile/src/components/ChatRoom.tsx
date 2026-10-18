@@ -26,7 +26,9 @@ import { Message, Conversation } from '../types';
 import { chatService, chatWebSocket, ConnectionStatus } from '../services/chat/chatService';
 import { discoveryService } from '../services/discovery/discoveryService';
 import { privacyManager } from '../services/security/privacyManager';
-import { mediaUploader, PickedMedia, UploadedAsset } from '../services/media/mediaUploader';
+import { mediaUploader, PickedMedia, UploadedAsset, buildMediaUrl } from '../services/media/mediaUploader';
+import { audioService, formatAudioDuration, AudioPlaybackState } from '../services/audio/audioService';
+import Constants from 'expo-constants';
 import { useAuth } from '../context/AuthContext';
 
 export type SafetyModalStep = 'MENU' | 'REPORT' | 'BLOCK_CONFIRM' | 'UNMATCH_CONFIRM';
@@ -92,6 +94,7 @@ export function reconcileMessages(prev: Message[], incoming: Message | Message[]
         media_url: item.media_url || existing.media_url,
         media_asset_id: item.media_asset_id || existing.media_asset_id,
         message_type: item.message_type || existing.message_type,
+        audio_duration_ms: item.audio_duration_ms || existing.audio_duration_ms,
         delivered_at: item.delivered_at || existing.delivered_at || null,
         read_at: item.read_at || existing.read_at || null,
         status:
@@ -118,24 +121,8 @@ function generateUUID(): string {
   });
 }
 
-/**
- * Calculates dynamic keyboard avoidance padding across Android device architectures:
- *
- * Case 1: Standard Android with native adjustResize (Phone 1)
- *   The OS window shrinks natively by ~kbHeight (nativeShrinkage >= kbHeight - 25).
- *   Compensation needed: 0. Avoids duplicate shrinkage, blank gap, or displacement.
- *
- * Case 2: Edge-to-edge / curved-screen Android (Phone 2)
- *   The Activity window does NOT shrink (nativeShrinkage = 0).
- *   The container's bottom edge is already bounded above the navigation bar.
- *   The keyboard intrudes into the container by exactly kbHeight.
- *   Compensation needed: kbHeight (without double-counting bottomInset).
- *   Lifts the message composer directly above the IME keyboard boundary.
- *
- * Case 3: Partial native resize
- *   If the window shrinks partially, applies the exact remaining uncompensated difference:
- *   Math.max(0, kbHeight - nativeShrinkage).
- */
+import { computeAndroidKeyboardCompensation as computeAndroidCompensationUtil } from '../utils/keyboardAvoidance';
+
 export function computeAndroidKeyboardCompensation(params: {
   kbHeight: number;
   idleHeight: number;
@@ -143,30 +130,16 @@ export function computeAndroidKeyboardCompensation(params: {
   bottomInset?: number;
   keyboardScreenY?: number;
 }): number {
-  const { kbHeight, idleHeight, currentHeight, bottomInset = 0, keyboardScreenY } = params;
-  if (kbHeight <= 0) return 0;
-
-  const nativeShrinkage = Math.max(0, idleHeight - currentHeight);
-  // Full native resize threshold (allow 25dp tolerance for system bar differences)
-  if (nativeShrinkage >= kbHeight - 25) {
-    return 0; // Case 1: Phone A (OS already resized Activity window)
-  }
-
-  // If accurate keyboardScreenY is provided and within valid screen bounds:
-  if (keyboardScreenY && keyboardScreenY > 0 && keyboardScreenY < idleHeight) {
-    const screenSpaceIntrusion = idleHeight - keyboardScreenY;
-    return Math.max(0, screenSpaceIntrusion - nativeShrinkage);
-  }
-
-  // Geometric edge-to-edge calculation:
-  // Keyboard intrudes from the bottom of the unresized container by kbHeight + bottomInset
-  return Math.max(0, kbHeight + bottomInset - nativeShrinkage);
+  return computeAndroidCompensationUtil(params);
 }
+
+const recipientAvatarCache = new Map<string, string>();
 
 interface ChatRoomProps {
   conversationId: string;
   recipientName: string;
   recipientId: string;
+  recipientAvatar?: string;
   onBack: () => void;
   onUnmatched?: () => void;
 }
@@ -175,6 +148,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   conversationId,
   recipientName,
   recipientId,
+  recipientAvatar,
   onBack,
   onUnmatched,
 }) => {
@@ -184,6 +158,54 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const topInset = Math.max(insets.top, Platform.OS === 'android' ? (StatusBar.currentHeight || 0) : 0);
   const horizontalLeft = Math.max(insets.left, spacing.lg);
   const horizontalRight = Math.max(insets.right, spacing.lg);
+
+  // Recipient Display Profile Picture State
+  const [partnerAvatarUri, setPartnerAvatarUri] = useState<string | null>(() => {
+    if (recipientAvatar) {
+      return buildMediaUrl(recipientAvatar);
+    }
+    return recipientAvatarCache.get(recipientId) || null;
+  });
+  const [avatarLoadError, setAvatarLoadError] = useState(false);
+
+  useEffect(() => {
+    let isMounted = true;
+    setAvatarLoadError(false);
+
+    if (recipientAvatar) {
+      const resolved = buildMediaUrl(recipientAvatar);
+      recipientAvatarCache.set(recipientId, resolved);
+      setPartnerAvatarUri(resolved);
+      return;
+    }
+
+    const cached = recipientAvatarCache.get(recipientId);
+    if (cached) {
+      setPartnerAvatarUri(cached);
+      return;
+    }
+
+    if (recipientId) {
+      discoveryService
+        .getPublicProfile(recipientId)
+        .then((profile) => {
+          if (!isMounted) return;
+          const photoUrl = profile?.photos?.[0]?.url || profile?.photos?.[0]?.thumb_url;
+          if (photoUrl) {
+            const resolved = buildMediaUrl(photoUrl);
+            recipientAvatarCache.set(recipientId, resolved);
+            setPartnerAvatarUri(resolved);
+          }
+        })
+        .catch(() => {
+          // Fallback monogram will be used
+        });
+    }
+
+    return () => {
+      isMounted = false;
+    };
+  }, [recipientId, recipientAvatar]);
 
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputText, setInputText] = useState('');
@@ -212,6 +234,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   const [mediaAssetUrls, setMediaAssetUrls] = useState<Record<string, UploadedAsset>>({});
   const [mediaAssetErrors, setMediaAssetErrors] = useState<Record<string, boolean>>({});
   const [loadingAssetIds, setLoadingAssetIds] = useState<Record<string, boolean>>({});
+
+  // Voice Note Recording & Playback States
+  const [isRecording, setIsRecording] = useState(false);
+  const [recordingDurationMs, setRecordingDurationMs] = useState(0);
+  const [recordedAudio, setRecordedAudio] = useState<{ uri: string; durationMs: number } | null>(null);
+  const [previewPlayback, setPreviewPlayback] = useState<AudioPlaybackState | null>(null);
+  const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
+  const [messagePlaybackState, setMessagePlaybackState] = useState<AudioPlaybackState | null>(null);
+  const [loadingAudioMessageId, setLoadingAudioMessageId] = useState<string | null>(null);
+
+  const hasLoggedClientAudit = useRef(false);
+  if (!hasLoggedClientAudit.current) {
+    hasLoggedClientAudit.current = true;
+    try {
+      const gExpo = (globalThis as any).expo;
+      const modules = gExpo?.modules ? Object.keys(gExpo.modules) : [];
+      console.log('[AURA_NATIVE_CLIENT_AUDIT]', JSON.stringify({
+        appOwnership: Constants?.appOwnership || null,
+        executionEnvironment: Constants?.executionEnvironment || null,
+        expoVersion: Constants?.expoVersion || null,
+        nativeAppVersion: Constants?.nativeAppVersion || null,
+        nativeBuildVersion: Constants?.nativeBuildVersion || null,
+        platform: Platform.OS,
+        hasExpoAudio: Boolean(gExpo?.modules?.ExpoAudio),
+        isAudioServiceAvailable: audioService.isAvailable(),
+        isPlaybackAvailable: audioService.isPlaybackAvailable(),
+        installedModulesCount: modules.length,
+        installedModules: modules,
+      }));
+    } catch (e: any) {
+      console.log('[AURA_NATIVE_CLIENT_AUDIT_ERROR]', e?.message);
+    }
+  }
+
+  // Unload audio resources on ChatRoom unmount
+  useEffect(() => {
+    return () => {
+      audioService.unloadCurrentSound().catch(() => {});
+      audioService.cancelRecording().catch(() => {});
+    };
+  }, []);
 
   // Android hardware back handling for Modals (Safety, Attachment Menu, Media Viewers)
   // While any modal is open, consumes the Back event to dismiss modal without navigating away from chat
@@ -450,13 +513,19 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       if (history.length < 50) {
         setHasMore(false);
       }
+      const hasUnread = history.some(
+        (m) => m.sender_user_id !== user?.id && m.sender_id !== 'me' && !m.read_at && m.status !== 'READ'
+      );
+      if (hasUnread) {
+        chatService.markConversationAsRead(conversationId);
+      }
     } catch {
       // Offline fallback
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [conversationId]);
+  }, [conversationId, user?.id]);
 
   const loadOlderMessages = async () => {
     if (isLoadingOlder || !hasMore || messages.length === 0) return;
@@ -487,6 +556,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   };
 
   useEffect(() => {
+    chatService.setActiveConversation(conversationId);
+    chatService.markConversationAsRead(conversationId);
     loadMessages();
 
     if (chatWebSocket.connectionStatus === 'DISCONNECTED') {
@@ -499,8 +570,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const unsubMsg = chatWebSocket.onMessage((newMsg) => {
       if (newMsg.conversation_id === conversationId) {
         setMessages((prev) => reconcileMessages(prev, newMsg));
-        if (newMsg.sender_user_id !== user?.id) {
-          chatWebSocket.sendReadReceipt(conversationId, newMsg.id);
+        if (newMsg.sender_user_id !== user?.id && newMsg.sender_id !== 'me') {
+          chatService.markConversationAsRead(conversationId);
         }
       }
     });
@@ -560,6 +631,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     });
 
     return () => {
+      chatService.setActiveConversation(null);
+      chatService.markConversationAsRead(conversationId);
       unsubMsg();
       unsubDelivery();
       unsubRead();
@@ -677,24 +750,235 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
   };
 
   const handleCancelAttachment = () => {
+    if (recordedAudio) {
+      audioService.unloadCurrentSound().catch(() => {});
+      setRecordedAudio(null);
+      setPreviewPlayback(null);
+    }
     setPendingAttachment(null);
     setUploadStepText('');
   };
 
   const handleRetryMessage = (failedMsg: Message) => {
     if (failedMsg.media_url) {
+      const isAud = failedMsg.message_type === 'AUDIO' || failedMsg.message_type === 'VOICE_NOTE';
+      const isVid = failedMsg.message_type === 'VIDEO';
       setPendingAttachment({
         uri: failedMsg.media_url,
-        width: 720,
-        height: 1280,
-        mimeType: failedMsg.message_type === 'VIDEO' ? 'video/mp4' : 'image/jpeg',
-        mediaType: failedMsg.message_type === 'VIDEO' ? 'VIDEO' : 'IMAGE',
+        width: isAud ? 0 : 720,
+        height: isAud ? 0 : 1280,
+        mimeType: isAud ? 'audio/mp4' : isVid ? 'video/mp4' : 'image/jpeg',
+        mediaType: isAud ? 'AUDIO' : isVid ? 'VIDEO' : 'IMAGE',
+        durationMs: failedMsg.audio_duration_ms,
+        fileName: isAud ? 'voice_note.m4a' : isVid ? 'attachment.mp4' : 'attachment.jpg',
       });
+      if (isAud) {
+        setRecordedAudio({
+          uri: failedMsg.media_url,
+          durationMs: failedMsg.audio_duration_ms || 0,
+        });
+      }
     }
     if (failedMsg.body) {
       setInputText(failedMsg.body);
     }
     setMessages((prev) => prev.filter((m) => m.id !== failedMsg.id && m.client_message_id !== failedMsg.client_message_id));
+  };
+
+  const handleStartRecording = async () => {
+    Keyboard.dismiss();
+    await audioService.unloadCurrentSound();
+    setPlayingMessageId(null);
+    setMessagePlaybackState(null);
+    setPreviewPlayback(null);
+
+    if (!audioService.isAvailable()) {
+      Alert.alert(
+        'Voice Notes Unavailable',
+        'Voice note recording requires an updated native app build containing audio modules.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    const { granted } = await audioService.requestMicrophonePermission();
+    if (!granted) {
+      Alert.alert(
+        'Microphone Access Required',
+        'Aura needs permission to access your microphone to record voice notes.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Settings', onPress: () => Linking.openSettings() },
+        ]
+      );
+      return;
+    }
+
+    setRecordingDurationMs(0);
+    setIsRecording(true);
+    const started = await audioService.startRecording((ms) => {
+      setRecordingDurationMs(ms);
+    });
+
+    if (!started) {
+      setIsRecording(false);
+      setRecordingDurationMs(0);
+      Alert.alert('Recording Error', 'Could not start audio recording. Please try again.');
+    }
+  };
+
+  const handleCancelRecording = async () => {
+    await audioService.cancelRecording();
+    setIsRecording(false);
+    setRecordingDurationMs(0);
+  };
+
+  const handleStopRecording = async () => {
+    const result = await audioService.stopRecording();
+    setIsRecording(false);
+    setRecordingDurationMs(0);
+
+    if (!result || !result.uri) {
+      return;
+    }
+
+    if (result.durationMs < 800) {
+      Alert.alert('Voice Note Too Short', 'Please record for at least 1 second.');
+      return;
+    }
+
+    setRecordedAudio(result);
+    setPendingAttachment({
+      uri: result.uri,
+      mimeType: 'audio/mp4',
+      mediaType: 'AUDIO',
+      durationMs: result.durationMs,
+      fileName: 'voice_note.m4a',
+    });
+  };
+
+  const handleTogglePlayPreview = async () => {
+    if (!recordedAudio) return;
+    if (previewPlayback?.isPlaying) {
+      await audioService.pauseSound();
+      setPreviewPlayback((prev) => (prev ? { ...prev, isPlaying: false } : null));
+    } else {
+      await audioService.playSound(
+        recordedAudio.uri,
+        (st) => {
+          setPreviewPlayback(st);
+        },
+        previewPlayback?.positionMs || 0
+      );
+    }
+  };
+
+  const handleDiscardRecordedAudio = async () => {
+    await audioService.unloadCurrentSound();
+    setRecordedAudio(null);
+    setPendingAttachment(null);
+    setPreviewPlayback(null);
+  };
+
+  const handleTogglePlayVoice = async (msg: Message) => {
+    const msgId = msg.id || msg.client_message_id;
+    if (!msgId) return;
+
+    if (playingMessageId === msgId) {
+      if (messagePlaybackState?.isPlaying) {
+        await audioService.pauseSound();
+        setMessagePlaybackState((prev) => (prev ? { ...prev, isPlaying: false } : null));
+        return;
+      } else {
+        const soundUri =
+          msg.media_url || (msg.media_asset_id ? mediaAssetUrls[msg.media_asset_id]?.audio_url : null);
+        if (soundUri) {
+          await audioService.playSound(
+            soundUri,
+            (st) => {
+              setMessagePlaybackState(st);
+              if (!st.isPlaying && (st.positionMs === 0 || (st.durationMs > 0 && st.positionMs >= st.durationMs))) {
+                setPlayingMessageId(null);
+                setMessagePlaybackState(null);
+              }
+            },
+            messagePlaybackState?.positionMs || 0
+          );
+          return;
+        }
+      }
+    }
+
+    let audioUrl =
+      msg.media_url || (msg.media_asset_id ? mediaAssetUrls[msg.media_asset_id]?.audio_url : null);
+
+    const isAvail = audioService.isPlaybackAvailable();
+    if (!isAvail) {
+      const gExpo = (globalThis as any).expo;
+      console.log('[AURA_PLAY_VOICE_UNAVAILABLE]', JSON.stringify({
+        msgId,
+        hasExpoAudio: Boolean(gExpo?.modules?.ExpoAudio),
+        isAudioServiceAvailable: audioService.isAvailable(),
+        isPlaybackAvailable: isAvail,
+        audioUrl,
+        msgDurationMs: msg.audio_duration_ms,
+      }));
+      Alert.alert(
+        'Audio Playback Unavailable',
+        'Audio playback requires an updated native app build containing audio modules.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    await audioService.unloadCurrentSound();
+    setPlayingMessageId(msgId);
+    setMessagePlaybackState(null);
+
+    if (!audioUrl && msg.media_asset_id) {
+      setLoadingAudioMessageId(msgId);
+      try {
+        const asset = await mediaUploader.getChatMediaAsset(msg.media_asset_id);
+        if (asset) {
+          setMediaAssetUrls((prev) => ({ ...prev, [msg.media_asset_id!]: asset }));
+          audioUrl = asset.audio_url || asset.card_url || asset.full_url;
+        }
+      } catch {
+        setMediaAssetErrors((prev) => ({ ...prev, [msg.media_asset_id!]: true }));
+      } finally {
+        setLoadingAudioMessageId(null);
+      }
+    }
+
+    if (!audioUrl) {
+      setPlayingMessageId(null);
+      Alert.alert('Audio Unavailable', 'Could not load audio file. Please try again.');
+      return;
+    }
+
+    const success = await audioService.playSound(audioUrl, (st) => {
+      setMessagePlaybackState(st);
+      if (!st.isPlaying && (st.positionMs === 0 || (st.durationMs > 0 && st.positionMs >= st.durationMs))) {
+        setPlayingMessageId(null);
+        setMessagePlaybackState(null);
+      }
+    });
+
+    if (!success) {
+      setPlayingMessageId(null);
+      setMessagePlaybackState(null);
+      if (msg.media_asset_id) {
+        setMediaAssetErrors((prev) => ({ ...prev, [msg.media_asset_id!]: true }));
+      }
+      Alert.alert('Playback Failed', 'Could not play voice note.');
+    }
+  };
+
+  const handleSeekVoice = async (msg: Message, ratio: number) => {
+    const msgId = msg.id || msg.client_message_id;
+    if (playingMessageId !== msgId || !messagePlaybackState?.durationMs) return;
+    const targetMs = Math.round(messagePlaybackState.durationMs * Math.min(1, Math.max(0, ratio)));
+    await audioService.seekTo(targetMs);
   };
 
   const handleInputChange = (text: string) => {
@@ -716,6 +1000,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     setIsSending(true);
     setInputText('');
     setPendingAttachment(null);
+    setRecordedAudio(null);
+    setPreviewPlayback(null);
     setUploadStepText('');
     chatWebSocket.sendTyping(conversationId, false);
 
@@ -734,6 +1020,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         content: text,
         message_type: msgType,
         media_url: attachmentToSend.uri,
+        audio_duration_ms: attachmentToSend.durationMs,
         status: 'PENDING',
         created_at: new Date().toISOString(),
       };
@@ -744,7 +1031,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
         setUploadStepText('Uploading...');
         const uploaded = await mediaUploader.uploadChatAttachment(attachmentToSend, (step) => {
           if (step === 'STRIPPING_EXIF') setUploadStepText('Optimizing photo...');
-          else if (step === 'UPLOADING') setUploadStepText('Uploading...');
+          else if (step === 'UPLOADING') setUploadStepText(attachmentToSend.mediaType === 'AUDIO' ? 'Uploading voice note...' : 'Uploading...');
           else if (step === 'PROCESSING') setUploadStepText('Processing...');
         });
 
@@ -755,7 +1042,8 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           user?.id || 'me',
           uploaded.media_id,
           msgType,
-          clientMsgId
+          clientMsgId,
+          attachmentToSend.durationMs
         );
 
         setMediaAssetUrls((prev) => ({
@@ -765,12 +1053,15 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             card_url: uploaded.card_url || attachmentToSend.uri,
             full_url: uploaded.full_url || attachmentToSend.uri,
             poster_url: uploaded.poster_url || attachmentToSend.uri,
+            audio_url: uploaded.audio_url || attachmentToSend.uri,
+            duration_ms: attachmentToSend.durationMs || uploaded.duration_ms,
           },
         }));
 
         setMessages((prev) => reconcileMessages(prev, {
           ...sentMsg,
-          media_url: uploaded.card_url || uploaded.full_url || attachmentToSend.uri,
+          media_url: uploaded.card_url || uploaded.full_url || uploaded.audio_url || attachmentToSend.uri,
+          audio_duration_ms: attachmentToSend.durationMs || uploaded.duration_ms,
         }));
       } catch {
         // Mark optimistic message as failed with retry action
@@ -893,8 +1184,11 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const isFailed = item.status === 'FAILED';
     const isPending = item.status === 'PENDING';
 
-    const isImage = item.message_type === 'IMAGE' || (Boolean(item.media_asset_id) && item.message_type !== 'VIDEO');
+    const isAudio = item.message_type === 'AUDIO' || item.message_type === 'VOICE_NOTE';
     const isVideo = item.message_type === 'VIDEO';
+    const isImage =
+      item.message_type === 'IMAGE' ||
+      (Boolean(item.media_asset_id) && !isVideo && !isAudio);
 
     const assetInfo = item.media_asset_id ? mediaAssetUrls[item.media_asset_id] : null;
     const hasMediaError = Boolean(item.media_asset_id && mediaAssetErrors[item.media_asset_id]);
@@ -1003,6 +1297,128 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             </TouchableOpacity>
           )}
 
+          {/* Voice Note Attachment Bubble */}
+          {isAudio && (
+            <View style={styles.voiceBubbleContainer} testID="voice-message-bubble">
+              {hasMediaError ? (
+                <View style={styles.voiceErrorContainer}>
+                  <Text style={styles.mediaErrorIcon}>⚠️</Text>
+                  <Text style={styles.mediaErrorText}>Could not load voice note</Text>
+                  <TouchableOpacity
+                    style={styles.mediaRetryBtn}
+                    onPress={() => item.media_asset_id && retryLoadMediaAsset(item.media_asset_id)}
+                    testID="voice-retry-btn"
+                    accessibilityRole="button"
+                    accessibilityLabel="Retry loading voice note"
+                  >
+                    <Text style={styles.mediaRetryLink}>Tap to retry</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View style={styles.voiceControlsRow}>
+                  <TouchableOpacity
+                    style={[
+                      styles.voicePlayPauseBtn,
+                      {
+                        backgroundColor: isMe ? colors.gold : colors.goldMuted,
+                        borderColor: colors.gold,
+                      },
+                    ]}
+                    onPress={() => handleTogglePlayVoice(item)}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      playingMessageId === (item.id || item.client_message_id) && messagePlaybackState?.isPlaying
+                        ? 'Pause voice note'
+                        : 'Play voice note'
+                    }
+                    testID="voice-play-pause-btn"
+                    disabled={isPending}
+                  >
+                    {loadingAudioMessageId === (item.id || item.client_message_id) ||
+                    (playingMessageId === (item.id || item.client_message_id) && messagePlaybackState?.isBuffering) ? (
+                      <ActivityIndicator color={isMe ? colors.textInverse : colors.gold} size="small" />
+                    ) : (
+                      <Text
+                        style={[
+                          styles.voicePlayPauseIcon,
+                          { color: isMe ? colors.textInverse : colors.gold },
+                        ]}
+                      >
+                        {playingMessageId === (item.id || item.client_message_id) && messagePlaybackState?.isPlaying
+                          ? '⏸'
+                          : '▶'}
+                      </Text>
+                    )}
+                  </TouchableOpacity>
+
+                  <View style={styles.voiceWaveformCol}>
+                    <TouchableOpacity
+                      activeOpacity={0.8}
+                      style={styles.voiceTrackContainer}
+                      onPress={(e) => {
+                        const width = 140;
+                        const x = e.nativeEvent.locationX;
+                        handleSeekVoice(item, Math.max(0, Math.min(1, x / width)));
+                      }}
+                      accessibilityLabel="Audio timeline scrubber"
+                    >
+                      <View
+                        style={[
+                          styles.voiceTrackBg,
+                          { backgroundColor: isMe ? 'rgba(255, 255, 255, 0.2)' : colors.border },
+                        ]}
+                      >
+                        <View
+                          style={[
+                            styles.voiceTrackProgress,
+                            {
+                              backgroundColor: colors.gold,
+                              width: `${
+                                playingMessageId === (item.id || item.client_message_id) && messagePlaybackState?.durationMs
+                                  ? Math.min(
+                                      100,
+                                      Math.max(
+                                        0,
+                                        (messagePlaybackState.positionMs / messagePlaybackState.durationMs) * 100
+                                      )
+                                    )
+                                  : 0
+                              }%`,
+                            },
+                          ]}
+                        />
+                      </View>
+                    </TouchableOpacity>
+
+                    <View style={styles.voiceMetaRow}>
+                      <Text
+                        style={[
+                          styles.voiceDurationText,
+                          { color: isMe ? colors.text : colors.textMuted },
+                        ]}
+                      >
+                        {playingMessageId === (item.id || item.client_message_id) && messagePlaybackState
+                          ? `${formatAudioDuration(messagePlaybackState.positionMs)} / ${formatAudioDuration(
+                              messagePlaybackState.durationMs || item.audio_duration_ms || assetInfo?.duration_ms || 0
+                            )}`
+                          : formatAudioDuration(item.audio_duration_ms || assetInfo?.duration_ms || 0)}
+                      </Text>
+                      <Text style={[styles.voiceTypeBadge, { color: colors.gold }]}>
+                        🎙️ Voice note
+                      </Text>
+                    </View>
+                  </View>
+                </View>
+              )}
+
+              {isPending && (
+                <View style={styles.msgPendingOverlay}>
+                  <ActivityIndicator color="#ffffff" size="small" />
+                </View>
+              )}
+            </View>
+          )}
+
           {/* Text / Caption */}
           {Boolean(textContent) && (
             <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem, { color: colors.text }]}>
@@ -1071,12 +1487,52 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
             },
           ]}
         >
-        <TouchableOpacity style={styles.backButton} onPress={onBack} activeOpacity={0.7}>
+        <TouchableOpacity
+          style={styles.backButton}
+          onPress={onBack}
+          activeOpacity={0.7}
+          accessibilityRole="button"
+          accessibilityLabel="Back"
+        >
           <Text style={[styles.backButtonText, { color: colors.gold }]}>←</Text>
         </TouchableOpacity>
 
+        <View
+          style={[
+            styles.headerAvatarContainer,
+            { borderColor: colors.border, backgroundColor: colors.cardMuted },
+          ]}
+          testID="chat-header-avatar-container"
+        >
+          {partnerAvatarUri && !avatarLoadError ? (
+            <Image
+              source={{ uri: partnerAvatarUri }}
+              style={styles.headerAvatarImage}
+              resizeMode="cover"
+              onError={() => setAvatarLoadError(true)}
+              testID="chat-header-avatar-image"
+              accessibilityRole="image"
+              accessibilityLabel={`${recipientName}'s profile picture`}
+            />
+          ) : (
+            <View
+              style={[
+                styles.headerAvatarFallback,
+                { backgroundColor: colors.backgroundElevated },
+              ]}
+              testID="chat-header-avatar-fallback"
+            >
+              <Text style={[styles.headerAvatarInitial, { color: colors.gold }]}>
+                {recipientName ? recipientName.trim().charAt(0).toUpperCase() : '?'}
+              </Text>
+            </View>
+          )}
+        </View>
+
         <View style={styles.headerTitleContainer}>
-          <Text style={[styles.headerTitle, { color: colors.text }]}>{recipientName}</Text>
+          <Text style={[styles.headerTitle, { color: colors.text }]} numberOfLines={1} ellipsizeMode="tail">
+            {recipientName}
+          </Text>
           <View style={styles.statusPill}>
             <View
               style={[
@@ -1169,38 +1625,89 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           ]}
           testID="chat-attachment-preview"
         >
-          <View style={styles.attachPreviewThumbWrap}>
-            <Image
-              source={{ uri: pendingAttachment.uri }}
-              style={styles.attachPreviewThumb}
-              resizeMode="cover"
-            />
-            {pendingAttachment.mediaType === 'VIDEO' && (
-              <View style={styles.attachPreviewVideoBadge}>
-                <Text style={styles.attachPreviewVideoBadgeText}>▶</Text>
+          {pendingAttachment.mediaType === 'AUDIO' ? (
+            <View style={styles.audioPreviewContainer} testID="chat-audio-preview-tray">
+              <TouchableOpacity
+                style={[styles.audioPreviewPlayBtn, { backgroundColor: colors.gold }]}
+                onPress={handleTogglePlayPreview}
+                accessibilityRole="button"
+                accessibilityLabel={previewPlayback?.isPlaying ? 'Pause preview' : 'Play preview'}
+                testID="chat-audio-preview-play-btn"
+              >
+                <Text style={[styles.audioPreviewPlayText, { color: colors.textInverse }]}>
+                  {previewPlayback?.isPlaying ? '⏸' : '▶'}
+                </Text>
+              </TouchableOpacity>
+              <View style={styles.audioPreviewInfo}>
+                <Text style={[styles.attachPreviewTitle, { color: colors.text }]}>Voice Note Preview</Text>
+                <View style={styles.audioPreviewTrack}>
+                  <View
+                    style={[
+                      styles.audioPreviewProgress,
+                      {
+                        backgroundColor: colors.gold,
+                        width: `${
+                          previewPlayback?.durationMs && previewPlayback.durationMs > 0
+                            ? Math.min(100, Math.max(0, (previewPlayback.positionMs / previewPlayback.durationMs) * 100))
+                            : 0
+                        }%`,
+                      },
+                    ]}
+                  />
+                </View>
+                <Text style={[styles.attachPreviewStatus, { color: uploadStepText ? colors.gold : colors.textMuted }]}>
+                  {uploadStepText ||
+                    `${formatAudioDuration(previewPlayback?.positionMs || 0)} / ${formatAudioDuration(
+                      pendingAttachment.durationMs || 0
+                    )}`}
+                </Text>
               </View>
-            )}
-          </View>
-          <View style={styles.attachPreviewInfo}>
-            <Text style={[styles.attachPreviewTitle, { color: colors.text }]} numberOfLines={1}>
-              {pendingAttachment.mediaType === 'VIDEO' ? 'Video Attachment' : 'Photo Attachment'}
-            </Text>
-            <Text style={[styles.attachPreviewStatus, { color: uploadStepText ? colors.gold : colors.textMuted }]}>
-              {uploadStepText ||
-                (pendingAttachment.mediaType === 'VIDEO' && pendingAttachment.durationMs
-                  ? `${Math.round(pendingAttachment.durationMs / 1000)}s`
-                  : 'Ready to send')}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={[styles.attachPreviewCloseBtn, { backgroundColor: colors.backgroundElevated }]}
-            onPress={handleCancelAttachment}
-            accessibilityRole="button"
-            accessibilityLabel="Cancel attachment"
-            testID="chat-cancel-attachment-btn"
-          >
-            <Text style={[styles.attachPreviewCloseText, { color: colors.textMuted }]}>✕</Text>
-          </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.attachPreviewCloseBtn, { backgroundColor: colors.backgroundElevated }]}
+                onPress={handleDiscardRecordedAudio}
+                accessibilityRole="button"
+                accessibilityLabel="Discard voice note"
+                testID="chat-discard-audio-preview-btn"
+              >
+                <Text style={[styles.attachPreviewCloseText, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
+            <>
+              <View style={styles.attachPreviewThumbWrap}>
+                <Image
+                  source={{ uri: pendingAttachment.uri }}
+                  style={styles.attachPreviewThumb}
+                  resizeMode="cover"
+                />
+                {pendingAttachment.mediaType === 'VIDEO' && (
+                  <View style={styles.attachPreviewVideoBadge}>
+                    <Text style={styles.attachPreviewVideoBadgeText}>▶</Text>
+                  </View>
+                )}
+              </View>
+              <View style={styles.attachPreviewInfo}>
+                <Text style={[styles.attachPreviewTitle, { color: colors.text }]} numberOfLines={1}>
+                  {pendingAttachment.mediaType === 'VIDEO' ? 'Video Attachment' : 'Photo Attachment'}
+                </Text>
+                <Text style={[styles.attachPreviewStatus, { color: uploadStepText ? colors.gold : colors.textMuted }]}>
+                  {uploadStepText ||
+                    (pendingAttachment.mediaType === 'VIDEO' && pendingAttachment.durationMs
+                      ? `${Math.round(pendingAttachment.durationMs / 1000)}s`
+                      : 'Ready to send')}
+                </Text>
+              </View>
+              <TouchableOpacity
+                style={[styles.attachPreviewCloseBtn, { backgroundColor: colors.backgroundElevated }]}
+                onPress={handleCancelAttachment}
+                accessibilityRole="button"
+                accessibilityLabel="Cancel attachment"
+                testID="chat-cancel-attachment-btn"
+              >
+                <Text style={[styles.attachPreviewCloseText, { color: colors.textMuted }]}>✕</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </View>
       )}
 
@@ -1225,49 +1732,97 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           },
         ]}
       >
-        <TouchableOpacity
-          style={[styles.attachButton, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
-          onPress={() => setIsAttachmentMenuVisible(true)}
-          accessibilityRole="button"
-          accessibilityLabel="Add attachment"
-          testID="chat-attach-btn"
-          disabled={isSending || isPickingMedia}
-        >
-          {isPickingMedia ? (
-            <ActivityIndicator color={colors.gold} size="small" />
-          ) : (
-            <Text style={[styles.attachButtonText, { color: colors.gold }]}>📎</Text>
-          )}
-        </TouchableOpacity>
+        {isRecording ? (
+          <View style={styles.recordingRow}>
+            {/* Cancel Recording button */}
+            <TouchableOpacity
+              style={[styles.recordingCancelBtn, { backgroundColor: colors.backgroundElevated }]}
+              onPress={handleCancelRecording}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel recording"
+              testID="chat-cancel-recording-btn"
+            >
+              <Text style={styles.recordingCancelIcon}>🗑️</Text>
+            </TouchableOpacity>
 
-        <TextInput
-          style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
-          value={inputText}
-          onChangeText={handleInputChange}
-          placeholder="Send a private message..."
-          placeholderTextColor={colors.textSubtle}
-          multiline
-          maxLength={1000}
-        />
-        <TouchableOpacity
-          style={[
-            styles.sendButton,
-            { backgroundColor: colors.gold },
-            (!inputText.trim() && !pendingAttachment) || isSending ? [styles.sendButtonDisabled, { backgroundColor: colors.cardMuted }] : null,
-          ]}
-          onPress={handleSend}
-          disabled={(!inputText.trim() && !pendingAttachment) || isSending}
-          activeOpacity={0.8}
-          accessibilityRole="button"
-          accessibilityLabel="Send Message"
-          testID="chat-send-btn"
-        >
-          {isSending ? (
-            <ActivityIndicator color={colors.textInverse} size="small" />
-          ) : (
-            <Text style={[styles.sendButtonText, { color: colors.textInverse }]}>↑</Text>
-          )}
-        </TouchableOpacity>
+            {/* Recording Live Indicator & Timer */}
+            <View style={styles.recordingLiveContainer}>
+              <View style={styles.recordingPulseDot} />
+              <Text style={[styles.recordingTimerText, { color: colors.ruby }]}>
+                Recording {formatAudioDuration(recordingDurationMs)}
+              </Text>
+            </View>
+
+            {/* Stop / Finish Recording button */}
+            <TouchableOpacity
+              style={[styles.recordingDoneBtn, { backgroundColor: colors.gold }]}
+              onPress={handleStopRecording}
+              accessibilityRole="button"
+              accessibilityLabel="Stop recording"
+              testID="chat-stop-recording-btn"
+            >
+              <Text style={[styles.recordingDoneText, { color: colors.textInverse }]}>✓</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <>
+            <TouchableOpacity
+              style={[styles.attachButton, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+              onPress={() => setIsAttachmentMenuVisible(true)}
+              accessibilityRole="button"
+              accessibilityLabel="Add attachment"
+              testID="chat-attach-btn"
+              disabled={isSending || isPickingMedia}
+            >
+              {isPickingMedia ? (
+                <ActivityIndicator color={colors.gold} size="small" />
+              ) : (
+                <Text style={[styles.attachButtonText, { color: colors.gold }]}>📎</Text>
+              )}
+            </TouchableOpacity>
+
+            <TextInput
+              style={[styles.input, { backgroundColor: colors.backgroundElevated, borderColor: colors.border, color: colors.text }]}
+              value={inputText}
+              onChangeText={handleInputChange}
+              placeholder="Send a private message..."
+              placeholderTextColor={colors.textSubtle}
+              multiline
+              maxLength={1000}
+            />
+
+            <TouchableOpacity
+              style={[styles.micButton, { backgroundColor: colors.backgroundElevated, borderColor: colors.border }]}
+              onPress={handleStartRecording}
+              accessibilityRole="button"
+              accessibilityLabel="Record voice note"
+              testID="chat-mic-btn"
+              disabled={isSending || isPickingMedia}
+            >
+              <Text style={[styles.micButtonText, { color: colors.gold }]}>🎙️</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[
+                styles.sendButton,
+                { backgroundColor: colors.gold },
+                (!inputText.trim() && !pendingAttachment) || isSending ? [styles.sendButtonDisabled, { backgroundColor: colors.cardMuted }] : null,
+              ]}
+              onPress={handleSend}
+              disabled={(!inputText.trim() && !pendingAttachment) || isSending}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+              accessibilityLabel="Send Message"
+              testID="chat-send-btn"
+            >
+              {isSending ? (
+                <ActivityIndicator color={colors.textInverse} size="small" />
+              ) : (
+                <Text style={[styles.sendButtonText, { color: colors.textInverse }]}>↑</Text>
+              )}
+            </TouchableOpacity>
+          </>
+        )}
       </View>
 
       {/* Safety & Member Options Modal */}
@@ -1592,6 +2147,29 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
               </TouchableOpacity>
 
               <TouchableOpacity
+                style={[styles.safetyOptionRow, { borderBottomColor: colors.border }]}
+                onPress={() => {
+                  setIsAttachmentMenuVisible(false);
+                  setTimeout(() => {
+                    handleStartRecording();
+                  }, 150);
+                }}
+                activeOpacity={0.7}
+                accessibilityRole="button"
+                accessibilityLabel="Record Voice Note"
+                testID="chat-attach-voice-btn"
+              >
+                <Text style={styles.safetyOptionIcon}>🎙️</Text>
+                <View style={styles.safetyOptionTextWrap}>
+                  <Text style={[styles.safetyOptionTitle, { color: colors.text }]}>Voice Note</Text>
+                  <Text style={[styles.safetyOptionDesc, { color: colors.textSubtle }]}>
+                    Record and share a compact voice message
+                  </Text>
+                </View>
+                <Text style={[styles.safetyOptionChevron, { color: colors.gold }]}>›</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
                 style={[
                   styles.safetyCancelBtn,
                   { backgroundColor: colors.backgroundElevated, borderColor: colors.border },
@@ -1712,6 +2290,36 @@ const styles = StyleSheet.create({
   backButtonText: {
     ...typography.h2,
     color: colors.gold,
+  },
+  headerAvatarContainer: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    marginRight: spacing.sm,
+    justifyContent: 'center',
+    alignItems: 'center',
+    overflow: 'hidden',
+    backgroundColor: colors.cardMuted,
+    borderWidth: 1.5,
+    borderColor: colors.border,
+  },
+  headerAvatarImage: {
+    width: '100%',
+    height: '100%',
+  },
+  headerAvatarFallback: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 19,
+    backgroundColor: colors.backgroundElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  headerAvatarInitial: {
+    ...typography.body,
+    fontWeight: '700',
+    color: colors.gold,
+    fontSize: 16,
   },
   headerTitleContainer: {
     flex: 1,
@@ -2234,5 +2842,151 @@ const styles = StyleSheet.create({
     ...typography.button,
     fontSize: 15,
     fontWeight: '700',
+  },
+  micButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+    borderWidth: 1,
+  },
+  micButtonText: {
+    fontSize: 18,
+  },
+  recordingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  recordingCancelBtn: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+  },
+  recordingCancelIcon: {
+    fontSize: 18,
+  },
+  recordingLiveContainer: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm,
+  },
+  recordingPulseDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: colors.ruby,
+    marginRight: 8,
+  },
+  recordingTimerText: {
+    ...typography.body,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  recordingDoneBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  recordingDoneText: {
+    fontSize: 20,
+    fontWeight: '700',
+  },
+  audioPreviewContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+  },
+  audioPreviewPlayBtn: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+  },
+  audioPreviewPlayText: {
+    fontSize: 16,
+  },
+  audioPreviewInfo: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  audioPreviewTrack: {
+    height: 4,
+    backgroundColor: colors.border,
+    borderRadius: 2,
+    marginVertical: 4,
+    overflow: 'hidden',
+  },
+  audioPreviewProgress: {
+    height: '100%',
+    borderRadius: 2,
+  },
+  voiceBubbleContainer: {
+    paddingVertical: 4,
+    minWidth: 190,
+    maxWidth: 250,
+  },
+  voiceErrorContainer: {
+    alignItems: 'center',
+    padding: spacing.xs,
+  },
+  voiceControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  voicePlayPauseBtn: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    borderWidth: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginRight: spacing.sm,
+  },
+  voicePlayPauseIcon: {
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  voiceWaveformCol: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+  voiceTrackContainer: {
+    paddingVertical: 6,
+  },
+  voiceTrackBg: {
+    height: 6,
+    borderRadius: 3,
+    overflow: 'hidden',
+  },
+  voiceTrackProgress: {
+    height: '100%',
+    borderRadius: 3,
+  },
+  voiceMetaRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 2,
+  },
+  voiceDurationText: {
+    ...typography.caption,
+    fontSize: 11,
+    fontWeight: '600',
+  },
+  voiceTypeBadge: {
+    ...typography.caption,
+    fontSize: 10,
+    fontWeight: '600',
   },
 });

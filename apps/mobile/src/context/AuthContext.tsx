@@ -2,7 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useCallback } fr
 import { authService, LoginPayload, RegisterPayload, GoogleAuthPayload } from '../services/auth/authService';
 import { secureStorage } from '../services/storage/secureStore';
 import { privacyManager } from '../services/security/privacyManager';
-import { chatWebSocket } from '../services/chat/chatService';
+import { chatWebSocket, chatService } from '../services/chat/chatService';
 import { User, Profile } from '../types';
 
 interface AuthContextValue {
@@ -57,6 +57,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       }
 
       setUser(res.user);
+      if (res.user?.id) {
+        chatService.setCurrentUserId(res.user.id);
+      }
       setProfile(res.profile);
       setIsAgeVerified(verified);
     } catch {
@@ -145,6 +148,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       await authService.logout();
+      chatService.setCurrentUserId(null);
+      chatService.resetUnreadState();
       setUser(null);
       setProfile(null);
       setIsAgeVerified(false);

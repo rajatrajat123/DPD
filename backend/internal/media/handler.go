@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -73,6 +74,13 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		idempotencyKey = r.FormValue("idempotency_key")
 	}
 
+	var durationMs *int
+	if dStr := r.FormValue("duration_ms"); dStr != "" {
+		if d, err := strconv.Atoi(dStr); err == nil && d >= 0 {
+			durationMs = &d
+		}
+	}
+
 	resp, err := h.svc.UploadDirect(
 		r.Context(),
 		authUser.ID,
@@ -82,6 +90,7 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		file,
 		header.Size,
 		idempotencyKey,
+		durationMs,
 	)
 	if err != nil {
 		h.handleServiceError(w, reqID, err)

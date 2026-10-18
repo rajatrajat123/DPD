@@ -91,6 +91,13 @@ func (s *Service) SendMessage(ctx context.Context, senderUserID string, conversa
 	}
 
 	// 3. Persist message idempotently
+	var audioDuration *int
+	if req.AudioDurationMs != nil {
+		audioDuration = req.AudioDurationMs
+	} else if req.DurationMs != nil {
+		audioDuration = req.DurationMs
+	}
+
 	msg := &Message{
 		ConversationID:  conversationID,
 		SenderUserID:    senderUserID,
@@ -98,11 +105,16 @@ func (s *Service) SendMessage(ctx context.Context, senderUserID string, conversa
 		Body:            body,
 		MessageType:     msgType,
 		MediaAssetID:    req.MediaAssetID,
+		AudioDurationMs: audioDuration,
 	}
 
 	saved, isDuplicate, err := s.repo.SaveMessage(ctx, msg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to save message: %w", err)
+	}
+
+	if saved.AudioDurationMs == nil && audioDuration != nil {
+		saved.AudioDurationMs = audioDuration
 	}
 
 	if isDuplicate {
@@ -246,6 +258,8 @@ func (s *Service) handleClientWSAction(client *Client, action WSClientMessage) {
 			Body:            action.Body,
 			MessageType:     action.MessageType,
 			MediaAssetID:    action.MediaAssetID,
+			AudioDurationMs: action.AudioDurationMs,
+			DurationMs:      action.DurationMs,
 		}
 		_, err := s.SendMessage(ctx, client.userID, action.ConversationID, req)
 		if err != nil {

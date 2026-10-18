@@ -21,10 +21,12 @@ var (
 type MessageType string
 
 const (
-	MessageTypeText   MessageType = "TEXT"
-	MessageTypeImage  MessageType = "IMAGE"
-	MessageTypeVideo  MessageType = "VIDEO"
-	MessageTypeSystem MessageType = "SYSTEM"
+	MessageTypeText      MessageType = "TEXT"
+	MessageTypeImage     MessageType = "IMAGE"
+	MessageTypeVideo     MessageType = "VIDEO"
+	MessageTypeAudio     MessageType = "AUDIO"
+	MessageTypeVoiceNote MessageType = "VOICE_NOTE"
+	MessageTypeSystem    MessageType = "SYSTEM"
 )
 
 func ValidateMessageType(t string) (MessageType, error) {
@@ -33,8 +35,10 @@ func ValidateMessageType(t string) (MessageType, error) {
 		return MessageTypeText, nil
 	}
 	switch MessageType(norm) {
-	case MessageTypeText, MessageTypeImage, MessageTypeVideo, MessageTypeSystem:
+	case MessageTypeText, MessageTypeImage, MessageTypeVideo, MessageTypeAudio, MessageTypeSystem:
 		return MessageType(norm), nil
+	case MessageTypeVoiceNote:
+		return MessageTypeAudio, nil
 	default:
 		return "", fmt.Errorf("invalid message type %q", t)
 	}
@@ -48,6 +52,7 @@ type Message struct {
 	Body            string      `json:"body"`
 	MessageType     MessageType `json:"message_type"`
 	MediaAssetID    *string     `json:"media_asset_id,omitempty"`
+	AudioDurationMs *int        `json:"audio_duration_ms,omitempty"`
 	DeliveredAt     *time.Time  `json:"delivered_at,omitempty"`
 	ReadAt          *time.Time  `json:"read_at,omitempty"`
 	DeletedAt       *time.Time  `json:"deleted_at,omitempty"`
@@ -96,10 +101,12 @@ func (c *Conversation) OtherParticipantID(userID string) string {
 }
 
 type SendMessageRequest struct {
-	ClientMessageID string `json:"client_message_id"`
-	Body            string `json:"body"`
-	MessageType     string `json:"message_type,omitempty"`
+	ClientMessageID string  `json:"client_message_id"`
+	Body            string  `json:"body"`
+	MessageType     string  `json:"message_type,omitempty"`
 	MediaAssetID    *string `json:"media_asset_id,omitempty"`
+	AudioDurationMs *int    `json:"audio_duration_ms,omitempty"`
+	DurationMs      *int    `json:"duration_ms,omitempty"`
 }
 
 type MessagesPageResponse struct {
@@ -133,6 +140,8 @@ type WSClientMessage struct {
 	Body            string   `json:"body,omitempty"`
 	MessageType     string   `json:"message_type,omitempty"`
 	MediaAssetID    *string  `json:"media_asset_id,omitempty"`
+	AudioDurationMs *int     `json:"audio_duration_ms,omitempty"`
+	DurationMs      *int     `json:"duration_ms,omitempty"`
 	MessageID       string   `json:"message_id,omitempty"`
 }
 

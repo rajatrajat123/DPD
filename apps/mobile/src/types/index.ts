@@ -207,6 +207,7 @@ export interface Message {
   recipient_id?: string;
   content?: string;
   media_url?: string;
+  audio_duration_ms?: number;
   status?: 'PENDING' | 'SENT' | 'DELIVERED' | 'READ' | 'FAILED';
 }
 

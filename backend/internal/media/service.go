@@ -239,7 +239,7 @@ func (s *Service) CreateUploadIntent(ctx context.Context, ownerUserID string, re
 	}, nil
 }
 
-func (s *Service) UploadDirect(ctx context.Context, ownerUserID string, purposeStr, mediaTypeStr string, filename string, r io.Reader, size int64, idempotencyKey string) (*MediaAssetResponse, error) {
+func (s *Service) UploadDirect(ctx context.Context, ownerUserID string, purposeStr, mediaTypeStr string, filename string, r io.Reader, size int64, idempotencyKey string, optionalDuration ...*int) (*MediaAssetResponse, error) {
 	purpose, err := ValidatePurpose(purposeStr)
 	if err != nil {
 		return nil, err
@@ -280,6 +280,8 @@ func (s *Service) UploadDirect(ctx context.Context, ownerUserID string, purposeS
 	if ext == "" {
 		if mediaType == MediaTypeVideo {
 			ext = ".mp4"
+		} else if mediaType == MediaTypeVoiceNote {
+			ext = ".m4a"
 		} else {
 			ext = ".jpg"
 		}
@@ -291,6 +293,11 @@ func (s *Service) UploadDirect(ctx context.Context, ownerUserID string, purposeS
 		return nil, fmt.Errorf("failed to store quarantine payload: %w", err)
 	}
 
+	var durationMs *int
+	if len(optionalDuration) > 0 {
+		durationMs = optionalDuration[0]
+	}
+
 	asset := &MediaAsset{
 		ID:                assetID,
 		OwnerUserID:       ownerUserID,
@@ -300,6 +307,7 @@ func (s *Service) UploadDirect(ctx context.Context, ownerUserID string, purposeS
 		QuarantineBucket:  "aura-media-quarantine",
 		QuarantineKey:     quarantineKey,
 		OriginalSizeBytes: int64(len(data)),
+		DurationMs:        durationMs,
 		IdempotencyKey:    idempotencyKey,
 	}
 
@@ -355,6 +363,8 @@ func (s *Service) processData(ctx context.Context, asset *MediaAsset, data []byt
 
 	if asset.MediaType == MediaTypeVideo {
 		result, err = s.processor.ProcessVideo(ctx, data, asset.Purpose)
+	} else if asset.MediaType == MediaTypeVoiceNote {
+		result, err = s.processor.ProcessVoiceNote(ctx, data, asset.Purpose)
 	} else {
 		result, err = s.processor.ProcessImage(ctx, data, asset.Purpose)
 	}
@@ -377,7 +387,11 @@ func (s *Service) processData(ctx context.Context, asset *MediaAsset, data []byt
 	approvedBucket := "aura-media-approved"
 	for _, deriv := range result.Derivatives {
 		ext := ".webp"
-		if strings.Contains(deriv.MimeType, "mp4") {
+		if strings.Contains(deriv.MimeType, "mp4") || strings.Contains(deriv.MimeType, "m4a") || deriv.Variant == VariantAudioM4A {
+			ext = ".m4a"
+		} else if strings.Contains(deriv.MimeType, "aac") {
+			ext = ".aac"
+		} else if strings.Contains(deriv.MimeType, "mp4") {
 			ext = ".mp4"
 		} else if strings.Contains(deriv.MimeType, "jpeg") {
 			ext = ".jpg"
@@ -415,7 +429,9 @@ func (s *Service) processData(ctx context.Context, asset *MediaAsset, data []byt
 	asset.OriginalMIME = result.OriginalMIME
 	asset.WidthPx = result.WidthPx
 	asset.HeightPx = result.HeightPx
-	asset.DurationMs = result.DurationMs
+	if result.DurationMs != nil && *result.DurationMs > 0 {
+		asset.DurationMs = result.DurationMs
+	}
 	asset.ExifStripped = result.ExifStripped
 	asset.ModerationVerdict = &result.ModerationVerdict
 

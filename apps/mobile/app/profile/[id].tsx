@@ -287,7 +287,12 @@ export default function ProfileDetailScreen() {
             if (cid) {
               router.push({
                 pathname: '/chat/[id]',
-                params: { id: cid, name: cname, recipientId: uid },
+                params: {
+                  id: cid,
+                  name: cname,
+                  recipientId: uid,
+                  avatar: matchedCandidate.photos?.[0]?.url || '',
+                },
               });
             } else {
               router.push('/(tabs)/chat');

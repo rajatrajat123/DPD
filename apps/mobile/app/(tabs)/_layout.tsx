@@ -3,10 +3,20 @@ import { Tabs } from 'expo-router';
 import { Text, Platform, StyleSheet } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, typography, spacing, useTheme } from '../../src/theme';
+import { chatService } from '../../src/services/chat/chatService';
 
 export default function TabLayout() {
   const insets = useSafeAreaInsets();
   const { colors } = useTheme();
+  const [totalUnread, setTotalUnread] = React.useState<number>(chatService.getTotalUnreadCount());
+
+  React.useEffect(() => {
+    chatService.refreshUnreadCount().catch(() => {});
+    const unsub = chatService.onUnreadCountChange((count) => {
+      setTotalUnread(count);
+    });
+    return unsub;
+  }, []);
 
   // Dynamic bottom inset: on Android adapt to 3-button nav, gesture nav, or curved screens
   const bottomInset = Platform.OS === 'android'
@@ -60,6 +70,18 @@ export default function TabLayout() {
         options={{
           title: 'Chat',
           tabBarIcon: ({ color }) => <Text style={{ color, fontSize: 18 }}>💬</Text>,
+          tabBarBadge: totalUnread > 0 ? totalUnread : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: colors.gold,
+            color: colors.textInverse,
+            fontSize: 10,
+            fontWeight: '700',
+            minWidth: 18,
+            height: 18,
+            borderRadius: 9,
+            lineHeight: Platform.OS === 'android' ? 16 : 18,
+            textAlign: 'center',
+          },
         }}
       />
       <Tabs.Screen

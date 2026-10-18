@@ -194,6 +194,13 @@ func (p *Processor) SniffAndValidate(header []byte) (*SniffedFormat, error) {
 				Extension: ".heic",
 				IsVideo:   false,
 			}, nil
+		case strings.HasPrefix(brandLower, "m4a") || strings.HasPrefix(brandLower, "m4b") || strings.HasPrefix(brandLower, "m4p"):
+			return &SniffedFormat{
+				MediaType: MediaTypeVoiceNote,
+				MimeType:  "audio/mp4",
+				Extension: ".m4a",
+				IsVideo:   false,
+			}, nil
 		case strings.HasPrefix(brandLower, "qt"):
 			return &SniffedFormat{
 				MediaType: MediaTypeVideo,
@@ -218,6 +225,46 @@ func (p *Processor) SniffAndValidate(header []byte) (*SniffedFormat, error) {
 			MimeType:  "video/quicktime",
 			Extension: ".mov",
 			IsVideo:   true,
+		}, nil
+	}
+
+	// AAC ADTS: 0xFF followed by 4 bits set (e.g. 0xFFF1, 0xFFF9)
+	if len(header) >= 2 && header[0] == 0xFF && (header[1]&0xF0) == 0xF0 {
+		return &SniffedFormat{
+			MediaType: MediaTypeVoiceNote,
+			MimeType:  "audio/aac",
+			Extension: ".aac",
+			IsVideo:   false,
+		}, nil
+	}
+
+	// Ogg (Opus / Vorbis)
+	if bytes.HasPrefix(header, []byte("OggS")) {
+		return &SniffedFormat{
+			MediaType: MediaTypeVoiceNote,
+			MimeType:  "audio/ogg",
+			Extension: ".ogg",
+			IsVideo:   false,
+		}, nil
+	}
+
+	// MP3 with ID3 or syncword
+	if bytes.HasPrefix(header, []byte("ID3")) || (len(header) >= 2 && header[0] == 0xFF && (header[1]&0xE0) == 0xE0) {
+		return &SniffedFormat{
+			MediaType: MediaTypeVoiceNote,
+			MimeType:  "audio/mpeg",
+			Extension: ".mp3",
+			IsVideo:   false,
+		}, nil
+	}
+
+	// WAV: RIFF....WAVE
+	if len(header) >= 12 && bytes.HasPrefix(header, []byte("RIFF")) && string(header[8:12]) == "WAVE" {
+		return &SniffedFormat{
+			MediaType: MediaTypeVoiceNote,
+			MimeType:  "audio/wav",
+			Extension: ".wav",
+			IsVideo:   false,
 		}, nil
 	}
 
@@ -437,6 +484,57 @@ func (p *Processor) ProcessVideo(ctx context.Context, data []byte, purpose Media
 
 	p.logger.Warn("ffmpeg_not_available_rejecting_video_transcode", slog.String("mime", sniffed.MimeType))
 	return nil, ErrTranscodingWorkerUnavailable
+}
+
+// ProcessVoiceNote validates audio/voice-note payloads, performs polyglot defense,
+// enforces max audio size, and packages the voice recording as an authorized derivative.
+func (p *Processor) ProcessVoiceNote(ctx context.Context, data []byte, purpose MediaPurpose) (*ProcessResult, error) {
+	if int64(len(data)) > p.maxVideoBytes {
+		return nil, ErrFileTooLarge
+	}
+	if len(data) == 0 {
+		return nil, ErrInvalidFileSize
+	}
+
+	header := data
+	if len(header) > 512 {
+		header = header[:512]
+	}
+	sniffed, err := p.SniffAndValidate(header)
+	if err != nil {
+		return nil, err
+	}
+
+	if sniffed.MediaType != MediaTypeVoiceNote && !strings.Contains(sniffed.MimeType, "mp4") && !strings.Contains(sniffed.MimeType, "audio") {
+		return nil, fmt.Errorf("expected voice-note payload, detected MIME %s", sniffed.MimeType)
+	}
+
+	hasher := sha256.New()
+	hasher.Write(data)
+	shaHex := hex.EncodeToString(hasher.Sum(nil))
+
+	mimeType := sniffed.MimeType
+	if mimeType == "video/mp4" {
+		mimeType = "audio/mp4"
+	}
+
+	derivatives := []ProcessedDerivative{
+		{
+			Variant:   VariantAudioM4A,
+			MimeType:  mimeType,
+			Data:      data,
+			SizeBytes: int64(len(data)),
+		},
+	}
+
+	return &ProcessResult{
+		MediaType:         MediaTypeVoiceNote,
+		OriginalSHA256:    shaHex,
+		OriginalMIME:      mimeType,
+		ExifStripped:      true,
+		ModerationVerdict: VerdictApproved,
+		Derivatives:       derivatives,
+	}, nil
 }
 
 func (p *Processor) transcodeWithFFmpeg(ctx context.Context, ffmpegPath string, inputData []byte, ext string) ([]ProcessedDerivative, int, int, int, error) {

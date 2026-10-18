@@ -7,11 +7,11 @@ import { ProfilePhoto } from '../../types';
 
 export interface PickedMedia {
   uri: string;
-  width: number;
-  height: number;
+  width?: number;
+  height?: number;
   fileSize?: number;
   mimeType: string;
-  mediaType?: 'IMAGE' | 'VIDEO';
+  mediaType?: 'IMAGE' | 'VIDEO' | 'AUDIO';
   durationMs?: number;
   fileName?: string;
 }
@@ -19,12 +19,14 @@ export interface PickedMedia {
 export interface UploadedAsset {
   media_id: string;
   status: 'PENDING_UPLOAD' | 'UPLOADED' | 'PROCESSING' | 'READY' | 'REJECTED' | 'FAILED';
-  media_type?: 'IMAGE' | 'VIDEO';
+  media_type?: 'IMAGE' | 'VIDEO' | 'AUDIO';
   thumb_url?: string;
   card_url?: string;
   full_url?: string;
   poster_url?: string;
   video_url?: string;
+  audio_url?: string;
+  duration_ms?: number;
 }
 
 export type UploadStep = 'STRIPPING_EXIF' | 'REQUESTING_INTENT' | 'UPLOADING' | 'PROCESSING' | 'DONE';
@@ -405,8 +407,9 @@ export const mediaUploader = {
   ): Promise<UploadedAsset> {
     let sanitizedUri = media.uri;
     const isVideo = media.mediaType === 'VIDEO';
+    const isAudio = media.mediaType === 'AUDIO';
 
-    if (!isVideo) {
+    if (!isVideo && !isAudio) {
       onProgress?.('STRIPPING_EXIF');
       sanitizedUri = await this.stripExifAndOptimize(media.uri);
     }
@@ -421,20 +424,24 @@ export const mediaUploader = {
       fileBlob = null;
     }
 
-    const maxLimit = isVideo ? 100 * 1024 * 1024 : config.maxImageSizeBytes;
+    const maxLimit = isVideo ? 100 * 1024 * 1024 : isAudio ? 25 * 1024 * 1024 : config.maxImageSizeBytes;
     if (sizeBytes > 0 && sizeBytes > maxLimit) {
       throw new ApiError(
         400,
         'FILE_TOO_LARGE',
-        isVideo ? 'Video exceeds the maximum 100MB limit.' : 'Image exceeds the maximum 15MB limit.'
+        isVideo
+          ? 'Video exceeds the maximum 100MB limit.'
+          : isAudio
+          ? 'Audio exceeds the maximum 25MB limit.'
+          : 'Image exceeds the maximum 15MB limit.'
       );
     }
 
     onProgress?.('UPLOADING');
-    const idempotencyKey = `chat_${isVideo ? 'vid' : 'img'}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+    const idempotencyKey = `chat_${isVideo ? 'vid' : isAudio ? 'aud' : 'img'}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
     const formData = new FormData();
-    const fileName = media.fileName || (isVideo ? 'attachment.mp4' : 'attachment.jpg');
-    const mimeType = media.mimeType || (isVideo ? 'video/mp4' : 'image/jpeg');
+    const fileName = media.fileName || (isVideo ? 'attachment.mp4' : isAudio ? 'voice_note.m4a' : 'attachment.jpg');
+    const mimeType = media.mimeType || (isVideo ? 'video/mp4' : isAudio ? 'audio/mp4' : 'image/jpeg');
 
     if (Platform.OS === 'web') {
       if (!fileBlob || fileBlob.size <= 0) {
@@ -451,8 +458,11 @@ export const mediaUploader = {
     }
 
     formData.append('purpose', 'CHAT_ATTACHMENT');
-    formData.append('media_type', isVideo ? 'VIDEO' : 'IMAGE');
+    formData.append('media_type', isVideo ? 'VIDEO' : isAudio ? 'VOICE_NOTE' : 'IMAGE');
     formData.append('idempotency_key', idempotencyKey);
+    if (media.durationMs && media.durationMs > 0) {
+      formData.append('duration_ms', String(Math.round(media.durationMs)));
+    }
 
     try {
       const uploadRes = await api.postFormData<{
@@ -476,16 +486,19 @@ export const mediaUploader = {
         const full = res.derivatives?.find((d: any) => d.variant === 'FULL_WEBP' || d.variant === 'FULL_AVIF')?.url || res.full_url;
         const poster = res.derivatives?.find((d: any) => d.variant === 'VIDEO_POSTER')?.url;
         const video = res.derivatives?.find((d: any) => d.variant === 'MP4_720P')?.url;
+        const audio = res.derivatives?.find((d: any) => d.variant === 'AUDIO_M4A')?.url;
 
         const asset: UploadedAsset = {
           media_id: assetId,
           status: res.status,
-          media_type: isVideo ? 'VIDEO' : 'IMAGE',
+          media_type: isVideo ? 'VIDEO' : isAudio ? 'AUDIO' : 'IMAGE',
           thumb_url: thumb ? buildMediaUrl(thumb) : undefined,
           card_url: card ? buildMediaUrl(card) : undefined,
           full_url: full ? buildMediaUrl(full) : undefined,
           poster_url: poster ? buildMediaUrl(poster) : undefined,
           video_url: video ? buildMediaUrl(video) : undefined,
+          audio_url: audio ? buildMediaUrl(audio) : isAudio ? (res.derivatives?.[0]?.url ? buildMediaUrl(res.derivatives[0].url) : undefined) : undefined,
+          duration_ms: media.durationMs || res.duration_ms,
         };
         chatAssetCache.set(assetId, asset);
         return asset;
@@ -548,22 +561,26 @@ export const mediaUploader = {
       const res = await api.get<any>(`/api/v1/media/${assetId}`);
       if (!res) return null;
       const isVideo = res.media_type === 'VIDEO';
+      const isAudio = res.media_type === 'VOICE_NOTE' || res.media_type === 'AUDIO';
       const firstDeriv = res.derivatives?.[0]?.url;
-      const thumb = res.derivatives?.find((d: any) => d.variant === 'THUMB_WEBP')?.url || res.thumb_url || firstDeriv;
-      const card = res.derivatives?.find((d: any) => d.variant === 'CARD_WEBP' || d.variant === 'CARD_AVIF')?.url || res.card_url || firstDeriv;
-      const full = res.derivatives?.find((d: any) => d.variant === 'FULL_WEBP' || d.variant === 'FULL_AVIF')?.url || res.full_url || firstDeriv;
+      const thumb = res.derivatives?.find((d: any) => d.variant === 'THUMB_WEBP')?.url || res.thumb_url || (!isAudio ? firstDeriv : undefined);
+      const card = res.derivatives?.find((d: any) => d.variant === 'CARD_WEBP' || d.variant === 'CARD_AVIF')?.url || res.card_url || (!isAudio ? firstDeriv : undefined);
+      const full = res.derivatives?.find((d: any) => d.variant === 'FULL_WEBP' || d.variant === 'FULL_AVIF')?.url || res.full_url || (!isAudio ? firstDeriv : undefined);
       const poster = res.derivatives?.find((d: any) => d.variant === 'VIDEO_POSTER')?.url;
       const video = res.derivatives?.find((d: any) => d.variant === 'MP4_720P')?.url;
+      const audio = res.derivatives?.find((d: any) => d.variant === 'AUDIO_M4A')?.url || (isAudio ? firstDeriv : undefined);
 
       const asset: UploadedAsset = {
         media_id: res.id || res.media_id || assetId,
         status: res.status,
-        media_type: isVideo ? 'VIDEO' : 'IMAGE',
+        media_type: isVideo ? 'VIDEO' : isAudio ? 'AUDIO' : 'IMAGE',
         thumb_url: thumb ? buildMediaUrl(thumb) : undefined,
         card_url: card ? buildMediaUrl(card) : undefined,
         full_url: full ? buildMediaUrl(full) : undefined,
         poster_url: poster ? buildMediaUrl(poster) : undefined,
         video_url: video ? buildMediaUrl(video) : undefined,
+        audio_url: audio ? buildMediaUrl(audio) : undefined,
+        duration_ms: res.duration_ms,
       };
       chatAssetCache.set(assetId, asset);
       return asset;

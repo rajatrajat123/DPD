@@ -11,7 +11,7 @@ import {
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import { Match, Conversation, MessageRequest } from '../../src/types';
 import { chatService } from '../../src/services/chat/chatService';
@@ -22,7 +22,7 @@ import { Alert } from 'react-native';
 
 export default function ChatScreen() {
   const router = useRouter();
-  const { isAgeVerified } = useAuth();
+  const { isAgeVerified, user } = useAuth();
   const { colors } = useTheme();
 
   const [matches, setMatches] = useState<Match[]>([]);
@@ -34,9 +34,12 @@ export default function ChatScreen() {
 
   const loadData = useCallback(async () => {
     try {
+      if (user?.id) {
+        chatService.setCurrentUserId(user.id);
+      }
       const [matchesRes, convsRes, requestsRes] = await Promise.all([
         chatService.getMatches(),
-        chatService.getConversations(),
+        chatService.getConversations(user?.id),
         chatService.getMessageRequests().catch(() => []),
       ]);
       setMatches(matchesRes || []);
@@ -48,11 +51,39 @@ export default function ChatScreen() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, []);
+  }, [user?.id]);
+
+  useFocusEffect(
+    useCallback(() => {
+      loadData();
+    }, [loadData])
+  );
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    const unsub = chatService.onUnreadCountChange((_total, changedConvId) => {
+      if (changedConvId) {
+        setConversations((prev) =>
+          prev.map((c) => {
+            if (c.id === changedConvId || c.match_id === changedConvId) {
+              return {
+                ...c,
+                unread_count: chatService.getConversationUnreadCount(changedConvId),
+              };
+            }
+            return c;
+          })
+        );
+      } else {
+        setConversations((prev) =>
+          prev.map((c) => ({
+            ...c,
+            unread_count: chatService.getConversationUnreadCount(c.id),
+          }))
+        );
+      }
+    });
+    return unsub;
+  }, []);
 
   const onRefresh = () => {
     setIsRefreshing(true);
@@ -72,6 +103,7 @@ export default function ChatScreen() {
             id: res.conversation_id,
             name: req.sender_name || 'Member',
             recipientId: req.sender_id,
+            avatar: req.sender_avatar || '',
           },
         });
       }
@@ -119,10 +151,19 @@ export default function ChatScreen() {
     );
   };
 
-  const openConversation = (convId: string, participantName: string, participantId: string) => {
+  const openConversation = (convId: string, participantName: string, participantId: string, participantAvatar?: string) => {
+    chatService.markConversationAsRead(convId);
+    setConversations((prev) =>
+      prev.map((c) => (c.id === convId || c.match_id === convId ? { ...c, unread_count: 0 } : c))
+    );
     router.push({
       pathname: '/chat/[id]',
-      params: { id: convId, name: participantName, recipientId: participantId },
+      params: {
+        id: convId,
+        name: participantName,
+        recipientId: participantId,
+        avatar: participantAvatar || '',
+      },
     });
   };
 
@@ -181,7 +222,14 @@ export default function ChatScreen() {
                   <TouchableOpacity
                     key={m.id}
                     style={styles.matchItem}
-                    onPress={() => openConversation(m.id, m.target_profile?.display_name || 'Member', m.target_profile?.user_id || m.target_user_id)}
+                    onPress={() =>
+                      openConversation(
+                        m.id,
+                        m.target_profile?.display_name || 'Member',
+                        m.target_profile?.user_id || m.target_user_id,
+                        m.target_profile?.avatar_url || ''
+                      )
+                    }
                     activeOpacity={0.8}
                   >
                     <View style={[styles.matchAvatarWrap, { borderColor: colors.gold }]}>
@@ -317,7 +365,7 @@ export default function ChatScreen() {
                 <TouchableOpacity
                   key={c.id}
                   style={[styles.conversationItem, { borderBottomColor: colors.borderSubtle }]}
-                  onPress={() => openConversation(c.id, c.participant_name, c.participant_id)}
+                  onPress={() => openConversation(c.id, c.participant_name, c.participant_id, c.participant_avatar)}
                   activeOpacity={0.7}
                 >
                   <View style={styles.convAvatarWrap}>

@@ -27,7 +27,7 @@ import { MatchCelebrationModal } from '../../src/components/MatchCelebrationModa
 import { SwipeQuotaModal } from '../../src/components/SwipeQuotaModal';
 import { DiscoveryFilterModal } from '../../src/components/DiscoveryFilterModal';
 import { QuickMessageComposer } from '../../src/components/QuickMessageComposer';
-import { computeAndroidKeyboardCompensation } from '../../src/components/ChatRoom';
+import { computeAndroidKeyboardCompensation } from '../../src/utils/keyboardAvoidance';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { authService } from '../../src/services/auth/authService';
 import { admobService, adBreakManager, SwipeAllowance, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
@@ -674,7 +674,12 @@ export default function DiscoveryScreen() {
             if (cid) {
               router.push({
                 pathname: '/chat/[id]',
-                params: { id: cid, name: cname, recipientId: uid },
+                params: {
+                  id: cid,
+                  name: cname,
+                  recipientId: uid,
+                  avatar: matchedCandidate.photos?.[0]?.url || '',
+                },
               });
             } else {
               router.push('/(tabs)/chat');

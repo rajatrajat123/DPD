@@ -57,6 +57,7 @@ const (
 	VariantHLS1080P    DerivativeVariant = "HLS_1080P"
 	VariantMP4720P     DerivativeVariant = "MP4_720P"
 	VariantVideoPoster DerivativeVariant = "VIDEO_POSTER"
+	VariantAudioM4A    DerivativeVariant = "AUDIO_M4A"
 )
 
 type MediaAsset struct {

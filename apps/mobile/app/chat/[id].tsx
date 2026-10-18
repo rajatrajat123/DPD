@@ -7,11 +7,12 @@ import { useTheme } from '../../src/theme';
 export default function ChatScreen() {
   const router = useRouter();
   const { colors } = useTheme();
-  const params = useLocalSearchParams<{ id: string; name?: string; recipientId?: string }>();
+  const params = useLocalSearchParams<{ id: string; name?: string; recipientId?: string; avatar?: string }>();
 
   const conversationId = params.id || '';
   const recipientName = params.name || 'Member';
   const recipientId = params.recipientId || '';
+  const recipientAvatar = params.avatar;
 
   return (
     <View style={[styles.container, { backgroundColor: colors.background }]}>
@@ -19,6 +20,7 @@ export default function ChatScreen() {
         conversationId={conversationId}
         recipientName={recipientName}
         recipientId={recipientId}
+        recipientAvatar={recipientAvatar}
         onBack={() => router.back()}
         onUnmatched={() => router.replace('/(tabs)/matches')}
       />

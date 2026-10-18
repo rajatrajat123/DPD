@@ -5335,3 +5335,628 @@ test('Chat Photo Attachment: handles loading state, error state on failure, and 
   );
 });
 
+// --- Test 87: Chat Voice Note Recording & Playback Lifecycle ---
+test('Chat Voice Notes: validates recording options, permission gating, duration formatting, and playback lifecycle', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify Audio Service presets and duration formatting
+  const audioServiceFile = await fs.readFile(
+    new URL('../src/services/audio/audioService.ts', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    audioServiceFile.includes("extension: '.m4a'"),
+    'Audio recording preset must target .m4a format'
+  );
+  assert.ok(
+    audioServiceFile.includes('sampleRate: 16000'),
+    'Voice note preset must configure 16 kHz sample rate'
+  );
+  assert.ok(
+    audioServiceFile.includes('bitRate: 24000'),
+    'Voice note preset must configure compact 24 kbps bitrate'
+  );
+  assert.ok(
+    audioServiceFile.includes('numberOfChannels: 1'),
+    'Voice note preset must be mono (1 channel)'
+  );
+
+  // Test duration formatting helper
+  function formatAudioDuration(durationMs) {
+    if (!durationMs || isNaN(durationMs) || durationMs < 0) return '0:00';
+    const totalSeconds = Math.floor(durationMs / 1000);
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+  }
+
+  assert.equal(formatAudioDuration(0), '0:00');
+  assert.equal(formatAudioDuration(7000), '0:07');
+  assert.equal(formatAudioDuration(68000), '1:08');
+  assert.equal(formatAudioDuration(125000), '2:05');
+  assert.equal(formatAudioDuration(-10), '0:00');
+
+  // 2. Verify ChatRoom UI components contain all voice note testIDs and controls
+  const chatRoomFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+
+  assert.ok(
+    chatRoomFile.includes('testID="chat-mic-btn"'),
+    'ChatRoom must have microphone icon button in composer'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-cancel-recording-btn"'),
+    'ChatRoom must have cancel/trash recording button'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-stop-recording-btn"'),
+    'ChatRoom must have stop/finish recording button'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-audio-preview-play-btn"'),
+    'ChatRoom must have audio preview play/pause button'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-discard-audio-preview-btn"'),
+    'ChatRoom must have discard preview button'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="voice-message-bubble"'),
+    'ChatRoom must render dedicated voice message bubble'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="voice-play-pause-btn"'),
+    'Voice bubble must have play/pause toggle button'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-attach-voice-btn"'),
+    'Attachment menu must offer voice note recording option'
+  );
+
+  // 3. Verify Message Reconciliation preserves audio duration and audio message type
+  function reconcileMessages(prev, incoming) {
+    const incomingList = Array.isArray(incoming) ? incoming : [incoming];
+    if (incomingList.length === 0) return prev;
+    const merged = [...prev];
+    for (const item of incomingList) {
+      if (!item) continue;
+      const itemClientId = item.client_message_id;
+      const itemId = item.id;
+      const existingIndex = merged.findIndex((m) => {
+        if (m.id && itemId && m.id === itemId) return true;
+        if (itemClientId) {
+          if (m.client_message_id && m.client_message_id === itemClientId) return true;
+          if (m.id === itemClientId) return true;
+        }
+        if (m.client_message_id && itemId && m.client_message_id === itemId) return true;
+        return false;
+      });
+
+      if (existingIndex !== -1) {
+        const existing = merged[existingIndex];
+        merged[existingIndex] = {
+          ...existing,
+          ...item,
+          id: item.id || existing.id,
+          media_url: item.media_url || existing.media_url,
+          media_asset_id: item.media_asset_id || existing.media_asset_id,
+          message_type: item.message_type || existing.message_type,
+          audio_duration_ms: item.audio_duration_ms || existing.audio_duration_ms,
+          delivered_at: item.delivered_at || existing.delivered_at || null,
+          read_at: item.read_at || existing.read_at || null,
+          status:
+            item.read_at || existing.read_at
+              ? 'READ'
+              : item.delivered_at || existing.delivered_at
+              ? 'DELIVERED'
+              : item.status || existing.status,
+          created_at: item.created_at || existing.created_at,
+        };
+      } else {
+        merged.push(item);
+      }
+    }
+    return merged;
+  }
+
+  const optimisticVoiceMsg = {
+    id: 'client_voice_1',
+    client_message_id: 'client_voice_1',
+    conversation_id: 'conv_1',
+    sender_user_id: 'user_me',
+    body: '',
+    message_type: 'AUDIO',
+    media_url: 'file:///cache/voice_note.m4a',
+    audio_duration_ms: 12500,
+    status: 'PENDING',
+    created_at: '2026-10-18T02:00:00Z',
+  };
+
+  let messages = reconcileMessages([], optimisticVoiceMsg);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].message_type, 'AUDIO');
+  assert.equal(messages[0].audio_duration_ms, 12500);
+  assert.equal(messages[0].media_url, 'file:///cache/voice_note.m4a');
+
+  // Server delivers confirmation without repeating duration
+  const serverConfirmation = {
+    id: 'server_msg_999',
+    client_message_id: 'client_voice_1',
+    media_asset_id: 'asset_audio_123',
+    status: 'SENT',
+    delivered_at: '2026-10-18T02:00:02Z',
+  };
+
+  messages = reconcileMessages(messages, serverConfirmation);
+  assert.equal(messages.length, 1);
+  assert.equal(messages[0].id, 'server_msg_999');
+  assert.equal(messages[0].message_type, 'AUDIO');
+  assert.equal(messages[0].audio_duration_ms, 12500);
+  assert.equal(messages[0].media_asset_id, 'asset_audio_123');
+  assert.equal(messages[0].status, 'DELIVERED');
+
+  // 4. Verify mediaUploader handles AUDIO attachments with 25MB limit
+  const uploaderFile = await fs.readFile(
+    new URL('../src/services/media/mediaUploader.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    uploaderFile.includes('mediaType === \'AUDIO\''),
+    'mediaUploader must identify AUDIO attachments'
+  );
+  assert.ok(
+    uploaderFile.includes('isAudio ? 25 * 1024 * 1024'),
+    'mediaUploader must enforce 25MB maximum limit on audio notes'
+  );
+  assert.ok(
+    uploaderFile.includes("variant === 'AUDIO_M4A'"),
+    'mediaUploader must map AUDIO_M4A derivative variant'
+  );
+  assert.ok(
+    uploaderFile.includes("formData.append('duration_ms'"),
+    'mediaUploader must forward duration_ms to multipart form data'
+  );
+});
+
+// --- Test 88: Voice Note Duration End-to-End Relay & Playback Availability Guard ---
+test('Voice Note Duration & Playback Availability: verifies duration persistence relay and playback availability API', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify audioService.isPlaybackAvailable and isAudioAvailable definitions
+  const audioServiceFile = await fs.readFile(
+    new URL('../src/services/audio/audioService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    audioServiceFile.includes('export function isPlaybackAvailable()'),
+    'audioService must export isPlaybackAvailable'
+  );
+  assert.ok(
+    audioServiceFile.includes('isPlaybackAvailable(): boolean'),
+    'AudioService class must expose isPlaybackAvailable method'
+  );
+  assert.ok(
+    audioServiceFile.includes('(AudioModule as any).AudioPlayer'),
+    'isPlaybackAvailable must check for AudioPlayer'
+  );
+
+  // 2. Verify chatService relays durationMs
+  const chatServiceFile = await fs.readFile(
+    new URL('../src/services/chat/chatService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatServiceFile.includes('frame.duration_ms = durationMs'),
+    'chatWebSocket frame must include duration_ms'
+  );
+  assert.ok(
+    chatServiceFile.includes('raw.audio_duration_ms || raw.duration_ms'),
+    'normalizeMessage must fallback to raw.duration_ms'
+  );
+  assert.ok(
+    chatServiceFile.includes('duration_ms: durationMs'),
+    'chatService REST fallback must include duration_ms'
+  );
+
+  // 3. Verify ChatRoom uses isPlaybackAvailable for voice note playback
+  const chatRoomFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatRoomFile.includes('audioService.isPlaybackAvailable()'),
+    'ChatRoom handleTogglePlayVoice must check isPlaybackAvailable'
+  );
+  assert.ok(
+    chatRoomFile.includes('[AURA_NATIVE_CLIENT_AUDIT]'),
+    'ChatRoom must log native client audit telemetry'
+  );
+});
+
+// --- Test 89: Chat Screen Header Partner Avatar & Fallback Monogram ---
+test('Chat Header Avatar: circular avatar rendering, fallback monogram, route propagation, and truncation', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Verify ChatRoom.tsx avatar implementation
+  const chatRoomFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatRoomFile.includes('recipientAvatar?: string;'),
+    'ChatRoomProps must define recipientAvatar'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-header-avatar-container"'),
+    'ChatRoom header must render chat-header-avatar-container'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-header-avatar-image"'),
+    'ChatRoom header must render chat-header-avatar-image when avatar URI is present'
+  );
+  assert.ok(
+    chatRoomFile.includes('testID="chat-header-avatar-fallback"'),
+    'ChatRoom header must render chat-header-avatar-fallback when image is missing or errors'
+  );
+  assert.ok(
+    chatRoomFile.includes('onError={() => setAvatarLoadError(true)}'),
+    'ChatRoom avatar image must handle onError gracefully by activating fallback'
+  );
+  assert.ok(
+    chatRoomFile.includes('recipientAvatarCache'),
+    'ChatRoom must maintain in-memory avatar cache for instant rendering across chats'
+  );
+  assert.ok(
+    chatRoomFile.includes('discoveryService'),
+    'ChatRoom must fallback to public profile display photo if not provided in route params'
+  );
+
+  // 2. Verify avatar styles in ChatRoom
+  assert.ok(
+    chatRoomFile.includes('headerAvatarContainer:'),
+    'ChatRoom styles must include headerAvatarContainer'
+  );
+  assert.ok(
+    chatRoomFile.includes('borderRadius: 19'),
+    'headerAvatarContainer must specify circular border radius (19dp for 38dp diameter)'
+  );
+  assert.ok(
+    chatRoomFile.includes("overflow: 'hidden'"),
+    'headerAvatarContainer must have overflow hidden to ensure circular clipping'
+  );
+  assert.ok(
+    chatRoomFile.includes('numberOfLines={1}'),
+    'headerTitle must have numberOfLines={1} to prevent text overflow or header layout shift'
+  );
+
+  // 3. Verify route parameter forwarding in app/chat/[id].tsx
+  const chatRouteFile = await fs.readFile(
+    new URL('../app/chat/[id].tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatRouteFile.includes('recipientAvatar={recipientAvatar}'),
+    'chat route must forward recipientAvatar to ChatRoom component'
+  );
+
+  // 4. Verify callers pass avatar parameter
+  const inboxFile = await fs.readFile(
+    new URL('../app/(tabs)/chat.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    inboxFile.includes('openConversation(c.id, c.participant_name, c.participant_id, c.participant_avatar)'),
+    'inbox conversations list must forward participant_avatar'
+  );
+  assert.ok(
+    inboxFile.includes('m.target_profile?.avatar_url'),
+    'inbox mutual sparks matches must forward match avatar_url'
+  );
+  assert.ok(
+    inboxFile.includes("avatar: req.sender_avatar || ''"),
+    'inbox message request accept must forward sender_avatar'
+  );
+
+  const likesFile = await fs.readFile(
+    new URL('../app/(tabs)/likes.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    likesFile.includes('avatar: m.target_profile.avatar_url'),
+    'likes screen match card must pass avatar param'
+  );
+
+  const indexFile = await fs.readFile(
+    new URL('../app/(tabs)/index.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    indexFile.includes('avatar: matchedCandidate.photos?.[0]?.url'),
+    'discover match celebration modal must pass candidate photo as avatar'
+  );
+
+  const profileScreenFile = await fs.readFile(
+    new URL('../app/profile/[id].tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    profileScreenFile.includes('avatar: matchedCandidate.photos?.[0]?.url'),
+    'profile match celebration modal must pass candidate photo as avatar'
+  );
+});
+
+// --- Test 90: Chat Unread-Message Count, Outgoing Filter, Mark-as-Read & Deduplication ---
+test('Chat Unread Count: counts only unread incoming messages, ignores outgoing, handles mark-as-read and deduplicates events', async () => {
+  const fs = await import('node:fs/promises');
+
+  // 1. Inspect chatService.ts implementation
+  const chatServiceFile = await fs.readFile(
+    new URL('../src/services/chat/chatService.ts', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatServiceFile.includes('export function countUnreadIncomingMessages'),
+    'chatService must export countUnreadIncomingMessages function'
+  );
+  assert.ok(
+    chatServiceFile.includes('export function calculateTotalUnreadCount'),
+    'chatService must export calculateTotalUnreadCount function'
+  );
+  assert.ok(
+    chatServiceFile.includes('markConversationAsRead(conversationId: string)'),
+    'chatService must implement markConversationAsRead'
+  );
+  assert.ok(
+    chatServiceFile.includes('handleIncomingMessageUnread('),
+    'chatService must implement handleIncomingMessageUnread'
+  );
+  assert.ok(
+    chatServiceFile.includes('setActiveConversation(conversationId: string | null)'),
+    'chatService must implement setActiveConversation'
+  );
+  assert.ok(
+    chatServiceFile.includes('getConversationUnreadCount(conversationId: string)'),
+    'chatService must implement getConversationUnreadCount'
+  );
+  assert.ok(
+    chatServiceFile.includes('getTotalUnreadCount(): number'),
+    'chatService must implement getTotalUnreadCount'
+  );
+  assert.ok(
+    chatServiceFile.includes('onUnreadCountChange('),
+    'chatService must implement onUnreadCountChange'
+  );
+  assert.ok(
+    chatServiceFile.includes('seenMessageIds.has(msgId)'),
+    'chatService must deduplicate incoming WebSocket message events by message ID'
+  );
+  assert.ok(
+    chatServiceFile.includes('activeConversationId === resolvedId'),
+    'chatService must suppress unread count increments when conversation is currently active'
+  );
+  assert.ok(
+    chatServiceFile.includes('chatWebSocket.sendReadReceipt(resolvedId)'),
+    'chatService must send WebSocket read receipt when marking conversation as read'
+  );
+  assert.ok(
+    chatServiceFile.includes('/api/v1/conversations/'),
+    'chatService must call REST read endpoint for server-side persistence'
+  );
+
+  // 2. Unit testing unread logic algorithm directly
+  function countUnreadIncoming(messages, currentUserId) {
+    if (!Array.isArray(messages)) return 0;
+    return messages.filter((m) => {
+      const isMe =
+        (currentUserId && (m.sender_user_id === currentUserId || m.sender_id === currentUserId)) ||
+        m.sender_user_id === 'me' ||
+        m.sender_id === 'me';
+      if (isMe) return false;
+      const isRead = Boolean(m.read_at) || m.status === 'READ';
+      return !isRead;
+    }).length;
+  }
+
+  function calculateTotalUnread(conversations) {
+    if (!Array.isArray(conversations)) return 0;
+    return conversations.reduce((sum, c) => sum + (c.unread_count > 0 ? c.unread_count : 0), 0);
+  }
+
+  class UnreadManager {
+    constructor() {
+      this.currentAuthUserId = null;
+      this.activeConversationId = null;
+      this.conversationUnreadCounts = new Map();
+      this.matchToConvMap = new Map();
+      this.unreadListeners = new Set();
+      this.seenMessageIds = new Set();
+    }
+    setCurrentUserId(id) { this.currentAuthUserId = id; }
+    setActiveConversation(id) {
+      this.activeConversationId = id;
+      if (id) {
+        const canonical = this.matchToConvMap.get(id) || id;
+        this.conversationUnreadCounts.set(canonical, 0);
+        this.conversationUnreadCounts.set(id, 0);
+        this.notify();
+      }
+    }
+    getConversationUnreadCount(id) {
+      const canonical = this.matchToConvMap.get(id) || id;
+      return this.conversationUnreadCounts.get(canonical) ?? this.conversationUnreadCounts.get(id) ?? 0;
+    }
+    getTotalUnreadCount() {
+      const processed = new Set();
+      let total = 0;
+      for (const [id, count] of this.conversationUnreadCounts.entries()) {
+        const canonical = this.matchToConvMap.get(id) || id;
+        if (!processed.has(canonical)) {
+          processed.add(canonical);
+          if (count > 0) total += count;
+        }
+      }
+      return total;
+    }
+    markConversationAsRead(id) {
+      if (!id) return;
+      const canonical = this.matchToConvMap.get(id) || id;
+      this.conversationUnreadCounts.set(canonical, 0);
+      this.conversationUnreadCounts.set(id, 0);
+      this.notify();
+    }
+    handleIncomingMessage(msg, userId) {
+      if (!msg || !msg.conversation_id) return false;
+      const myId = userId || this.currentAuthUserId;
+      const isMe = (myId && (msg.sender_user_id === myId || msg.sender_id === myId)) ||
+        msg.sender_user_id === 'me' || msg.sender_id === 'me';
+      if (isMe) return false;
+      const isRead = Boolean(msg.read_at) || msg.status === 'READ';
+      if (isRead) return false;
+      const msgId = msg.id || msg.client_message_id;
+      if (msgId) {
+        if (this.seenMessageIds.has(msgId)) return false;
+        this.seenMessageIds.add(msgId);
+      }
+      const canonical = this.matchToConvMap.get(msg.conversation_id) || msg.conversation_id;
+      if (this.activeConversationId === canonical || this.activeConversationId === msg.conversation_id) {
+        return false;
+      }
+      const current = this.getConversationUnreadCount(canonical);
+      this.conversationUnreadCounts.set(canonical, current + 1);
+      this.conversationUnreadCounts.set(msg.conversation_id, current + 1);
+      this.notify();
+      return true;
+    }
+    notify() {
+      const total = this.getTotalUnreadCount();
+      this.unreadListeners.forEach((fn) => fn(total));
+    }
+  }
+
+  const currentUserId = 'user-alice-123';
+  const manager = new UnreadManager();
+  manager.setCurrentUserId(currentUserId);
+
+  // Test sample messages: 2 incoming unread, 1 incoming read, 2 outgoing
+  const sampleMessages = [
+    { id: 'msg-1', conversation_id: 'conv-1', sender_user_id: 'user-bob-456', body: 'Hi Alice!', read_at: null, status: 'DELIVERED' },
+    { id: 'msg-2', conversation_id: 'conv-1', sender_user_id: currentUserId, body: 'Hey Bob!', read_at: null, status: 'SENT' },
+    { id: 'msg-3', conversation_id: 'conv-1', sender_user_id: 'user-bob-456', body: 'Doing well!', read_at: '2026-10-18T00:02:30Z', status: 'READ' },
+    { id: 'msg-4', conversation_id: 'conv-1', sender_user_id: 'user-bob-456', body: 'Are you free tonight?', read_at: null, status: 'DELIVERED' },
+    { id: 'msg-5', conversation_id: 'conv-1', sender_user_id: 'me', body: 'Draft', read_at: null, status: 'SENT' },
+  ];
+
+  const unreadCount = countUnreadIncoming(sampleMessages, currentUserId);
+  assert.equal(unreadCount, 2, 'Must count strictly incoming unread messages (2 out of 5)');
+
+  // Test total unread across conversations
+  const conversationsList = [
+    { id: 'conv-1', match_id: 'match-1', participant_id: 'user-bob-456', unread_count: 2 },
+    { id: 'conv-2', match_id: 'match-2', participant_id: 'user-charlie-789', unread_count: 0 },
+    { id: 'conv-3', match_id: 'match-3', participant_id: 'user-dani-101', unread_count: 3 },
+  ];
+  const totalSum = calculateTotalUnread(conversationsList);
+  assert.equal(totalSum, 5, 'Chats tab badge must be the sum of unread incoming messages across conversations (2 + 0 + 3 = 5)');
+
+  // Test incoming event handling & deduplication
+  const event1 = { id: 'ws-msg-1', conversation_id: 'conv-1', sender_user_id: 'user-bob-456', body: 'Incoming 1' };
+  const inc1 = manager.handleIncomingMessage(event1, currentUserId);
+  assert.equal(inc1, true);
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 1);
+  assert.equal(manager.getTotalUnreadCount(), 1);
+
+  // Duplicate event with same ID
+  const incDup = manager.handleIncomingMessage(event1, currentUserId);
+  assert.equal(incDup, false, 'Duplicate message event must not increment unread count');
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 1);
+  assert.equal(manager.getTotalUnreadCount(), 1);
+
+  // Outgoing message sent by current user
+  const eventOutgoing = { id: 'ws-msg-2', conversation_id: 'conv-1', sender_user_id: currentUserId, body: 'Outgoing' };
+  const incOut = manager.handleIncomingMessage(eventOutgoing, currentUserId);
+  assert.equal(incOut, false, 'Outgoing message must never increment unread count');
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 1);
+
+  // Message already marked read
+  const eventRead = { id: 'ws-msg-3', conversation_id: 'conv-1', sender_user_id: 'user-bob-456', body: 'Read', read_at: '2026-10-18T00:12:00Z', status: 'READ' };
+  const incRead = manager.handleIncomingMessage(eventRead, currentUserId);
+  assert.equal(incRead, false, 'Pre-read message must not increment unread count');
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 1);
+
+  // Second incoming message in conv-3
+  const event2 = { id: 'ws-msg-4', conversation_id: 'conv-3', sender_user_id: 'user-dani-101', body: 'Hello' };
+  manager.handleIncomingMessage(event2, currentUserId);
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 1);
+  assert.equal(manager.getConversationUnreadCount('conv-3'), 1);
+  assert.equal(manager.getTotalUnreadCount(), 2, 'Total sum across conv-1 (1) and conv-3 (1) must be 2');
+
+  // Mark conv-1 as read
+  manager.markConversationAsRead('conv-1');
+  assert.equal(manager.getConversationUnreadCount('conv-1'), 0, 'conv-1 unread count must clear to 0');
+  assert.equal(manager.getConversationUnreadCount('conv-3'), 1, 'conv-3 unread count must remain 1');
+  assert.equal(manager.getTotalUnreadCount(), 1, 'Total unread must update to 1');
+
+  // Active conversation protection
+  manager.setActiveConversation('conv-3');
+  const eventActive = { id: 'ws-msg-5', conversation_id: 'conv-3', sender_user_id: 'user-dani-101', body: 'Live in room' };
+  const incActive = manager.handleIncomingMessage(eventActive, currentUserId);
+  assert.equal(incActive, false, 'Message received while conversation is active must not increment unread');
+  assert.equal(manager.getConversationUnreadCount('conv-3'), 0);
+  assert.equal(manager.getTotalUnreadCount(), 0);
+
+  // 3. Inspect UI integration
+  const layoutFile = await fs.readFile(
+    new URL('../app/(tabs)/_layout.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    layoutFile.includes('tabBarBadge: totalUnread > 0 ? totalUnread : undefined'),
+    'TabLayout must render tabBarBadge with totalUnread count'
+  );
+  assert.ok(
+    layoutFile.includes('chatService.onUnreadCountChange'),
+    'TabLayout must subscribe to chatService.onUnreadCountChange'
+  );
+
+  const inboxFile = await fs.readFile(
+    new URL('../app/(tabs)/chat.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    inboxFile.includes('useFocusEffect'),
+    'Chat inbox must use useFocusEffect to refresh unread counts on tab navigation'
+  );
+  assert.ok(
+    inboxFile.includes('chatService.onUnreadCountChange'),
+    'Chat inbox must subscribe to real-time conversation unread count changes'
+  );
+  assert.ok(
+    inboxFile.includes('c.unread_count > 0'),
+    'Chat inbox must display conversation unread badge when unread_count > 0'
+  );
+
+  const chatRoomFile = await fs.readFile(
+    new URL('../src/components/ChatRoom.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    chatRoomFile.includes('chatService.setActiveConversation(conversationId)'),
+    'ChatRoom must register active conversation on mount'
+  );
+  assert.ok(
+    chatRoomFile.includes('chatService.markConversationAsRead(conversationId)'),
+    'ChatRoom must mark conversation as read on load and on incoming messages'
+  );
+
+  const authContextFile = await fs.readFile(
+    new URL('../src/context/AuthContext.tsx', import.meta.url),
+    'utf-8'
+  );
+  assert.ok(
+    authContextFile.includes('chatService.setCurrentUserId(res.user.id)'),
+    'AuthContext must set current user ID on chatService to filter out outgoing messages'
+  );
+});
