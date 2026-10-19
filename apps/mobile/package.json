@@ -8,10 +8,12 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "postinstall": "patch-package"
   },
   "dependencies": {
     "expo": "~57.0.28",
+    "expo-asset": "~57.0.20",
     "expo-audio": "~57.0.5",
     "expo-auth-session": "~57.0.16",
     "expo-constants": "~57.0.21",
@@ -30,11 +32,12 @@
     "react-native": "0.86.3",
     "react-native-google-mobile-ads": "~17.2.0",
     "react-native-iap": "~12.16.1",
-    "react-native-safe-area-context": "~5.4.0",
+    "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0"
   },
   "devDependencies": {
-    "@types/react": "~19.0.1",
+    "@types/react": "~19.2.0",
+    "patch-package": "^8.0.1",
     "typescript": "^5.7.2"
   },
   "private": true

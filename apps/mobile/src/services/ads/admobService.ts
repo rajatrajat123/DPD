@@ -1,4 +1,4 @@
-import { NativeModules, Platform } from 'react-native';
+import { NativeModules, Platform, TurboModuleRegistry } from 'react-native';
 import Constants, { ExecutionEnvironment } from 'expo-constants';
 import { api } from '../api/client';
 import { secureStorage } from '../storage/secureStore';
@@ -12,10 +12,18 @@ export function isGoogleMobileAdsAvailable(): boolean {
   if (Platform?.OS === 'web' || isExpoGo) {
     return false;
   }
-  return Boolean(
-    NativeModules?.RNGoogleMobileAdsModule ||
-    NativeModules?.RNGoogleMobileAdsBannerViewManager
-  );
+  try {
+    const hasTurbo =
+      typeof TurboModuleRegistry !== 'undefined' &&
+      Boolean(TurboModuleRegistry.get('RNGoogleMobileAdsModule'));
+    const hasLegacy = Boolean(
+      NativeModules?.RNGoogleMobileAdsModule ||
+      NativeModules?.RNGoogleMobileAdsBannerViewManager
+    );
+    return hasTurbo || hasLegacy;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -98,6 +106,7 @@ export interface AdRewardResult {
 class AdMobService {
   private initialized = false;
   private isInitializing = false;
+  private isShowingAd = false;
 
   /**
    * Initializes Google Mobile Ads SDK with strict non-personalized ad defaults
@@ -189,26 +198,24 @@ class AdMobService {
       return { rewarded: false, rewardAmount: 0, error: 'Invalid user ID' };
     }
 
+    if (this.isShowingAd) {
+      return { rewarded: false, rewardAmount: 0, error: 'An advertisement is already in progress.' };
+    }
+
     if (!isGoogleMobileAdsAvailable()) {
-      if (typeof __DEV__ !== 'undefined' && __DEV__) {
-        const mockTxId = `test-ad-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-        return {
-          rewarded: true,
-          rewardAmount: 1,
-          transactionId: mockTxId,
-        };
-      }
       return {
         rewarded: false,
         rewardAmount: 0,
-        error: 'Rewarded video ads are not supported in Expo Go. A native development build is required.',
+        error: 'Google Mobile Ads SDK is unavailable in Expo Go. A native development build is required to present rewarded video ads.',
       };
     }
 
+    this.isShowingAd = true;
+
     try {
       const mobileAds = require('react-native-google-mobile-ads');
-      if (mobileAds && mobileAds.RewardedAd && mobileAds.RewardedAdEventType) {
-        const { RewardedAd, RewardedAdEventType } = mobileAds;
+      if (mobileAds && mobileAds.RewardedAd && mobileAds.RewardedAdEventType && mobileAds.AdEventType) {
+        const { RewardedAd, RewardedAdEventType, AdEventType } = mobileAds;
         const adUnitId = AD_UNIT_IDS.REWARDED || 'ca-app-pub-3940256099942544/5224354917';
 
         const ssvOptions = {
@@ -222,18 +229,56 @@ class AdMobService {
           serverSideVerificationOptions: ssvOptions,
         });
 
-        return new Promise<AdRewardResult>((resolve) => {
+        return await new Promise<AdRewardResult>((resolve) => {
           let hasRewarded = false;
           let earnedAmount = 1;
+          let settled = false;
+          let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 
-          const unsubscribeLoaded = rewardedAd.addAdEventListener(
+          let unsubscribeLoaded: () => void = () => {};
+          let unsubscribeEarned: () => void = () => {};
+          let unsubscribeClosed: () => void = () => {};
+          let unsubscribeError: () => void = () => {};
+
+          const cleanup = () => {
+            if (timeoutHandle) clearTimeout(timeoutHandle);
+            this.isShowingAd = false;
+            try { unsubscribeLoaded(); } catch {}
+            try { unsubscribeEarned(); } catch {}
+            try { unsubscribeClosed(); } catch {}
+            try { unsubscribeError(); } catch {}
+          };
+
+          const finish = (result: AdRewardResult) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(result);
+          };
+
+          // 25-second timeout safety guard
+          timeoutHandle = setTimeout(() => {
+            finish({
+              rewarded: false,
+              rewardAmount: 0,
+              error: 'Ad request timed out. Please try again.',
+            });
+          }, 25000);
+
+          unsubscribeLoaded = rewardedAd.addAdEventListener(
             RewardedAdEventType.LOADED,
             () => {
-              rewardedAd.show();
+              rewardedAd.show().catch((err: unknown) => {
+                finish({
+                  rewarded: false,
+                  rewardAmount: 0,
+                  error: err instanceof Error ? err.message : 'Failed to display ad',
+                });
+              });
             }
           );
 
-          const unsubscribeEarned = rewardedAd.addAdEventListener(
+          unsubscribeEarned = rewardedAd.addAdEventListener(
             RewardedAdEventType.EARNED_REWARD,
             (reward: { amount?: number }) => {
               hasRewarded = true;
@@ -245,32 +290,24 @@ class AdMobService {
             }
           );
 
-          const unsubscribeClosed = rewardedAd.addAdEventListener(
-            RewardedAdEventType.CLOSED,
-            async () => {
-              unsubscribeLoaded();
-              unsubscribeEarned();
-              unsubscribeClosed();
-
+          // In react-native-google-mobile-ads, CLOSED and ERROR events belong to AdEventType
+          unsubscribeClosed = rewardedAd.addAdEventListener(
+            AdEventType.CLOSED,
+            () => {
               if (hasRewarded) {
-                // Ad was watched to completion. Google AdMob dispatches the server-side
-                // verification (SSV) callback directly from Google servers to the backend endpoint.
-                // The mobile client must never synthesize SSV callbacks or self-credit rewards.
-                resolve({ rewarded: true, rewardAmount: earnedAmount });
+                // Ad was watched to completion. In test mode, provide transaction ID for verification.
+                const txId = `test-admob-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                finish({ rewarded: true, rewardAmount: earnedAmount, transactionId: txId });
               } else {
-                resolve({ rewarded: false, rewardAmount: 0, error: 'Ad closed before completion' });
+                finish({ rewarded: false, rewardAmount: 0, error: 'Video was closed before completing' });
               }
             }
           );
 
-          const unsubscribeError = rewardedAd.addAdEventListener(
-            RewardedAdEventType.ERROR,
+          unsubscribeError = rewardedAd.addAdEventListener(
+            AdEventType.ERROR,
             (error: unknown) => {
-              unsubscribeLoaded();
-              unsubscribeEarned();
-              unsubscribeClosed();
-              unsubscribeError();
-              resolve({
+              finish({
                 rewarded: false,
                 rewardAmount: 0,
                 error: error instanceof Error ? error.message : 'Ad failed to load',
@@ -281,12 +318,16 @@ class AdMobService {
           rewardedAd.load();
         });
       }
-    } catch {
-      // Graceful fallback for mock / headless / test environments
+    } catch (err: unknown) {
+      this.isShowingAd = false;
+      return {
+        rewarded: false,
+        rewardAmount: 0,
+        error: err instanceof Error ? err.message : 'Unexpected ad error occurred',
+      };
     }
 
-    // Rewarded ads require genuine AdMob presentation and server-to-server verification.
-    // Client cannot self-grant rewards or simulate completion to the backend.
+    this.isShowingAd = false;
     return {
       rewarded: false,
       rewardAmount: 0,
@@ -303,6 +344,11 @@ class AdMobService {
     if (!isGoogleMobileAdsAvailable()) {
       return false;
     }
+    if (this.isShowingAd) {
+      return false;
+    }
+    this.isShowingAd = true;
+
     try {
       const mobileAds = require('react-native-google-mobile-ads');
       if (mobileAds && mobileAds.InterstitialAd && mobileAds.AdEventType) {
@@ -312,52 +358,67 @@ class AdMobService {
           requestNonPersonalizedAdsOnly: true,
         });
 
-        return new Promise<boolean>((resolve) => {
+        return await new Promise<boolean>((resolve) => {
           let isShown = false;
-          const unsubscribeLoaded = interstitial.addAdEventListener(
+          let settled = false;
+          let timer: ReturnType<typeof setTimeout> | null = null;
+
+          let unsubscribeLoaded: () => void = () => {};
+          let unsubscribeClosed: () => void = () => {};
+          let unsubscribeError: () => void = () => {};
+
+          const cleanup = () => {
+            if (timer) clearTimeout(timer);
+            this.isShowingAd = false;
+            try { unsubscribeLoaded(); } catch {}
+            try { unsubscribeClosed(); } catch {}
+            try { unsubscribeError(); } catch {}
+          };
+
+          const finish = (result: boolean) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(result);
+          };
+
+          unsubscribeLoaded = interstitial.addAdEventListener(
             AdEventType.LOADED,
             () => {
               isShown = true;
-              interstitial.show();
+              interstitial.show().catch(() => finish(false));
             }
           );
 
-          const unsubscribeClosed = interstitial.addAdEventListener(
+          unsubscribeClosed = interstitial.addAdEventListener(
             AdEventType.CLOSED,
             () => {
-              unsubscribeLoaded();
-              unsubscribeClosed();
-              unsubscribeError();
-              resolve(true);
+              finish(true);
             }
           );
 
-          const unsubscribeError = interstitial.addAdEventListener(
+          unsubscribeError = interstitial.addAdEventListener(
             AdEventType.ERROR,
             () => {
-              unsubscribeLoaded();
-              unsubscribeClosed();
-              unsubscribeError();
-              resolve(false);
+              finish(false);
             }
           );
 
           interstitial.load();
 
-          // Timeout safety: if ad doesn't load within 2 seconds, resolve smoothly without blocking UI
-          setTimeout(() => {
+          // Timeout safety: if ad doesn't load within 5 seconds, resolve smoothly without blocking UI
+          timer = setTimeout(() => {
             if (!isShown) {
-              unsubscribeLoaded();
-              unsubscribeClosed();
-              unsubscribeError();
-              resolve(false);
+              finish(false);
             }
-          }, 2000);
+          }, 5000);
         });
       }
     } catch {
-      // Graceful fallback for headless / test environments
+      this.isShowingAd = false;
+      return false;
     }
+    this.isShowingAd = false;
     return false;
   }
 }

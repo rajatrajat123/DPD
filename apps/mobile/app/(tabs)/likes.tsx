@@ -17,7 +17,7 @@ import { colors, typography, spacing, borderRadius, useTheme } from '../../src/t
 import { useAuth } from '../../src/context/AuthContext';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { discoveryService } from '../../src/services/discovery/discoveryService';
-import { admobService } from '../../src/services/ads/admobService';
+import { admobService, isGoogleMobileAdsAvailable } from '../../src/services/ads/admobService';
 import { chatService } from '../../src/services/chat/chatService';
 import { IncomingLikeCard, LikesYouResponse, Match } from '../../src/types';
 import { AgeVerificationBanner } from '../../src/components/AgeVerificationBanner';
@@ -165,6 +165,13 @@ export default function LikesScreen() {
 
     try {
       const userId = user?.id || 'guest_user';
+      if (!isGoogleMobileAdsAvailable()) {
+        setAdFeedback({
+          type: 'error',
+          message: 'Rewarded video ads are not supported in Expo Go. Please open the app in an Android development build to watch ads.',
+        });
+        return;
+      }
       // Present rewarded ad with specific Likes You unlock purpose
       const adResult = await admobService.showRewardedAd(userId, 'likes_you_unlock');
 
@@ -172,6 +179,14 @@ export default function LikesScreen() {
         setAdFeedback({
           type: 'error',
           message: adResult.error || 'Ad could not be completed. Please try again.',
+        });
+        return;
+      }
+
+      if (!adResult.transactionId) {
+        setAdFeedback({
+          type: 'error',
+          message: 'Ad verification token is missing. Please try again.',
         });
         return;
       }

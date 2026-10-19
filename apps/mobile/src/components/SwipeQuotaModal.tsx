@@ -8,7 +8,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { colors, typography, spacing, borderRadius } from '../theme';
-import { admobService } from '../services/ads/admobService';
+import { admobService, isGoogleMobileAdsAvailable } from '../services/ads/admobService';
 
 interface SwipeQuotaModalProps {
   visible: boolean;
@@ -29,11 +29,16 @@ export const SwipeQuotaModal: React.FC<SwipeQuotaModalProps> = ({
   const [adMessage, setAdMessage] = useState<string | null>(null);
 
   const handleWatchAd = async () => {
+    if (isWatchingAd) return;
     setIsWatchingAd(true);
     setAdMessage(null);
 
     try {
-      const result = await admobService.showRewardedAd(userId);
+      if (!isGoogleMobileAdsAvailable()) {
+        setAdMessage('Rewarded video ads are not supported in Expo Go. Please open the app in an Android development build to watch ads.');
+        return;
+      }
+      const result = await admobService.showRewardedAd(userId, 'bonus_likes_reward');
       if (result.rewarded) {
         onRewardGranted(result.rewardAmount);
         onClose();

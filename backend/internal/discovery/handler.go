@@ -72,9 +72,18 @@ func (h *Handler) Search(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	q := r.URL.Query().Get("q")
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
 	if q == "" {
-		q = r.URL.Query().Get("query")
+		q = strings.TrimSpace(r.URL.Query().Get("query"))
+	}
+
+	if len(q) < 2 {
+		apperror.WriteJSON(w, http.StatusOK, &DiscoverySearchResponse{
+			Query:      q,
+			Count:      0,
+			Candidates: []DiscoveryCandidate{},
+		})
+		return
 	}
 
 	resp, err := h.svc.SearchProfiles(r.Context(), authUser.ID, q, limit)

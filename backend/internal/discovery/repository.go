@@ -1021,6 +1021,9 @@ func (m *MemoryRepository) SearchProfiles(ctx context.Context, actorID string, q
 	}
 
 	q := strings.TrimSpace(strings.ToLower(query))
+	if len(q) < 2 {
+		return []DiscoveryCandidate{}, nil
+	}
 
 	memIdent, ok := m.identRepo.(*identity.MemoryRepository)
 	if !ok {
@@ -1064,31 +1067,29 @@ func (m *MemoryRepository) SearchProfiles(ctx context.Context, actorID string, q
 		}
 
 		// Match query against display_name, bio, gender_identities, sexual_orientations
-		if q != "" {
-			matched := false
-			if strings.Contains(strings.ToLower(targetProf.DisplayName), q) {
-				matched = true
-			} else if strings.Contains(strings.ToLower(targetProf.Bio), q) {
-				matched = true
-			} else {
-				for _, g := range targetProf.GenderIdentities {
-					if strings.Contains(strings.ToLower(g), q) {
+		matched := false
+		if strings.Contains(strings.ToLower(targetProf.DisplayName), q) {
+			matched = true
+		} else if strings.Contains(strings.ToLower(targetProf.Bio), q) {
+			matched = true
+		} else {
+			for _, g := range targetProf.GenderIdentities {
+				if strings.Contains(strings.ToLower(g), q) {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				for _, s := range targetProf.SexualOrientations {
+					if strings.Contains(strings.ToLower(s), q) {
 						matched = true
 						break
 					}
 				}
-				if !matched {
-					for _, s := range targetProf.SexualOrientations {
-						if strings.Contains(strings.ToLower(s), q) {
-							matched = true
-							break
-						}
-					}
-				}
 			}
-			if !matched {
-				continue
-			}
+		}
+		if !matched {
+			continue
 		}
 
 		// Calculate approximate distance
@@ -2060,6 +2061,13 @@ func (m *MemoryRepository) ListFavourites(ctx context.Context, userID string) ([
 		return []FavouriteProfileCard{}, nil
 	}
 
+	var actorLoc *identity.ProfileLocation
+	if m.identRepo != nil {
+		if loc, err := m.identRepo.GetLocation(ctx, userID); err == nil && loc != nil {
+			actorLoc = loc
+		}
+	}
+
 	var results []FavouriteProfileCard
 	for targetID, addedAt := range userFavs {
 		// Check blocks
@@ -2078,14 +2086,34 @@ func (m *MemoryRepository) ListFavourites(ctx context.Context, userID string) ([
 		}
 
 		age := calculateAge(prof.Birthdate, time.Now().UTC())
-		results = append(results, FavouriteProfileCard{
-			UserID:      targetID,
-			DisplayName: prof.DisplayName,
-			Age:         age,
-			Bio:         prof.Bio,
-			PhotoURL:    "",
-			AddedAt:     addedAt,
-		})
+		card := FavouriteProfileCard{
+			UserID:           targetID,
+			DisplayName:      prof.DisplayName,
+			Age:              age,
+			Bio:              prof.Bio,
+			PhotoURL:         "",
+			AddedAt:          addedAt,
+			GenderIdentities: prof.GenderIdentities,
+			IsPhotoVerified:  prof.IsPhotoVerified,
+			HasConversation:  m.favouriteHasConversation(userID, targetID),
+		}
+		if m.identRepo != nil {
+			if u, err := m.identRepo.GetUserByID(ctx, targetID); err == nil && u != nil {
+				card.LastActiveAt = u.LastActiveAt
+				if !u.CreatedAt.IsZero() {
+					created := u.CreatedAt
+					card.UserCreatedAt = &created
+				}
+			}
+			if loc, err := m.identRepo.GetLocation(ctx, targetID); err == nil && loc != nil {
+				card.CityName = loc.CityName
+				if actorLoc != nil {
+					km := int(math.Round(haversineDistance(actorLoc.Latitude, actorLoc.Longitude, loc.Latitude, loc.Longitude)))
+					card.DistanceKm = &km
+				}
+			}
+		}
+		results = append(results, card)
 	}
 
 	sort.Slice(results, func(i, j int) bool {
@@ -2096,6 +2124,26 @@ func (m *MemoryRepository) ListFavourites(ctx context.Context, userID string) ([
 		results = []FavouriteProfileCard{}
 	}
 	return results, nil
+}
+
+func (m *MemoryRepository) favouriteHasConversation(userID, targetID string) bool {
+	low, high := canonicalPair(userID, targetID)
+	pairKey := fmt.Sprintf("%s:%s", low, high)
+	if matchID, ok := m.matchByPair[pairKey]; ok {
+		if _, exists := m.matches[matchID]; exists {
+			return true
+		}
+	}
+	for _, req := range m.messageRequests {
+		if req == nil {
+			continue
+		}
+		if (req.SenderUserID == userID && req.RecipientUserID == targetID) ||
+			(req.SenderUserID == targetID && req.RecipientUserID == userID) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MemoryRepository) IsFavourite(ctx context.Context, userID, targetUserID string) (bool, error) {
@@ -3045,7 +3093,12 @@ func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string,
 		limit = 20
 	}
 
-	searchPattern := "%" + strings.TrimSpace(query) + "%"
+	trimmed := strings.TrimSpace(query)
+	if len(trimmed) < 2 {
+		return []DiscoveryCandidate{}, nil
+	}
+
+	searchPattern := "%" + trimmed + "%"
 
 	sqlQuery := `
 		WITH actor_info AS (
@@ -3087,8 +3140,7 @@ func (p *PostgresRepository) SearchProfiles(ctx context.Context, actorID string,
 			     OR (b.blocker_user_id = u.id AND b.blocked_user_id = a.user_id)
 		  )
 		  AND (
-			  $2 = '%%'
-			  OR p.display_name ILIKE $2
+			  p.display_name ILIKE $2
 			  OR p.bio ILIKE $2
 			  OR EXISTS (SELECT 1 FROM unnest(p.gender_identities) g WHERE g ILIKE $2)
 			  OR EXISTS (SELECT 1 FROM unnest(p.sexual_orientations) s WHERE s ILIKE $2)
@@ -3169,7 +3221,7 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
 		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
 		  AND NOT EXISTS (
-			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			  SELECT 1 FROM user_blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
 			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
 		  )
 	`
@@ -3192,7 +3244,7 @@ func (p *PostgresRepository) GetIncomingLikes(ctx context.Context, userID string
 		LEFT JOIN likes_reveals lr ON lr.user_id = $1 AND lr.liked_by_user_id = s.actor_user_id
 		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
 		  AND NOT EXISTS (
-			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			  SELECT 1 FROM user_blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
 			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
 		  )
 		ORDER BY CASE WHEN s.direction = 'SUPER_SPARK' THEN 0 ELSE 1 END ASC, s.created_at DESC
@@ -3416,7 +3468,7 @@ func (p *PostgresRepository) UnlockLikesYouAdReward(ctx context.Context, userID 
 		JOIN users u ON u.id = s.actor_user_id AND u.status = 'ACTIVE'
 		WHERE s.target_user_id = $1 AND s.direction IN ('LIKE', 'SUPER_SPARK') AND s.undone_at IS NULL
 		  AND NOT EXISTS (
-			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
+			  SELECT 1 FROM user_blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = s.actor_user_id)
 			                            OR (b.blocker_user_id = s.actor_user_id AND b.blocked_user_id = $1)
 		  )
 		  AND NOT EXISTS (
@@ -4205,13 +4257,42 @@ func (p *PostgresRepository) RemoveFavourite(ctx context.Context, userID, target
 
 func (p *PostgresRepository) ListFavourites(ctx context.Context, userID string) ([]FavouriteProfileCard, error) {
 	query := `
-		SELECT uf.target_user_id, p.display_name, p.birthdate, COALESCE(p.bio, ''), uf.created_at
+		SELECT uf.target_user_id,
+		       p.display_name,
+		       p.birthdate,
+		       COALESCE(p.bio, ''),
+		       uf.created_at,
+		       p.gender_identities,
+		       p.is_photo_verified,
+		       COALESCE(pl_target.city_name, ''),
+		       CASE
+		           WHEN pl_curr.coordinates IS NOT NULL AND pl_target.coordinates IS NOT NULL
+		           THEN ROUND(ST_Distance(pl_target.coordinates, pl_curr.coordinates) / 1000.0)::INT
+		           ELSE NULL
+		       END AS distance_km,
+		       u.last_active_at,
+		       u.created_at AS user_created_at,
+		       (
+		           EXISTS (
+		               SELECT 1 FROM matches m
+		               JOIN conversations c ON c.match_id = m.id
+		               WHERE m.user_low_id = LEAST($1::uuid, uf.target_user_id)
+		                 AND m.user_high_id = GREATEST($1::uuid, uf.target_user_id)
+		           )
+		           OR EXISTS (
+		               SELECT 1 FROM message_requests mr
+		               WHERE (mr.sender_user_id = $1::uuid AND mr.recipient_user_id = uf.target_user_id)
+		                  OR (mr.sender_user_id = uf.target_user_id AND mr.recipient_user_id = $1::uuid)
+		           )
+		       ) AS has_conversation
 		FROM user_favourites uf
 		JOIN profiles p ON p.user_id = uf.target_user_id
 		JOIN users u ON u.id = uf.target_user_id AND u.status = 'ACTIVE'
+		LEFT JOIN profile_locations pl_curr ON pl_curr.user_id = $1
+		LEFT JOIN profile_locations pl_target ON pl_target.user_id = uf.target_user_id
 		WHERE uf.user_id = $1
 		  AND NOT EXISTS (
-			  SELECT 1 FROM blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = uf.target_user_id)
+			  SELECT 1 FROM user_blocks b WHERE (b.blocker_user_id = $1 AND b.blocked_user_id = uf.target_user_id)
 			                            OR (b.blocker_user_id = uf.target_user_id AND b.blocked_user_id = $1)
 		  )
 		ORDER BY uf.created_at DESC
@@ -4224,21 +4305,37 @@ func (p *PostgresRepository) ListFavourites(ctx context.Context, userID string) 
 
 	var results []FavouriteProfileCard
 	for rows.Next() {
-		var targetID, displayName, bio string
-		var birthdate, createdAt time.Time
+		var targetID, displayName, bio, cityName string
+		var birthdate, addedAt, userCreatedAt time.Time
+		var genderIdentities []string
+		var isPhotoVerified, hasConversation bool
+		var distanceKm *int
+		var lastActiveAt *time.Time
 
-		if err := rows.Scan(&targetID, &displayName, &birthdate, &bio, &createdAt); err != nil {
+		if err := rows.Scan(
+			&targetID, &displayName, &birthdate, &bio, &addedAt,
+			&genderIdentities, &isPhotoVerified, &cityName, &distanceKm,
+			&lastActiveAt, &userCreatedAt, &hasConversation,
+		); err != nil {
 			return nil, err
 		}
 
 		age := calculateAge(birthdate, time.Now().UTC())
+		createdAt := userCreatedAt
 		results = append(results, FavouriteProfileCard{
-			UserID:      targetID,
-			DisplayName: displayName,
-			Age:         age,
-			Bio:         bio,
-			PhotoURL:    "",
-			AddedAt:     createdAt,
+			UserID:           targetID,
+			DisplayName:      displayName,
+			Age:              age,
+			Bio:              bio,
+			PhotoURL:         "",
+			AddedAt:          addedAt,
+			GenderIdentities: genderIdentities,
+			IsPhotoVerified:  isPhotoVerified,
+			CityName:         cityName,
+			DistanceKm:       distanceKm,
+			LastActiveAt:     lastActiveAt,
+			UserCreatedAt:    &createdAt,
+			HasConversation:  hasConversation,
 		})
 	}
 	if results == nil {

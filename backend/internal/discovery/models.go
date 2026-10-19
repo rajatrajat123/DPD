@@ -330,12 +330,19 @@ type UserFavourite struct {
 }
 
 type FavouriteProfileCard struct {
-	UserID      string    `json:"user_id"`
-	DisplayName string    `json:"display_name"`
-	Age         int       `json:"age"`
-	Bio         string    `json:"bio"`
-	PhotoURL    string    `json:"photo_url,omitempty"`
-	AddedAt     time.Time `json:"added_at"`
+	UserID           string     `json:"user_id"`
+	DisplayName      string     `json:"display_name"`
+	Age              int        `json:"age"`
+	Bio              string     `json:"bio"`
+	PhotoURL         string     `json:"photo_url,omitempty"`
+	AddedAt          time.Time  `json:"added_at"`
+	GenderIdentities []string   `json:"gender_identities,omitempty"`
+	IsPhotoVerified  bool       `json:"is_photo_verified"`
+	CityName         string     `json:"city_name,omitempty"`
+	DistanceKm       *int       `json:"distance_km,omitempty"`
+	LastActiveAt     *time.Time `json:"last_active_at,omitempty"`
+	UserCreatedAt    *time.Time `json:"user_created_at,omitempty"`
+	HasConversation  bool       `json:"has_conversation"`
 }
 
 type AddFavouriteRequest struct {

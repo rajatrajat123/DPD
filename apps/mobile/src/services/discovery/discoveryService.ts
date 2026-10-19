@@ -107,12 +107,21 @@ export const discoveryService = {
    * Searches public eligible profiles by query (display name, bio, tags)
    */
   async search(query: string, limit = 20): Promise<FeedResponse> {
+    const trimmed = (query || '').trim();
+    if (trimmed.length < 2) {
+      return {
+        candidates: [],
+        count: 0,
+        dealbreakers_applied: false,
+      };
+    }
+
     const res = await api.get<{
       candidates?: any[];
       count?: number;
       query?: string;
     }>('/api/v1/discovery/search', {
-      q: query,
+      q: trimmed,
       limit,
     });
 

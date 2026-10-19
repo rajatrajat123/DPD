@@ -8,9 +8,9 @@ import {
   FlatList,
   Image,
   ActivityIndicator,
-  SafeAreaView,
   Keyboard,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { colors, typography, spacing, borderRadius } from '../src/theme';
 import { discoveryService } from '../src/services/discovery/discoveryService';
@@ -22,19 +22,40 @@ export default function SearchScreen() {
   const [candidates, setCandidates] = useState<DiscoveryCandidate[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [hasSearched, setHasSearched] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const searchSeqRef = useRef(0);
 
   const performSearch = useCallback(async (searchTerm: string) => {
-    setIsLoading(true);
-    try {
-      const res = await discoveryService.search(searchTerm, 30);
-      setCandidates(res.candidates || []);
-      setHasSearched(true);
-    } catch {
+    const trimmed = searchTerm.trim();
+    if (trimmed.length < 2) {
       setCandidates([]);
-      setHasSearched(true);
-    } finally {
+      setHasSearched(false);
       setIsLoading(false);
+      setSearchError(null);
+      return;
+    }
+
+    const currentSeq = ++searchSeqRef.current;
+    setIsLoading(true);
+    setSearchError(null);
+
+    try {
+      const res = await discoveryService.search(trimmed, 30);
+      if (searchSeqRef.current === currentSeq) {
+        setCandidates(res.candidates || []);
+        setHasSearched(true);
+      }
+    } catch (err: any) {
+      if (searchSeqRef.current === currentSeq) {
+        setCandidates([]);
+        setHasSearched(true);
+        setSearchError(err?.message || 'Failed to search profiles. Please try again.');
+      }
+    } finally {
+      if (searchSeqRef.current === currentSeq) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -43,25 +64,39 @@ export default function SearchScreen() {
     if (debounceTimerRef.current) {
       clearTimeout(debounceTimerRef.current);
     }
+    const trimmed = text.trim();
+    if (trimmed.length < 2) {
+      setCandidates([]);
+      setHasSearched(false);
+      setIsLoading(false);
+      setSearchError(null);
+      return;
+    }
     debounceTimerRef.current = setTimeout(() => {
-      performSearch(text.trim());
+      performSearch(text);
     }, 350);
   };
 
   const handleClear = () => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    searchSeqRef.current++;
     setQuery('');
-    performSearch('');
+    setCandidates([]);
+    setHasSearched(false);
+    setIsLoading(false);
+    setSearchError(null);
+    Keyboard.dismiss();
   };
 
   useEffect(() => {
-    // Initial fetch of public candidates
-    performSearch('');
     return () => {
       if (debounceTimerRef.current) {
         clearTimeout(debounceTimerRef.current);
       }
     };
-  }, [performSearch]);
+  }, []);
 
   const renderCandidateCard = ({ item }: { item: DiscoveryCandidate }) => {
     const primaryPhotoUrl = item.photos?.[0]?.url || item.photos?.[0]?.thumb_url;
@@ -135,7 +170,7 @@ export default function SearchScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
       {/* Search Header */}
       <View style={styles.header}>
         <TouchableOpacity
@@ -158,7 +193,9 @@ export default function SearchScreen() {
             returnKeyType="search"
             onSubmitEditing={() => {
               Keyboard.dismiss();
-              performSearch(query.trim());
+              if (query.trim().length >= 2) {
+                performSearch(query);
+              }
             }}
             autoCorrect={false}
             testID="search-input"
@@ -172,10 +209,23 @@ export default function SearchScreen() {
       </View>
 
       {/* Results List */}
-      {isLoading && !hasSearched ? (
+      {isLoading ? (
         <View style={styles.centerContainer}>
           <ActivityIndicator color={colors.gold} size="large" />
           <Text style={styles.loadingText}>Searching community profiles...</Text>
+        </View>
+      ) : searchError ? (
+        <View style={styles.centerContainer}>
+          <Text style={styles.emptyIcon}>⚠️</Text>
+          <Text style={styles.emptyTitle}>Search Unavailable</Text>
+          <Text style={styles.emptyDescription}>{searchError}</Text>
+          <TouchableOpacity
+            style={styles.retryButton}
+            onPress={() => performSearch(query)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.retryButtonText}>Retry Search</Text>
+          </TouchableOpacity>
         </View>
       ) : candidates.length > 0 ? (
         <FlatList
@@ -185,16 +235,28 @@ export default function SearchScreen() {
           contentContainerStyle={styles.listContent}
           keyboardShouldPersistTaps="handled"
         />
+      ) : hasSearched && query.trim().length >= 2 ? (
+        <View style={styles.centerContainer}>
+          <Text style={styles.emptyIcon}>🔍</Text>
+          <Text style={styles.emptyTitle}>No Profiles Found</Text>
+          <Text style={styles.emptyDescription}>
+            {`No members found matching "${query.trim()}". Try searching by other names, identities, or interests.`}
+          </Text>
+        </View>
+      ) : query.trim().length > 0 ? (
+        <View style={styles.centerContainer}>
+          <Text style={styles.emptyIcon}>⌨️</Text>
+          <Text style={styles.emptyTitle}>Keep Typing</Text>
+          <Text style={styles.emptyDescription}>
+            Please enter at least 2 characters to search for members.
+          </Text>
+        </View>
       ) : (
         <View style={styles.centerContainer}>
           <Text style={styles.emptyIcon}>🔍</Text>
-          <Text style={styles.emptyTitle}>
-            {hasSearched && query.trim() !== '' ? 'No Profiles Found' : 'Explore Aura'}
-          </Text>
+          <Text style={styles.emptyTitle}>Explore Aura</Text>
           <Text style={styles.emptyDescription}>
-            {hasSearched && query.trim() !== ''
-              ? `No members found matching "${query}". Try searching by other names, identities, or interests.`
-              : 'Type a name, identity, or keyword to discover members in your community.'}
+            Type a name, identity, or keyword to discover members in your community.
           </Text>
         </View>
       )}
@@ -389,5 +451,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
     maxWidth: 280,
+  },
+  retryButton: {
+    marginTop: spacing.md,
+    backgroundColor: colors.card,
+    borderWidth: 1,
+    borderColor: colors.gold,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.sm,
+    borderRadius: borderRadius.full,
+  },
+  retryButtonText: {
+    ...typography.button,
+    color: colors.gold,
+    fontSize: 14,
   },
 });

@@ -689,4 +689,133 @@ func TestBonusLikes_VerifiedOnlyRestriction(t *testing.T) {
 	}
 }
 
+func TestUnlockDiscoveryMessageAdBonus_VerificationEnforcement(t *testing.T) {
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := NewMemoryRepository(identRepo)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	ctx := context.Background()
+	actorID := "user_msg_ad_verify"
+	_ = identRepo.CreateUser(ctx, &identity.User{
+		ID:        actorID,
+		Email:     "msg_ad@test.local",
+		Status:    identity.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	// Set user in trial state with 4 messages sent (eligible for ad unlock)
+	for i := 1; i <= 4; i++ {
+		_ = discoRepo.ConsumeDiscoveryMessageSlot(ctx, actorID, fmt.Sprintf("target_%d", i))
+	}
+
+	// 1. In production, client-supplied transaction_id without cryptographic SSV MUST FAIL
+	prodSvc := NewService(discoRepo, identRepo, nil, logger, WithEnvironment("production"))
+	_, err := prodSvc.UnlockDiscoveryMessageAdBonus(ctx, actorID, "", "test_client_tx_123")
+	if err == nil || !strings.Contains(err.Error(), "cryptographic SSV callback is required in production") {
+		t.Fatalf("expected rejection of client transaction ID in production, got: %v", err)
+	}
+
+	// 2. Empty rawQuery and empty transactionID MUST FAIL in all environments
+	_, err = prodSvc.UnlockDiscoveryMessageAdBonus(ctx, actorID, "", "")
+	if err == nil || !strings.Contains(err.Error(), "valid cryptographic SSV callback or test transaction is required") {
+		t.Fatalf("expected rejection of empty verification parameters, got: %v", err)
+	}
+
+	// Also in dev verifier:
+	devSvc := NewService(discoRepo, identRepo, nil, logger, WithEnvironment("development"))
+	_, err = devSvc.UnlockDiscoveryMessageAdBonus(ctx, actorID, "", "")
+	if err == nil || !strings.Contains(err.Error(), "valid cryptographic SSV callback or test transaction is required") {
+		t.Fatalf("expected rejection of empty parameters in dev verifier, got: %v", err)
+	}
+
+	// 3. Genuine cryptographic ECDSA verification in production MUST SUCCEED
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(999111)
+	prodSvc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/123&custom_data=discovery_message_quota_unlock&key_id=%d&reward_amount=2&reward_item=MESSAGING&timestamp=%d&transaction_id=tx_genuine_msg_unlock&user_id=%s", keyID, nowMs, actorID)
+	sig, err := signQueryString(priv, baseQuery)
+	if err != nil {
+		t.Fatalf("failed to sign query: %v", err)
+	}
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	quota, err := prodSvc.UnlockDiscoveryMessageAdBonus(ctx, actorID, fullQuery, "")
+	if err != nil {
+		t.Fatalf("expected genuine SSV to unlock messaging quota in production, got: %v", err)
+	}
+	if quota.TrialInitiationsAllowed != 8 {
+		t.Fatalf("expected 8 trial initiations allowed after ad unlock, got: %d", quota.TrialInitiationsAllowed)
+	}
+
+	// 4. Replay of same transaction MUST FAIL with ErrDuplicateSSVReward
+	_, err = prodSvc.UnlockDiscoveryMessageAdBonus(ctx, actorID, fullQuery, "")
+	if err == nil || err != ErrDuplicateSSVReward {
+		t.Fatalf("expected ErrDuplicateSSVReward on replay, got: %v", err)
+	}
+}
+
+func TestUnlockLikesYouWithAd_VerificationEnforcement(t *testing.T) {
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := NewMemoryRepository(identRepo)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+
+	ctx := context.Background()
+	actorID := "user_likes_ad_verify"
+	_ = identRepo.CreateUser(ctx, &identity.User{
+		ID:        actorID,
+		Email:     "likes_ad@test.local",
+		Status:    identity.StatusActive,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	prodSvc := NewService(discoRepo, identRepo, nil, logger, WithEnvironment("production"))
+
+	// 1. Client-supplied transaction_id in production MUST FAIL
+	_, err := prodSvc.UnlockLikesYouWithAd(ctx, actorID, "", "test_tx_fake_999")
+	if err == nil || !strings.Contains(err.Error(), "cryptographic SSV callback is required in production") {
+		t.Fatalf("expected rejection of client-supplied transaction ID in production, got: %v", err)
+	}
+
+	// 2. Empty parameters MUST FAIL
+	_, err = prodSvc.UnlockLikesYouWithAd(ctx, actorID, "", "")
+	if err == nil || !strings.Contains(err.Error(), "valid cryptographic SSV callback or test transaction is required") {
+		t.Fatalf("expected rejection of empty verification parameters, got: %v", err)
+	}
+
+	// 3. Genuine ECDSA verification in production MUST SUCCEED
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(999222)
+	prodSvc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/123&custom_data=likes_you_unlock&key_id=%d&reward_amount=2&reward_item=LIKES_YOU&timestamp=%d&transaction_id=tx_genuine_likes_unlock&user_id=%s", keyID, nowMs, actorID)
+	sig, err := signQueryString(priv, baseQuery)
+	if err != nil {
+		t.Fatalf("failed to sign query: %v", err)
+	}
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	res, err := prodSvc.UnlockLikesYouWithAd(ctx, actorID, fullQuery, "")
+	if err != nil {
+		t.Fatalf("expected genuine SSV to unlock likes in production, got: %v", err)
+	}
+	if !res.Success {
+		t.Fatalf("expected success true, got false")
+	}
+
+	// 4. Replay MUST FAIL
+	_, err = prodSvc.UnlockLikesYouWithAd(ctx, actorID, fullQuery, "")
+	if err == nil || err != ErrDuplicateSSVReward {
+		t.Fatalf("expected ErrDuplicateSSVReward on replay, got: %v", err)
+	}
+}
+
 

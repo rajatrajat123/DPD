@@ -83,29 +83,34 @@ export const DiscoveryMessageQuotaModal: React.FC<DiscoveryMessageQuotaModalProp
   };
 
   const handleWatchAd = async () => {
+    if (isWatchingAd) return;
     if (!quota?.can_unlock_with_ad) return;
 
     setIsWatchingAd(true);
     setAdMessage(null);
 
     try {
-      let txId: string | undefined;
-
-      if (isGoogleMobileAdsAvailable()) {
-        const result = await admobService.showRewardedAd(userId);
-        if (!result.rewarded) {
-          setAdMessage(result.error || 'Video was closed before earning the reward.');
-          setIsWatchingAd(false);
-          return;
-        }
-        txId = result.transactionId;
-      } else {
-        // Development / Expo Go fallback with unique transaction ID
-        txId = `ad-unlock-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
+      if (!isGoogleMobileAdsAvailable()) {
+        setAdMessage('Rewarded video ads are not supported in Expo Go. Please open the app in an Android development build to watch ads.');
+        setIsWatchingAd(false);
+        return;
       }
 
-      // Unlock bonus slots on backend
-      const updated = await discoveryService.unlockMessagingQuotaWithAd(txId);
+      const result = await admobService.showRewardedAd(userId, 'discovery_message_quota_unlock');
+      if (!result.rewarded) {
+        setAdMessage(result.error || 'Video was closed before earning the reward.');
+        setIsWatchingAd(false);
+        return;
+      }
+
+      if (!result.transactionId) {
+        setAdMessage('Ad verification token is missing. Please try again.');
+        setIsWatchingAd(false);
+        return;
+      }
+
+      // Unlock bonus slots on backend ONLY after verified ad completion
+      const updated = await discoveryService.unlockMessagingQuotaWithAd(result.transactionId);
       onQuotaUpdated(updated);
       setAdMessage(
         updated.is_in_trial

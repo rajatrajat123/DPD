@@ -367,6 +367,13 @@ export interface FavouriteProfileCard {
   bio: string;
   photo_url?: string;
   added_at: string;
+  gender_identities?: string[];
+  is_photo_verified?: boolean;
+  city_name?: string;
+  distance_km?: number | null;
+  last_active_at?: string | null;
+  user_created_at?: string | null;
+  has_conversation?: boolean;
 }
 
 export interface ListFavouritesResponse {

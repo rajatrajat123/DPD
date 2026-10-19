@@ -164,3 +164,58 @@ test('My Favourites: Profile Detail Screen Bookmark Toggle', async () => {
   assert.ok(detailContent.includes('discoveryService.addFavourite(id)'), 'Must call discoveryService.addFavourite');
   assert.ok(detailContent.includes('discoveryService.removeFavourite(id)'), 'Must call discoveryService.removeFavourite');
 });
+
+test('My Favourites: Dedicated Screen Architecture & Navigation Contract', async () => {
+  // 1. Verify route registered in root Stack layout
+  const layoutFilePath = resolve(process.cwd(), 'app/_layout.tsx');
+  const layoutContent = await fs.readFile(layoutFilePath, 'utf-8');
+  assert.ok(
+    layoutContent.includes('<Stack.Screen name="favourites" options={{ headerShown: false }} />'),
+    'Must register favourites screen in root Stack layout'
+  );
+
+  // 2. Verify Profile screen header navigates to dedicated /favourites screen
+  const profileFilePath = resolve(process.cwd(), 'app/(tabs)/profile.tsx');
+  const profileContent = await fs.readFile(profileFilePath, 'utf-8');
+  assert.ok(
+    profileContent.includes("router.push('/favourites' as any)"),
+    'Tapping My Favourites accordion header must navigate to /favourites'
+  );
+
+  // 3. Verify Dedicated Screen file exists and exports MyFavouritesScreen default component
+  const screenFilePath = resolve(process.cwd(), 'app/favourites.tsx');
+  const screenContent = await fs.readFile(screenFilePath, 'utf-8');
+  assert.ok(screenContent.includes('export default function MyFavouritesScreen()'), 'Must export MyFavouritesScreen');
+
+  // 4. Verify Header controls (Back, Saved count, Column toggles, Filter toggle)
+  assert.ok(screenContent.includes('testID="favourites-back-btn"'), 'Must render favourites-back-btn');
+  assert.ok(screenContent.includes('testID="col-toggle-1"'), 'Must provide 1-column layout toggle');
+  assert.ok(screenContent.includes('testID="col-toggle-2"'), 'Must provide 2-column layout toggle');
+  assert.ok(screenContent.includes('testID="col-toggle-3"'), 'Must provide 3-column layout toggle');
+  assert.ok(screenContent.includes('testID="filter-toggle-btn"'), 'Must render filter-toggle-btn');
+
+  // 5. Verify Search and Filter Chips
+  assert.ok(screenContent.includes('testID="favourites-search-input"'), 'Must render search bar');
+  assert.ok(screenContent.includes('testID="filter-recently-active"'), 'Must support Recently Active filter');
+  assert.ok(screenContent.includes('testID="filter-hide-messaged"'), 'Must support Hide Messaged filter');
+  assert.ok(screenContent.includes('testID="filter-new-members"'), 'Must support New Members filter');
+  assert.ok(screenContent.includes('testID="filter-near-me"'), 'Must support Near Me filter');
+  assert.ok(screenContent.includes('testID="filter-verified-photos"'), 'Must support Verified Photos filter');
+  assert.ok(screenContent.includes('testID="filter-reset-all"'), 'Must provide Reset All filters chip');
+
+  // 6. Verify Grid Cards, Badges, Online Indicator and Actions
+  assert.ok(screenContent.includes('testID={`favourite-grid-item-${item.user_id}`}'), 'Must render grid card item with testID');
+  assert.ok(screenContent.includes('testID={`favourite-card-touch-${item.user_id}`}'), 'Must render card touchable');
+  assert.ok(screenContent.includes("pathname: '/profile/[id]'"), 'Tapping card must navigate to profile details');
+  assert.ok(screenContent.includes('testID={`remove-fav-btn-${item.user_id}`}'), 'Must render remove favourite action on card');
+  assert.ok(screenContent.includes('testID={`like-fav-btn-${item.user_id}`}'), 'Must render like action on card');
+  assert.ok(screenContent.includes('testID={`verified-badge-${item.user_id}`}'), 'Must render verification badge for verified photos');
+
+  // 7. Verify Loading, Empty, Error and Refresh states
+  assert.ok(screenContent.includes('testID="favourites-loading-state"'), 'Must handle loading state');
+  assert.ok(screenContent.includes('testID="favourites-error-state"'), 'Must handle error state');
+  assert.ok(screenContent.includes('testID="favourites-retry-btn"'), 'Must provide retry button');
+  assert.ok(screenContent.includes('testID="favourites-empty-state"'), 'Must handle empty state');
+  assert.ok(screenContent.includes('testID="favourites-no-matches-state"'), 'Must handle no search/filter matches state');
+  assert.ok(screenContent.includes('RefreshControl'), 'Must support pull-to-refresh');
+});

@@ -191,7 +191,7 @@ export default function ProfileScreen() {
     identity: false,    // Collapsed by default
     lifestyle: false,   // Collapsed by default
     preferences: false, // Collapsed by default
-    favourites: true,   // Expanded by default
+    favourites: false,  // Collapsed by default
   });
 
   const toggleSection = (key: keyof typeof expandedSections) => {
@@ -262,7 +262,7 @@ export default function ProfileScreen() {
 
   // Section F: My Favourites (Private bookmarks loaded from backend)
   const [favourites, setFavourites] = useState<FavouriteProfileCard[]>([]);
-  const [isLoadingFavourites, setIsLoadingFavourites] = useState<boolean>(true);
+  const [isLoadingFavourites, setIsLoadingFavourites] = useState<boolean>(false);
   const [favouritesError, setFavouritesError] = useState<string | null>(null);
 
   const loadFavourites = useCallback(async () => {
@@ -272,12 +272,22 @@ export default function ProfileScreen() {
       const res = await discoveryService.getFavourites();
       setFavourites(res.favourites || []);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
-      setFavouritesError(msg || 'Could not load favourites.');
+      const msg = err instanceof Error ? err.message : 'Could not load favourites.';
+      setFavouritesError(msg);
     } finally {
       setIsLoadingFavourites(false);
     }
   }, []);
+
+  const handleRemoveFavourite = async (targetUserId: string) => {
+    try {
+      await discoveryService.removeFavourite(targetUserId);
+      setFavourites((prev) => prev.filter((f) => f.user_id !== targetUserId));
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Could not remove favourite.';
+      Alert.alert('Error', msg);
+    }
+  };
 
   useEffect(() => {
     loadFavourites();
@@ -288,16 +298,6 @@ export default function ProfileScreen() {
       loadFavourites();
     }, [loadFavourites])
   );
-
-  const handleRemoveFavourite = useCallback(async (targetUserId: string) => {
-    setFavourites((prev) => prev.filter((f) => f.user_id !== targetUserId));
-    try {
-      await discoveryService.removeFavourite(targetUserId);
-    } catch {
-      loadFavourites();
-      Alert.alert('Remove Failed', 'Could not remove favourite profile. Please try again.');
-    }
-  }, [loadFavourites]);
 
   const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [uploadProgressText, setUploadProgressText] = useState('');
@@ -2271,11 +2271,10 @@ export default function ProfileScreen() {
           <TouchableOpacity
             testID="accordion-header-favourites"
             style={styles.accordionHeader}
-            onPress={() => toggleSection('favourites')}
+            onPress={() => router.push('/favourites' as any)}
             activeOpacity={0.8}
             accessibilityRole="button"
-            accessibilityLabel="My Favourites section"
-            accessibilityState={{ expanded: expandedSections.favourites }}
+            accessibilityLabel="My Favourites section — tap to open full-screen grid"
           >
             <View style={styles.accordionTitleCol}>
               <View style={styles.accordionTitleRow}>
@@ -2301,7 +2300,7 @@ export default function ProfileScreen() {
                 </View>
               </View>
               <Text style={styles.accordionDesc}>
-                Private bookmarks — profiles you've saved from Discovery
+                Private bookmarks — tap to browse your saved profiles in 3-column grid
               </Text>
             </View>
             <View
@@ -2310,8 +2309,8 @@ export default function ProfileScreen() {
                 { backgroundColor: colors.backgroundElevated, borderColor: colors.borderSubtle },
               ]}
             >
-              <Text style={[styles.accordionChevronText, { color: colors.gold }]}>
-                {expandedSections.favourites ? '▲' : '▼'}
+              <Text style={[styles.accordionChevronText, { color: colors.gold, fontSize: 16 }]}>
+                ›
               </Text>
             </View>
           </TouchableOpacity>

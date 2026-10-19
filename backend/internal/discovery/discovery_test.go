@@ -942,6 +942,17 @@ func TestDiscovery_SearchProfiles(t *testing.T) {
 	if res.Count != 0 {
 		t.Fatalf("expected 0 results after block, got %d", res.Count)
 	}
+
+	// 5. Empty query, whitespace query, and single-character query must return 0 results
+	for _, shortQuery := range []string{"", "   ", "R", " x "} {
+		res, err = discoSvc.SearchProfiles(ctx, actorID, shortQuery, 20)
+		if err != nil {
+			t.Fatalf("SearchProfiles with short query %q failed: %v", shortQuery, err)
+		}
+		if res.Count != 0 || len(res.Candidates) != 0 {
+			t.Fatalf("expected 0 results for short query %q, got count=%d len=%d", shortQuery, res.Count, len(res.Candidates))
+		}
+	}
 }
 
 func TestDiscoveryFeed_CursorPagination3Batches(t *testing.T) {

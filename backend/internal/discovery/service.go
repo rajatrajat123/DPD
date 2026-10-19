@@ -144,7 +144,7 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 	}
 
 	// 2. Messaging quota rewarded ad separation
-	if reward.CustomData == "messaging_quota_unlock" || reward.RewardItem == "MESSAGING" {
+	if reward.CustomData == "messaging_quota_unlock" || reward.CustomData == "discovery_message_quota_unlock" || reward.RewardItem == "MESSAGING" {
 		if err := s.repo.RecordAdReward(ctx, reward.UserID, reward.TransactionID, 2); err != nil {
 			return nil, err
 		}
@@ -300,7 +300,16 @@ func (s *Service) SearchProfiles(ctx context.Context, actorID string, query stri
 		limit = 20
 	}
 
-	candidates, err := s.repo.SearchProfiles(ctx, actorID, query, limit)
+	trimmedQuery := strings.TrimSpace(query)
+	if len(trimmedQuery) < 2 {
+		return &DiscoverySearchResponse{
+			Query:      query,
+			Count:      0,
+			Candidates: []DiscoveryCandidate{},
+		}, nil
+	}
+
+	candidates, err := s.repo.SearchProfiles(ctx, actorID, trimmedQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
@@ -835,15 +844,11 @@ func (s *Service) UnlockLikesYouWithAd(ctx context.Context, userID, rawQuery, tr
 		txID = reward.TransactionID
 	} else if transactionID != "" {
 		if !s.verifier.isTestSignatureAllowed() {
-			return nil, errors.New("raw_query cryptographic SSV callback is required")
+			return nil, errors.New("raw_query cryptographic SSV callback is required in production; client transaction ID not accepted")
 		}
 		txID = transactionID
 	} else {
-		if s.verifier.isTestSignatureAllowed() {
-			txID = fmt.Sprintf("test-likes-you-%s-%d", userID, time.Now().UnixNano())
-		} else {
-			return nil, errors.New("raw_query cryptographic SSV callback is required")
-		}
+		return nil, errors.New("ad verification required: valid cryptographic SSV callback or test transaction is required")
 	}
 
 	result, err := s.repo.UnlockLikesYouAdReward(ctx, userID, txID)
@@ -1004,20 +1009,13 @@ func (s *Service) UnlockDiscoveryMessageAdBonus(ctx context.Context, userID stri
 		}
 	} else if transactionID != "" {
 		if !s.verifier.isTestSignatureAllowed() {
-			return nil, errors.New("raw_query cryptographic SSV callback is required")
+			return nil, errors.New("raw_query cryptographic SSV callback is required in production; client transaction ID not accepted")
 		}
 		if err := s.repo.RecordAdReward(ctx, userID, transactionID, 2); err != nil {
 			return nil, err
 		}
 	} else {
-		if s.verifier.isTestSignatureAllowed() {
-			txID := fmt.Sprintf("test-ad-%s-%d", userID, time.Now().UnixNano())
-			if err := s.repo.RecordAdReward(ctx, userID, txID, 2); err != nil {
-				return nil, err
-			}
-		} else {
-			return nil, errors.New("raw_query cryptographic SSV callback is required")
-		}
+		return nil, errors.New("ad verification required: valid cryptographic SSV callback or test transaction is required")
 	}
 
 	return s.repo.UnlockDiscoveryMessageAdBonus(ctx, userID)
@@ -1078,15 +1076,16 @@ func (s *Service) ListFavourites(ctx context.Context, userID string) (*ListFavou
 		return nil, err
 	}
 
-	// Enrich photo URLs if mediaSvc is available and photo_url is empty
 	if s.mediaSvc != nil {
 		for i := range favs {
-			if favs[i].PhotoURL == "" {
-				gallery, err := s.mediaSvc.ListUserGallery(ctx, favs[i].UserID)
-				if err == nil && len(gallery) > 0 && len(gallery[0].Derivatives) > 0 {
-					favs[i].PhotoURL = gallery[0].Derivatives[0].URL
-				}
+			if favs[i].PhotoURL != "" {
+				continue
 			}
+			gallery, err := s.mediaSvc.ListUserGallery(ctx, favs[i].UserID)
+			if err != nil || len(gallery) == 0 {
+				continue
+			}
+			favs[i].PhotoURL = firstApprovedCardPhotoURL(gallery)
 		}
 	}
 
@@ -1102,6 +1101,37 @@ func (s *Service) IsFavourite(ctx context.Context, userID, targetUserID string) 
 		return false, nil
 	}
 	return s.repo.IsFavourite(ctx, userID, targetUserID)
+}
+
+func firstApprovedCardPhotoURL(gallery []media.MediaAssetResponse) string {
+	if len(gallery) == 0 {
+		return ""
+	}
+	g := gallery[0]
+	var thumb, card, full string
+	for _, d := range g.Derivatives {
+		switch d.Variant {
+		case media.VariantThumbWebP:
+			thumb = d.URL
+		case media.VariantCardWebP, media.VariantCardAVIF:
+			card = d.URL
+		case media.VariantFullWebP, media.VariantFullAVIF:
+			full = d.URL
+		}
+	}
+	if card != "" {
+		return card
+	}
+	if thumb != "" {
+		return thumb
+	}
+	if full != "" {
+		return full
+	}
+	if len(g.Derivatives) > 0 {
+		return g.Derivatives[0].URL
+	}
+	return ""
 }
 
 func generateUUIDv4() string {
