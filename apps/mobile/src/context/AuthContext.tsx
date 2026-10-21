@@ -11,6 +11,12 @@ interface AuthContextValue {
   isAuthenticated: boolean;
   isLoading: boolean;
   isAgeVerified: boolean;
+  /**
+   * True when the authenticated account has no profile yet (for example a brand
+   * new Google account). Such accounts must complete profile onboarding before
+   * the rest of the app can be used.
+   */
+  onboardingRequired: boolean;
   biometricLocked: boolean;
   login: (payload: LoginPayload) => Promise<void>;
   loginWithGoogle: (payload: GoogleAuthPayload) => Promise<void>;
@@ -29,6 +35,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [biometricLocked, setBiometricLocked] = useState<boolean>(false);
   const [isAgeVerified, setIsAgeVerified] = useState<boolean>(false);
+  const [onboardingRequired, setOnboardingRequired] = useState<boolean>(false);
 
   const refreshProfile = useCallback(async () => {
     try {
@@ -61,6 +68,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         chatService.setCurrentUserId(res.user.id);
       }
       setProfile(res.profile);
+      setOnboardingRequired(Boolean(res.onboarding_required));
       setIsAgeVerified(verified);
     } catch {
       // Session may be invalid
@@ -110,7 +118,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await authService.login(payload);
       setUser(res.user);
-      if (res.profile) setProfile(res.profile);
+      setProfile(res.profile ?? null);
+      setOnboardingRequired(Boolean(res.onboarding_required));
       chatWebSocket.connect();
       await refreshProfile();
     } finally {
@@ -123,7 +132,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await authService.loginWithGoogle(payload);
       setUser(res.user);
-      if (res.profile) setProfile(res.profile);
+      setProfile(res.profile ?? null);
+      setOnboardingRequired(Boolean(res.onboarding_required));
       chatWebSocket.connect();
       await refreshProfile();
     } finally {
@@ -136,7 +146,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     try {
       const res = await authService.register(payload);
       setUser(res.user);
-      if (res.profile) setProfile(res.profile);
+      setProfile(res.profile ?? null);
+      setOnboardingRequired(Boolean(res.onboarding_required));
       chatWebSocket.connect();
       await refreshProfile();
     } finally {
@@ -153,6 +164,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setUser(null);
       setProfile(null);
       setIsAgeVerified(false);
+      setOnboardingRequired(false);
       setBiometricLocked(false);
     } finally {
       setIsLoading(false);
@@ -179,6 +191,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         isAuthenticated: Boolean(user),
         isLoading,
         isAgeVerified,
+        onboardingRequired,
         biometricLocked,
         login,
         loginWithGoogle,

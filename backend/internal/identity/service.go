@@ -29,6 +29,8 @@ var (
 	ErrPasswordMissingDigit           = errors.New("password must contain at least one numeric digit (0-9)")
 	ErrPasswordMissingSpecial         = errors.New("password must contain at least one special character (such as !, @, #, $, or _)")
 	ErrTransactionalEmailUnconfigured = errors.New("transactional email provider unconfigured: delivery blocked in production/staging")
+	ErrOnboardingRequired             = errors.New("profile onboarding is required before this account can be used")
+	ErrBirthdateImmutable             = errors.New("birthdate cannot be changed once the profile exists")
 )
 
 // ValidatePasswordPolicy verifies that a password satisfies Aura's security policy:
@@ -95,9 +97,16 @@ type AuthResponse struct {
 	ExpiresIn    int64    `json:"expires_in"` // seconds
 	User         User     `json:"user"`
 	Profile      *Profile `json:"profile,omitempty"`
+	// OnboardingRequired signals that the account exists but has no profile yet
+	// (for example an account created through Google Sign-In). Clients must send
+	// the user through the profile onboarding flow before using the app.
+	OnboardingRequired bool `json:"onboarding_required,omitempty"`
 }
 
 type UpdateProfileRequest struct {
+	// Birthdate is only accepted when creating the profile for the first time
+	// (onboarding). Once a profile exists the birthdate is immutable.
+	Birthdate             *string                `json:"birthdate,omitempty"`
 	DisplayName           *string                `json:"display_name,omitempty"`
 	Bio                   *string                `json:"bio,omitempty"`
 	Pronouns              []string               `json:"pronouns,omitempty"`
@@ -148,11 +157,13 @@ type UpdatePreferencesRequest struct {
 }
 
 type FullProfileResponse struct {
-	User        User               `json:"user"`
-	Profile     Profile            `json:"profile"`
-	Location    *ProfileLocation   `json:"location,omitempty"`
-	Preferences *DatingPreferences `json:"preferences,omitempty"`
-	IsComplete  bool               `json:"is_complete"`
+	User    User     `json:"user"`
+	Profile *Profile `json:"profile"`
+	// OnboardingRequired is true when this account has no profile yet.
+	OnboardingRequired bool               `json:"onboarding_required,omitempty"`
+	Location           *ProfileLocation   `json:"location,omitempty"`
+	Preferences        *DatingPreferences `json:"preferences,omitempty"`
+	IsComplete         bool               `json:"is_complete"`
 }
 
 type Service struct {
@@ -403,7 +414,9 @@ func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Servi
 		opt(s)
 	}
 	if s.googleVerifier == nil {
-		s.googleVerifier = NewHTTPGoogleTokenVerifier(nil)
+		// Fail closed: with no configured OAuth client IDs every Google token is
+		// rejected instead of being accepted without audience validation.
+		s.googleVerifier = NewGoogleIDTokenVerifier(nil)
 	}
 	return s
 }
@@ -585,26 +598,38 @@ func (s *Service) Login(ctx context.Context, req LoginRequest, clientInfo Client
 	return s.issueAuthSession(ctx, user, profile, clientInfo)
 }
 
+// AuthenticateWithGoogle verifies a Google ID token and issues an Aura session.
+//
+// The only trusted inputs are the cryptographically verified claims from Google.
+// Nothing about the identity (email, subject, verification state) is ever taken
+// from the mobile client, and no profile data is invented for new accounts:
+// a newly created account has no profile and must complete onboarding.
 func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequest, clientInfo ClientInfo) (*AuthResponse, error) {
-	if s.googleVerifier == nil {
-		s.googleVerifier = NewHTTPGoogleTokenVerifier(nil)
-	}
-
 	claims, err := s.googleVerifier.VerifyToken(ctx, req.IDToken)
 	if err != nil {
-		return nil, fmt.Errorf("failed to verify google token: %w", err)
+		return nil, err
 	}
-
+	if claims == nil {
+		return nil, ErrInvalidOAuthToken
+	}
 	if !claims.EmailVerified {
 		return nil, ErrOAuthEmailNotVerified
 	}
 
-	now := time.Now().UTC()
+	subject := strings.TrimSpace(claims.Subject)
 	normEmail := strings.ToLower(strings.TrimSpace(claims.Email))
+	if subject == "" || normEmail == "" {
+		return nil, ErrInvalidOAuthToken
+	}
 
-	// 1. Check if this Google identity is already linked to a user account
-	existingIdent, err := s.repo.GetOAuthIdentity(ctx, "google", claims.Subject)
-	if err == nil && existingIdent != nil {
+	now := time.Now().UTC()
+
+	// 1. This Google identity is already linked to an Aura account.
+	existingIdent, err := s.repo.GetOAuthIdentity(ctx, "google", subject)
+	if err != nil && !errors.Is(err, ErrOAuthIdentityNotFound) {
+		return nil, err
+	}
+	if existingIdent != nil {
 		user, err := s.repo.GetUserByID(ctx, existingIdent.UserID)
 		if err != nil {
 			return nil, fmt.Errorf("linked user not found: %w", err)
@@ -617,96 +642,48 @@ func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequ
 		user.LastActiveAt = &now
 		_ = s.repo.UpdateUser(ctx, user)
 
-		profile, _ := s.repo.GetProfile(ctx, user.ID)
+		profile, profileErr := s.repo.GetProfile(ctx, user.ID)
+		if profileErr != nil {
+			profile = nil
+		}
 		return s.issueAuthSession(ctx, user, profile, clientInfo)
 	}
 
-	// 2. Check if a user with this email already exists (Account Linking)
-	existingUser, err := s.repo.GetUserByEmail(ctx, normEmail)
-	if err == nil && existingUser != nil {
+	// 2. An Aura account already exists for this email address. Never link
+	// implicitly: the account owner must prove ownership first (password sign-in
+	// followed by the authenticated /auth/google/link endpoint).
+	if existingUser, err := s.repo.GetUserByEmail(ctx, normEmail); err == nil && existingUser != nil {
 		if existingUser.Status != StatusActive {
 			return nil, ErrAccountNotActive
 		}
-
-		// Ensure no other Google identity is already bound to this email
-		if linkedIdent, err := s.repo.GetOAuthIdentityByEmail(ctx, "google", normEmail); err == nil && linkedIdent != nil {
-			if linkedIdent.ProviderSubject != claims.Subject {
-				return nil, fmt.Errorf("this email is already linked to another Google identity")
-			}
+		if linkedIdent, linkErr := s.repo.GetOAuthIdentityByEmail(ctx, "google", normEmail); linkErr == nil && linkedIdent != nil && linkedIdent.ProviderSubject != subject {
+			return nil, ErrGoogleIdentityConflict
 		}
-
-		// Link Google identity to existing user account
-		ident := &OAuthIdentity{
-			ID:              generateUUIDv4(),
-			UserID:          existingUser.ID,
-			Provider:        "google",
-			ProviderSubject: claims.Subject,
-			Email:           normEmail,
-			EmailVerified:   true,
-			LinkedAt:        now,
-			LastLoginAt:     now,
-		}
-		if err := s.repo.CreateOAuthIdentity(ctx, ident); err != nil {
-			return nil, fmt.Errorf("failed to link Google identity to existing account: %w", err)
-		}
-
-		if existingUser.EmailVerifiedAt == nil {
-			existingUser.EmailVerifiedAt = &now
-		}
-		existingUser.LastActiveAt = &now
-		_ = s.repo.UpdateUser(ctx, existingUser)
-
-		profile, _ := s.repo.GetProfile(ctx, existingUser.ID)
-		return s.issueAuthSession(ctx, existingUser, profile, clientInfo)
+		return nil, ErrGoogleAccountLinkRequired
+	} else if err != nil && !errors.Is(err, ErrUserNotFound) {
+		return nil, err
 	}
 
-	// 3. New user registration via Google Sign-In
-	displayName := strings.TrimSpace(req.DisplayName)
-	if displayName == "" {
-		if claims.Name != "" {
-			displayName = claims.Name
-		} else if claims.GivenName != "" {
-			displayName = claims.GivenName
-		} else {
-			displayName = strings.Split(normEmail, "@")[0]
-		}
-	}
-
-	var birthdate time.Time
-	if strings.TrimSpace(req.Birthdate) != "" {
-		b, err := time.Parse("2006-01-02", strings.TrimSpace(req.Birthdate))
-		if err != nil {
-			return nil, fmt.Errorf("invalid birthdate format, expected YYYY-MM-DD: %w", err)
-		}
-		if err := ValidateAge(b, now); err != nil {
-			return nil, err
-		}
-		birthdate = b
-	} else {
-		// Default adult age (26 years) to enable instant exploring while profile setup prompts for exact date
-		birthdate = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
-	}
-
-	userID := generateUUIDv4()
-	newUser := &User{
-		ID:              userID,
+	// 3. Brand new account created from verified Google claims only.
+	user := &User{
+		ID:              generateUUIDv4(),
 		Email:           normEmail,
 		PasswordHash:    "",
 		Status:          StatusActive,
 		Role:            RoleMember,
-		EmailVerifiedAt: &now,
+		EmailVerifiedAt: &now, // Google has verified ownership of this mailbox
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	if err := s.repo.CreateUser(ctx, newUser); err != nil {
+	if err := s.repo.CreateUser(ctx, user); err != nil {
 		return nil, fmt.Errorf("failed to create user account: %w", err)
 	}
 
 	ident := &OAuthIdentity{
 		ID:              generateUUIDv4(),
-		UserID:          userID,
+		UserID:          user.ID,
 		Provider:        "google",
-		ProviderSubject: claims.Subject,
+		ProviderSubject: subject,
 		Email:           normEmail,
 		EmailVerified:   true,
 		LinkedAt:        now,
@@ -716,33 +693,74 @@ func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequ
 		return nil, fmt.Errorf("failed to persist Google identity: %w", err)
 	}
 
-	profile := &Profile{
-		UserID:                userID,
-		DisplayName:           displayName,
-		Birthdate:             birthdate,
-		Bio:                   "",
-		Pronouns:              req.Pronouns,
-		GenderIdentities:      req.GenderIdentities,
-		SexualOrientations:    req.SexualOrientations,
-		RelationshipIntents:   req.RelationshipIntents,
-		RelationshipStructure: req.RelationshipStructure,
-		HeightCm:              req.HeightCm,
-		WeightKg:              req.WeightKg,
-		VisibilitySettings:    DefaultVisibilitySettings(),
-		CreatedAt:             now,
-		UpdatedAt:             now,
+	// No profile is created here. Birthdate, display name, gender identities and
+	// orientations are collected through the onboarding flow (UpdateMyProfile).
+	resp, err := s.issueAuthSession(ctx, user, nil, clientInfo)
+	if err != nil {
+		return nil, err
 	}
-	_ = s.repo.UpsertProfile(ctx, profile)
+	resp.OnboardingRequired = true
+	return resp, nil
+}
 
-	pref := DefaultDatingPreferences(userID)
-	if len(req.PreferredGenders) > 0 {
-		pref.PreferredGenders = req.PreferredGenders
-	} else if len(req.LookingFor) > 0 {
-		pref.PreferredGenders = req.LookingFor
+// LinkGoogleIdentity links a verified Google identity to the currently
+// authenticated Aura account. The authenticated session is the proof of
+// ownership that authorises the link.
+func (s *Service) LinkGoogleIdentity(ctx context.Context, userID string, req LinkGoogleRequest) error {
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
 	}
-	_ = s.repo.UpsertPreferences(ctx, &pref)
+	if user.Status != StatusActive {
+		return ErrAccountNotActive
+	}
 
-	return s.issueAuthSession(ctx, newUser, profile, clientInfo)
+	claims, err := s.googleVerifier.VerifyToken(ctx, req.IDToken)
+	if err != nil {
+		return err
+	}
+	if claims == nil || !claims.EmailVerified {
+		return ErrOAuthEmailNotVerified
+	}
+
+	subject := strings.TrimSpace(claims.Subject)
+	normEmail := strings.ToLower(strings.TrimSpace(claims.Email))
+	if subject == "" || normEmail == "" {
+		return ErrInvalidOAuthToken
+	}
+	if !strings.EqualFold(strings.TrimSpace(user.Email), normEmail) {
+		return ErrGoogleEmailMismatch
+	}
+
+	if ident, err := s.repo.GetOAuthIdentity(ctx, "google", subject); err == nil && ident != nil {
+		if ident.UserID == user.ID {
+			return nil // already linked to this account
+		}
+		return ErrGoogleIdentityConflict
+	} else if err != nil && !errors.Is(err, ErrOAuthIdentityNotFound) {
+		return err
+	}
+
+	if ident, err := s.repo.GetOAuthIdentityByEmail(ctx, "google", normEmail); err == nil && ident != nil {
+		if ident.UserID == user.ID {
+			return nil
+		}
+		return ErrGoogleIdentityConflict
+	} else if err != nil && !errors.Is(err, ErrOAuthIdentityNotFound) {
+		return err
+	}
+
+	now := time.Now().UTC()
+	return s.repo.CreateOAuthIdentity(ctx, &OAuthIdentity{
+		ID:              generateUUIDv4(),
+		UserID:          user.ID,
+		Provider:        "google",
+		ProviderSubject: subject,
+		Email:           normEmail,
+		EmailVerified:   true,
+		LinkedAt:        now,
+		LastLoginAt:     now,
+	})
 }
 
 func (s *Service) RefreshToken(ctx context.Context, refreshToken string, clientInfo ClientInfo) (*AuthResponse, error) {
@@ -1000,66 +1018,61 @@ func (s *Service) GetMyProfile(ctx context.Context, userID string) (*FullProfile
 	if err != nil {
 		return nil, err
 	}
+
+	// No profile is ever invented. Accounts created through Google Sign-In (or any
+	// other path that has not completed onboarding) simply have no profile until
+	// the user supplies their own data via UpdateMyProfile.
 	profile, err := s.repo.GetProfile(ctx, userID)
-	if err != nil {
-		if errors.Is(err, ErrProfileNotFound) {
-			now := time.Now().UTC()
-			defaultBirthdate := now.AddDate(-25, 0, 0)
-			profile = &Profile{
-				UserID:                userID,
-				DisplayName:           "Member",
-				Birthdate:             defaultBirthdate,
-				Bio:                   "",
-				Pronouns:              []string{"they/them"},
-				GenderIdentities:      []string{"non_binary"},
-				SexualOrientations:    []string{"queer"},
-				RelationshipIntents:   []string{"dating"},
-				RelationshipStructure: "monogamous",
-				VisibilitySettings:    DefaultVisibilitySettings(),
-				CreatedAt:             now,
-				UpdatedAt:             now,
-			}
-			_ = s.repo.UpsertProfile(ctx, profile)
-		} else {
-			return nil, err
-		}
+	if err != nil && !errors.Is(err, ErrProfileNotFound) {
+		return nil, err
 	}
+	onboardingRequired := errors.Is(err, ErrProfileNotFound) || profile == nil
+
 	location, _ := s.repo.GetLocation(ctx, userID)
 	prefs, _ := s.GetMyPreferences(ctx, userID)
 
 	return &FullProfileResponse{
-		User:        *user,
-		Profile:     *profile,
-		Location:    location,
-		Preferences: prefs,
-		IsComplete:  profile.IsComplete(),
+		User:               *user,
+		Profile:            profile,
+		OnboardingRequired: onboardingRequired,
+		Location:           location,
+		Preferences:        prefs,
+		IsComplete:         profile.IsComplete(),
 	}, nil
 }
 
 func (s *Service) UpdateMyProfile(ctx context.Context, userID string, req UpdateProfileRequest) (*Profile, error) {
 	profile, err := s.repo.GetProfile(ctx, userID)
+	creating := false
 	if err != nil {
-		if errors.Is(err, ErrProfileNotFound) {
-			now := time.Now().UTC()
-			defaultBirthdate := now.AddDate(-25, 0, 0)
-			profile = &Profile{
-				UserID:                userID,
-				DisplayName:           "Member",
-				Birthdate:             defaultBirthdate,
-				Bio:                   "",
-				Pronouns:              []string{"they/them"},
-				GenderIdentities:      []string{"non_binary"},
-				SexualOrientations:    []string{"queer"},
-				RelationshipIntents:   []string{"dating"},
-				RelationshipStructure: "monogamous",
-				VisibilitySettings:    DefaultVisibilitySettings(),
-				CreatedAt:             now,
-				UpdatedAt:             now,
-			}
-			_ = s.repo.UpsertProfile(ctx, profile)
-		} else {
+		if !errors.Is(err, ErrProfileNotFound) {
 			return nil, err
 		}
+		creating = true
+		profile = &Profile{
+			UserID:             userID,
+			VisibilitySettings: DefaultVisibilitySettings(),
+			CreatedAt:          time.Now().UTC(),
+			UpdatedAt:          time.Now().UTC(),
+		}
+	}
+
+	now := time.Now().UTC()
+
+	// Birthdate is collected exactly once, during onboarding, and is immutable
+	// afterwards so that age-based safety rules cannot be bypassed.
+	if req.Birthdate != nil {
+		birthdate, parseErr := time.Parse("2006-01-02", strings.TrimSpace(*req.Birthdate))
+		if parseErr != nil {
+			return nil, fmt.Errorf("birthdate must be formatted YYYY-MM-DD")
+		}
+		if ageErr := ValidateAge(birthdate, now); ageErr != nil {
+			return nil, ageErr
+		}
+		if !creating && !profile.Birthdate.IsZero() && !profile.Birthdate.Equal(birthdate) {
+			return nil, ErrBirthdateImmutable
+		}
+		profile.Birthdate = birthdate
 	}
 
 	if req.DisplayName != nil {
@@ -1105,6 +1118,25 @@ func (s *Service) UpdateMyProfile(ctx context.Context, userID string, req Update
 		}
 		profile.RelationshipIntents = req.RelationshipIntents
 	}
+
+	// Onboarding must supply the mandatory profile fields explicitly. Nothing is
+	// defaulted or fabricated on the user's behalf.
+	if creating {
+		if strings.TrimSpace(profile.DisplayName) == "" {
+			return nil, fmt.Errorf("display name is required to complete onboarding")
+		}
+		if profile.Birthdate.IsZero() {
+			return nil, fmt.Errorf("birthdate is required to complete onboarding")
+		}
+		if len(profile.GenderIdentities) == 0 {
+			return nil, fmt.Errorf("at least one gender identity must be selected")
+		}
+		if len(profile.SexualOrientations) == 0 {
+			return nil, fmt.Errorf("at least one sexual orientation must be selected")
+		}
+		profile.CreatedAt = now
+	}
+
 	if req.RelationshipStructure != nil {
 		profile.RelationshipStructure = *req.RelationshipStructure
 	}

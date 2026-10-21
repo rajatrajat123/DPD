@@ -23,16 +23,18 @@ export interface LoginPayload {
   password: string;
 }
 
+/**
+ * Google Sign-In sends ONLY the Google-issued ID token. Profile information
+ * (display name, birthdate, gender identities, orientations) is never supplied
+ * by the client for a Google account: it is collected through the onboarding
+ * flow and validated by the backend.
+ */
 export interface GoogleAuthPayload {
   id_token: string;
-  display_name?: string;
-  birthdate?: string;
-  gender_identities?: string[];
-  sexual_orientations?: string[];
-  looking_for?: string[];
-  preferred_genders?: string[];
-  height_cm?: number;
-  weight_kg?: number;
+}
+
+export interface LinkGooglePayload {
+  id_token: string;
 }
 
 export interface AuthResponse {
@@ -40,7 +42,13 @@ export interface AuthResponse {
   refresh_token: string;
   expires_in: number;
   user: User;
-  profile?: Profile;
+  profile?: Profile | null;
+  /**
+   * True when the account has no profile yet (for example a brand new Google
+   * account). The client must run the profile onboarding flow before the app
+   * can be used.
+   */
+  onboarding_required?: boolean;
 }
 
 export interface AgeAssuranceSession {
@@ -135,6 +143,15 @@ export const authService = {
   },
 
   /**
+   * Links a verified Google identity to the currently authenticated account.
+   * Used when the email already belongs to an Aura account: the authenticated
+   * session proves ownership before the identity is attached.
+   */
+  async linkGoogleIdentity(idToken: string): Promise<void> {
+    await api.post('/api/v1/auth/google/link', { id_token: idToken });
+  },
+
+  /**
    * Securely revokes session tokens on server and clears device keychain
    */
   async logout(): Promise<void> {
@@ -152,13 +169,23 @@ export const authService = {
   },
 
   /**
-   * Fetches full authenticated user profile, preferences, and verified gallery photos
+   * Fetches full authenticated user profile, preferences, and verified gallery photos.
+   *
+   * `profile` is null and `onboarding_required` is true for accounts that have not
+   * completed profile onboarding (for example a brand new Google account). No
+   * profile data is ever fabricated on the client.
    */
-  async getMyProfile(): Promise<{ user: User; profile: Profile }> {
+  async getMyProfile(): Promise<{
+    user: User;
+    profile: Profile | null;
+    onboarding_required: boolean;
+  }> {
     const res = await api.get<{
       user: User;
-      profile: Profile;
+      profile: Profile | null;
+      onboarding_required?: boolean;
       location?: any;
+      is_complete?: boolean;
       preferences?: {
         preferred_genders?: string[];
         dealbreakers?: {
@@ -169,7 +196,12 @@ export const authService = {
       };
     }>('/api/v1/profiles/me');
 
-    const rawProfile = (res.profile || {}) as any;
+    const onboardingRequired = Boolean(res.onboarding_required) || !res.profile;
+    if (onboardingRequired || !res.profile) {
+      return { user: res.user, profile: null, onboarding_required: true };
+    }
+
+    const rawProfile = { ...res.profile } as any;
 
     if (res.preferences?.preferred_genders) {
       rawProfile.preferred_genders = res.preferences.preferred_genders;
@@ -198,7 +230,7 @@ export const authService = {
       rawProfile.non_smoker_dealbreaker = true;
     }
 
-    rawProfile.is_complete = (res as any).is_complete ?? (Boolean(rawProfile.height_cm) && Boolean(rawProfile.weight_kg));
+    rawProfile.is_complete = res.is_complete ?? (Boolean(rawProfile.height_cm) && Boolean(rawProfile.weight_kg));
 
     // Populate profile gallery photos from media service
     try {
@@ -213,6 +245,7 @@ export const authService = {
     return {
       user: res.user,
       profile: rawProfile as Profile,
+      onboarding_required: false,
     };
   },
 
@@ -224,6 +257,11 @@ export const authService = {
 
     if (updates.display_name !== undefined) {
       payload.display_name = updates.display_name.trim();
+    }
+    // Birthdate is accepted by the backend only when the profile is created for
+    // the first time (onboarding). It is immutable afterwards.
+    if (updates.birthdate !== undefined) {
+      payload.birthdate = updates.birthdate;
     }
     if (updates.bio !== undefined) {
       payload.bio = updates.bio;

@@ -75,6 +75,8 @@ test('Aura Bugfix 01 End-to-End Persistence & Gating Suite', async (t) => {
       password: 'Passw0rd!Valid2026',
       display_name: 'Regression Tester',
       birthdate: '1995-08-20',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(regRes.status, 200, 'registration must succeed with 200');

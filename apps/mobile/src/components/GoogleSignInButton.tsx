@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import {
   TouchableOpacity,
   Text,
@@ -7,9 +7,34 @@ import {
   View,
   Alert,
 } from 'react-native';
+import * as Google from 'expo-auth-session/providers/google';
+import * as WebBrowser from 'expo-web-browser';
 import { useAuth } from '../context/AuthContext';
 import { colors, typography, spacing, borderRadius } from '../theme';
 import { ApiError } from '../services/api/client';
+
+// Required so the browser redirect from the Google consent screen is completed
+// and the authentication result is handed back to the app.
+WebBrowser.maybeCompleteAuthSession();
+
+/**
+ * Google OAuth client IDs for the Aura Google Cloud project.
+ *
+ * These are injected at build time through EXPO_PUBLIC_* variables (see
+ * `.env.example`). The same client IDs must be listed on the backend in
+ * GOOGLE_OAUTH_AUDIENCES so that the returned ID token audience is accepted.
+ */
+export const googleWebClientId = (process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || '').trim();
+export const googleIosClientId = (process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || '').trim();
+export const googleAndroidClientId = (process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID || '').trim();
+
+/**
+ * Google Sign-In can only run when at least one OAuth client ID is configured.
+ * Without configuration the button fails with a clear message instead of
+ * fabricating a local identity.
+ */
+export const isGoogleSignInConfigured = (): boolean =>
+  Boolean(googleWebClientId || googleIosClientId || googleAndroidClientId);
 
 interface GoogleSignInButtonProps {
   onSuccess?: () => void;
@@ -26,33 +51,84 @@ export const GoogleSignInButton: React.FC<GoogleSignInButtonProps> = ({
 }) => {
   const { loginWithGoogle } = useAuth();
   const [loading, setLoading] = useState(false);
+  const configured = isGoogleSignInConfigured();
+
+  // Uses the official Expo Google provider (expo-auth-session) to run Google's
+  // real OpenID Connect flow and return a genuine Google-issued ID token.
+  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
+    clientId: googleWebClientId || undefined,
+    iosClientId: googleIosClientId || undefined,
+    androidClientId: googleAndroidClientId || undefined,
+    scopes: ['openid', 'email', 'profile'],
+  });
+
+  const notifyError = useCallback(
+    (err: unknown) => {
+      const message =
+        err instanceof ApiError
+          ? err.message
+          : err instanceof Error
+            ? err.message
+            : 'Google authentication could not be completed.';
+      Alert.alert('Google Sign-In', message);
+      onError?.(err instanceof Error ? err : new Error(message));
+    },
+    [onError]
+  );
+
+  useEffect(() => {
+    if (!response) return;
+
+    if (response.type === 'success') {
+      const idToken = response.params?.id_token;
+      if (!idToken) {
+        notifyError(new Error('Google did not return an ID token for this request.'));
+        setLoading(false);
+        return;
+      }
+
+      const complete = async () => {
+        try {
+          // Only the verified ID token is sent. The backend resolves the Google
+          // identity, creates or finds the Aura account, and issues real Aura
+          // access + refresh sessions. Profile details are never invented here.
+          await loginWithGoogle({ id_token: idToken });
+          onSuccess?.();
+        } catch (err) {
+          notifyError(err);
+        } finally {
+          setLoading(false);
+        }
+      };
+      void complete();
+      return;
+    }
+
+    if (response.type === 'error') {
+      notifyError(new Error(response.error?.message || 'Google sign-in failed.'));
+    }
+    setLoading(false);
+  }, [response, loginWithGoogle, notifyError, onSuccess]);
 
   const handleGoogleSignIn = async () => {
     if (loading || disabled) return;
 
+    if (!configured) {
+      notifyError(
+        new Error(
+          'Google Sign-In is not configured for this build. Set the EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID, EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID or EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID environment variables.'
+        )
+      );
+      return;
+    }
+
+    if (!request) return;
+
     setLoading(true);
     try {
-      // In development / Expo Go mode, we use the verified mock token protocol
-      // which connects to our backend's token validator and authenticates/links
-      // a legitimate test Google identity.
-      const devGoogleToken = `mock-google:google-uid-${Date.now().toString(36)}:google-member@aura.dating`;
-
-      await loginWithGoogle({
-        id_token: devGoogleToken,
-        display_name: 'Google Member',
-        birthdate: '1999-01-01',
-        gender_identities: ['cisgender woman'],
-        sexual_orientations: ['queer'],
-        height_cm: 170,
-        weight_kg: 60,
-      });
-
-      onSuccess?.();
-    } catch (err: any) {
-      const message = err instanceof ApiError ? err.message : 'Google authentication could not be completed.';
-      Alert.alert('Google Sign-In', message);
-      onError?.(err instanceof Error ? err : new Error(message));
-    } finally {
+      await promptAsync();
+    } catch (err) {
+      notifyError(err);
       setLoading(false);
     }
   };

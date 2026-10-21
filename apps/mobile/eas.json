@@ -31,6 +31,9 @@
       "node": "22.14.0",
       "android": {
         "buildType": "app-bundle"
+      },
+      "env": {
+        "EXPO_PUBLIC_APP_ENV": "production"
       }
     }
   },

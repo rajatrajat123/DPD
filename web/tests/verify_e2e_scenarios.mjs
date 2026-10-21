@@ -16,6 +16,8 @@ async function main() {
       password: 'Passw0r!Valid',
       display_name: 'Test Member',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
 
@@ -44,6 +46,8 @@ async function main() {
       password: 'Short1!',
       display_name: 'Short PW',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(res2.status, 400);
@@ -61,6 +65,8 @@ async function main() {
       password: 'Password!@#',
       display_name: 'No Digit',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(res3.status, 400);
@@ -78,6 +84,8 @@ async function main() {
       password: 'Password1234',
       display_name: 'No Special',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(res4.status, 400);
@@ -95,6 +103,8 @@ async function main() {
       password: 'Passw0r!',
       display_name: 'Exact 8',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(res5.status, 200);
@@ -111,6 +121,8 @@ async function main() {
       password: pw64,
       display_name: 'Long PW Member',
       birthdate: '1995-04-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(res6.status, 200);

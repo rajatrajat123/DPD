@@ -167,7 +167,16 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		identity.WithLoginTracker(safetySvc),
 		identity.WithNotificationSink(notificationSink),
 		identity.WithLogger(logger),
+		// Google ID tokens are verified against Google's published certificates,
+		// restricted to the OAuth client IDs configured for this deployment. With
+		// no audiences configured the verifier fails closed and rejects every token.
+		identity.WithGoogleTokenVerifier(identity.NewGoogleIDTokenVerifier(cfg.GoogleOAuthAudiences)),
 	)
+	if len(cfg.GoogleOAuthAudiences) == 0 && (cfg.Environment == config.EnvStaging || cfg.Environment == config.EnvProduction) {
+		logger.Warn("google_sign_in_not_configured",
+			slog.String("hint", "set GOOGLE_OAUTH_AUDIENCES to the allowed OAuth client IDs; /api/v1/auth/google will reject all tokens until then"),
+		)
+	}
 	identHandler := identity.NewHandler(identSvc, cfg.MaxRequestBodyBytes)
 	identHandler.SetExpoGoURLBase(cfg.ExpoGoURLBase)
 
@@ -197,6 +206,9 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/auth/verify/send", authMw(http.HandlerFunc(identHandler.SendVerification)))
 	mux.Handle("/api/v1/auth/verify/confirm", authMw(http.HandlerFunc(identHandler.ConfirmVerification)))
 	mux.Handle("/api/v1/auth/step-up", authMw(http.HandlerFunc(safetyHandler.StepUpAuth)))
+	// Linking Google to an existing account requires an authenticated session as
+	// proof of ownership before any identity is attached.
+	mux.Handle("/api/v1/auth/google/link", authMw(activeMw(http.HandlerFunc(identHandler.LinkGoogle))))
 
 	// Authenticated Profile Endpoints
 	mux.Handle("/api/v1/profiles/me", memberMw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

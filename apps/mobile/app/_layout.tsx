@@ -31,7 +31,7 @@ import { colors, ThemeProvider, useTheme } from '../src/theme';
 })();
 
 function ThemedNavigationGuard({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, isLoading, isAgeVerified } = useAuth();
+  const { isAuthenticated, isLoading, isAgeVerified, onboardingRequired } = useAuth();
   const { colors } = useTheme();
   const segments = useSegments();
   const pathname = usePathname();
@@ -43,12 +43,34 @@ function ThemedNavigationGuard({ children }: { children: React.ReactNode }) {
     const inAuthGroup = segments[0] === '(auth)';
     const onVerifyAgeScreen = pathname === '/(auth)/verify-age' || segments[1] === 'verify-age';
     const onResetPasswordScreen = pathname === '/(auth)/reset-password' || pathname === '/reset-password' || segments[1] === 'reset-password';
+    const onOnboardingScreen = pathname === '/(auth)/onboarding' || String(segments[1]) === 'onboarding';
 
-    if (!isAuthenticated && !inAuthGroup) {
-      // Redirect to login preserving destination
-      const redirectParam = pathname && pathname !== '/' ? `?redirect=${encodeURIComponent(pathname)}` : '';
-      router.replace(`/(auth)/login${redirectParam}` as any);
-    } else if (isAuthenticated && inAuthGroup && !onVerifyAgeScreen && !onResetPasswordScreen) {
+    if (!isAuthenticated) {
+      if (!inAuthGroup) {
+        // Redirect to login preserving destination
+        const redirectParam = pathname && pathname !== '/' ? `?redirect=${encodeURIComponent(pathname)}` : '';
+        router.replace(`/(auth)/login${redirectParam}` as any);
+      }
+      return;
+    }
+
+    // Authenticated but the account has no profile yet (e.g. a brand new Google
+    // account): profile information must be collected through onboarding.
+    if (onboardingRequired) {
+      if (!onOnboardingScreen) {
+        router.replace('/(auth)/onboarding' as any);
+      }
+      return;
+    }
+
+    // Onboarding just completed: leave the onboarding screen for the next
+    // required step (age assurance) or the app itself.
+    if (onOnboardingScreen) {
+      router.replace(isAgeVerified ? '/(tabs)' : '/(auth)/verify-age');
+      return;
+    }
+
+    if (inAuthGroup && !onVerifyAgeScreen && !onResetPasswordScreen) {
       // Already authenticated, redirect out of login/register:
       // If user is unverified, guide to age assurance onboarding first; otherwise go to tabs
       if (!isAgeVerified) {
@@ -57,7 +79,7 @@ function ThemedNavigationGuard({ children }: { children: React.ReactNode }) {
         router.replace('/(tabs)');
       }
     }
-  }, [isAuthenticated, isLoading, isAgeVerified, segments, pathname, router]);
+  }, [isAuthenticated, isLoading, isAgeVerified, onboardingRequired, segments, pathname, router]);
 
   if (isLoading) {
     return (
@@ -89,6 +111,7 @@ function ThemedApp() {
           <Stack.Screen name="(auth)/register" options={{ headerShown: false }} />
           <Stack.Screen name="(auth)/forgot-password" options={{ headerShown: false }} />
           <Stack.Screen name="(auth)/reset-password" options={{ headerShown: false }} />
+          <Stack.Screen name="(auth)/onboarding" options={{ headerShown: false }} />
           <Stack.Screen name="(auth)/verify-age" options={{ headerShown: false, presentation: 'modal' }} />
           <Stack.Screen name="chat/[id]" options={{ headerShown: false }} />
           <Stack.Screen name="search" options={{ headerShown: false }} />

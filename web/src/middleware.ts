@@ -17,7 +17,67 @@ const PRIVATE_ROUTE_PREFIXES = [
   '/affiliate',
 ];
 
-export function middleware(request: NextRequest) {
+function base64UrlToBytes(value: string): Uint8Array {
+  const normalized = value.replace(/-/g, '+').replace(/_/g, '/');
+  const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+  const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function bytesToBase64Url(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
+/**
+ * Verifies the HS256 signature and expiry of the Aura access token. The private
+ * route guard must never grant access merely because a cookie is present.
+ */
+async function isSessionTokenValid(token: string, secret: string): Promise<boolean> {
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+
+  const [headerB64, claimsB64, signatureB64] = parts;
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(`${headerB64}.${claimsB64}`));
+
+  if (!constantTimeEqual(bytesToBase64Url(new Uint8Array(signature)), signatureB64)) {
+    return false;
+  }
+
+  try {
+    const claims = JSON.parse(new TextDecoder().decode(base64UrlToBytes(claimsB64)));
+    const expMs = (claims.exp || 0) * 1000;
+    return Boolean(claims.sub) && expMs > Date.now();
+  } catch {
+    return false;
+  }
+}
+
+export async function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   // 1. Check for restricted country matchmaking paths (disabled by default until legal/safety review)
@@ -44,9 +104,17 @@ export function middleware(request: NextRequest) {
 
   if (isPrivateRoute) {
     const sessionToken = request.cookies.get('aura_session')?.value;
+    const signingSecret = process.env.JWT_SIGNING_SECRET || process.env.AURA_SESSION_HMAC_SECRET;
 
-    // If attempting to access member-only content without an active session
-    if (!sessionToken && !pathname.startsWith('/auth')) {
+    // A cookie is only accepted when it carries a valid, unexpired signature.
+    const hasValidSession = Boolean(
+      sessionToken &&
+        signingSecret &&
+        signingSecret.length >= 32 &&
+        (await isSessionTokenValid(sessionToken, signingSecret))
+    );
+
+    if (!hasValidSession && !pathname.startsWith('/auth')) {
       const loginUrl = new URL('/auth/login', request.url);
       loginUrl.searchParams.set('redirect', pathname);
       const redirectResponse = NextResponse.redirect(loginUrl, 302);

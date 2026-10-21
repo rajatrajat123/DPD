@@ -2,21 +2,35 @@ package identity
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"google.golang.org/api/idtoken"
+	"google.golang.org/api/option"
 )
 
 var (
-	ErrOAuthEmailNotVerified = errors.New("google email must be verified to link or create account")
-	ErrInvalidOAuthToken     = errors.New("invalid or expired google token")
+	ErrOAuthEmailNotVerified     = errors.New("google email must be verified to link or create account")
+	ErrInvalidOAuthToken         = errors.New("invalid or expired google token")
+	ErrGoogleAuthNotConfigured   = errors.New("google sign-in is not configured on this server")
+	ErrGoogleAccountLinkRequired = errors.New("an account already exists for this email; sign in with your password to link Google")
+	ErrGoogleIdentityConflict    = errors.New("this google account or email is already linked to a different Aura account")
+	ErrGoogleEmailMismatch       = errors.New("google account email does not match your Aura account email")
 )
 
+const (
+	// googleIssuer and googleIssuerAlt are the only accepted ID token issuers.
+	googleIssuer    = "https://accounts.google.com"
+	googleIssuerAlt = "accounts.google.com"
+	// googleClockSkew tolerates small clock drift when validating time claims.
+	googleClockSkew = 2 * time.Minute
+)
+
+// GoogleClaims is the trusted subset of a verified Google ID token.
+// Every field is derived from a cryptographically verified token, never from client input.
 type GoogleClaims struct {
 	Subject       string `json:"sub"`
 	Email         string `json:"email"`
@@ -30,190 +44,199 @@ type GoogleClaims struct {
 	ExpiresAt     int64  `json:"exp"`
 }
 
+// GoogleTokenVerifier verifies a raw Google ID token and returns trusted claims.
 type GoogleTokenVerifier interface {
 	VerifyToken(ctx context.Context, idToken string) (*GoogleClaims, error)
 }
 
-type HTTPGoogleTokenVerifier struct {
-	httpClient *http.Client
-	allowedAud []string
+// googleTokenValidator is the low level validation seam (Google certificate
+// lookup, signature check, audience and expiry check). It exists so tests can
+// exercise claim handling without contacting Google's certificate endpoints.
+type googleTokenValidator func(ctx context.Context, idToken, audience string) (*idtoken.Payload, error)
+
+// GoogleIDTokenVerifier validates Google ID tokens using Google's official
+// OpenID Connect verification library (google.golang.org/api/idtoken), which
+// verifies the RS256/ES256 signature against Google's published certificates.
+type GoogleIDTokenVerifier struct {
+	allowedAudiences []string
+	now              func() time.Time
+
+	mu         sync.Mutex
+	validator  *idtoken.Validator
+	validateFn googleTokenValidator
 }
 
-func NewHTTPGoogleTokenVerifier(allowedAudience []string) *HTTPGoogleTokenVerifier {
-	return &HTTPGoogleTokenVerifier{
-		httpClient: &http.Client{Timeout: 10 * time.Second},
-		allowedAud: allowedAudience,
+// NewGoogleIDTokenVerifier builds a verifier restricted to the configured
+// OAuth client IDs. When no audience is configured the verifier fails closed
+// and rejects every token instead of skipping audience validation.
+func NewGoogleIDTokenVerifier(allowedAudiences []string) *GoogleIDTokenVerifier {
+	return &GoogleIDTokenVerifier{
+		allowedAudiences: normalizeGoogleAudiences(allowedAudiences),
+		now:              func() time.Time { return time.Now().UTC() },
 	}
 }
 
-type googleTokenInfoResponse struct {
-	Sub           string `json:"sub"`
-	Email         string `json:"email"`
-	EmailVerified any    `json:"email_verified"`
-	Name          string `json:"name"`
-	GivenName     string `json:"given_name"`
-	FamilyName    string `json:"family_name"`
-	Picture       string `json:"picture"`
-	Aud           string `json:"aud"`
-	Iss           string `json:"iss"`
-	Exp           any    `json:"exp"`
-	ErrorDesc     string `json:"error_description"`
+// OAuthAudiencesConfigured reports whether at least one OAuth client ID is configured.
+func (v *GoogleIDTokenVerifier) OAuthAudiencesConfigured() bool {
+	if v == nil {
+		return false
+	}
+	return len(v.allowedAudiences) > 0
 }
 
-func (v *HTTPGoogleTokenVerifier) VerifyToken(ctx context.Context, idToken string) (*GoogleClaims, error) {
-	trimmed := strings.TrimSpace(idToken)
-	if trimmed == "" {
+func normalizeGoogleAudiences(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, raw := range in {
+		aud := strings.TrimSpace(raw)
+		if aud == "" || aud == "*" || seen[aud] {
+			continue
+		}
+		seen[aud] = true
+		out = append(out, aud)
+	}
+	return out
+}
+
+func (v *GoogleIDTokenVerifier) VerifyToken(ctx context.Context, rawIDToken string) (*GoogleClaims, error) {
+	token := strings.TrimSpace(rawIDToken)
+	if token == "" {
+		return nil, ErrInvalidOAuthToken
+	}
+	if len(v.allowedAudiences) == 0 {
+		// Fail closed: without configured OAuth audiences no token can be trusted.
+		return nil, ErrGoogleAuthNotConfigured
+	}
+
+	var (
+		payload *idtoken.Payload
+		lastErr error
+	)
+	for _, audience := range v.allowedAudiences {
+		validated, err := v.validate(ctx, token, audience)
+		if err == nil {
+			payload = validated
+			break
+		}
+		lastErr = err
+	}
+	if payload == nil {
+		if lastErr == nil {
+			lastErr = errors.New("token rejected")
+		}
+		return nil, fmt.Errorf("%w: %v", ErrInvalidOAuthToken, lastErr)
+	}
+
+	return v.claimsFromPayload(payload)
+}
+
+func (v *GoogleIDTokenVerifier) validate(ctx context.Context, token, audience string) (*idtoken.Payload, error) {
+	if v.validateFn != nil {
+		return v.validateFn(ctx, token, audience)
+	}
+
+	v.mu.Lock()
+	validator := v.validator
+	v.mu.Unlock()
+
+	if validator == nil {
+		created, err := idtoken.NewValidator(ctx, option.WithoutAuthentication())
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize google id token validator: %w", err)
+		}
+		v.mu.Lock()
+		if v.validator == nil {
+			v.validator = created
+		}
+		validator = v.validator
+		v.mu.Unlock()
+	}
+
+	return validator.Validate(ctx, token, audience)
+}
+
+// claimsFromPayload enforces the remaining OpenID Connect requirements that the
+// verification library does not check on its own: trusted issuer, required
+// subject, sane time claims and a verified email address.
+func (v *GoogleIDTokenVerifier) claimsFromPayload(payload *idtoken.Payload) (*GoogleClaims, error) {
+	if payload == nil {
 		return nil, ErrInvalidOAuthToken
 	}
 
-	// Support development/test mock tokens without hitting Google servers
-	if strings.HasPrefix(trimmed, "mock-google:") {
-		parts := strings.Split(trimmed, ":")
-		if len(parts) >= 3 {
-			return &GoogleClaims{
-				Subject:       parts[1],
-				Email:         strings.ToLower(strings.TrimSpace(parts[2])),
-				EmailVerified: true,
-				Name:          "Google Test User",
-				Issuer:        "https://accounts.google.com",
-				ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
-			}, nil
-		}
-	}
+	now := v.now()
 
-	reqURL := "https://oauth2.googleapis.com/tokeninfo?id_token=" + url.QueryEscape(trimmed)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create google token verification request: %w", err)
+	if payload.Issuer != googleIssuer && payload.Issuer != googleIssuerAlt {
+		return nil, fmt.Errorf("%w: untrusted issuer", ErrInvalidOAuthToken)
 	}
-
-	resp, err := v.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("google token verification network error: %w", err)
+	if strings.TrimSpace(payload.Subject) == "" {
+		return nil, fmt.Errorf("%w: missing subject claim", ErrInvalidOAuthToken)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		var errResp googleTokenInfoResponse
-		_ = json.NewDecoder(resp.Body).Decode(&errResp)
-		if errResp.ErrorDesc != "" {
-			return nil, fmt.Errorf("%w: %s", ErrInvalidOAuthToken, errResp.ErrorDesc)
-		}
-		return nil, fmt.Errorf("%w: status %d", ErrInvalidOAuthToken, resp.StatusCode)
-	}
-
-	var info googleTokenInfoResponse
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return nil, fmt.Errorf("failed to decode google token response: %w", err)
-	}
-
-	if info.Sub == "" || info.Email == "" {
-		return nil, fmt.Errorf("%w: missing subject or email in token", ErrInvalidOAuthToken)
-	}
-
-	// Validate issuer
-	if info.Iss != "accounts.google.com" && info.Iss != "https://accounts.google.com" {
-		return nil, fmt.Errorf("%w: invalid issuer %q", ErrInvalidOAuthToken, info.Iss)
-	}
-
-	// Parse email_verified
-	var emailVerified bool
-	switch ev := info.EmailVerified.(type) {
-	case bool:
-		emailVerified = ev
-	case string:
-		emailVerified = (strings.ToLower(ev) == "true")
-	}
-
-	// Parse exp
-	var expSec int64
-	switch exp := info.Exp.(type) {
-	case float64:
-		expSec = int64(exp)
-	case string:
-		expSec, _ = strconv.ParseInt(exp, 10, 64)
-	}
-	if expSec > 0 && time.Now().UTC().Unix() > expSec {
+	if payload.Expires == 0 || now.Unix() > payload.Expires {
 		return nil, fmt.Errorf("%w: token expired", ErrInvalidOAuthToken)
 	}
+	if payload.IssuedAt == 0 || time.Unix(payload.IssuedAt, 0).UTC().After(now.Add(googleClockSkew)) {
+		return nil, fmt.Errorf("%w: invalid issued-at claim", ErrInvalidOAuthToken)
+	}
 
-	// Validate audience if allowedAud is configured
-	if len(v.allowedAud) > 0 {
-		matched := false
-		for _, aud := range v.allowedAud {
-			if strings.TrimSpace(aud) != "" && strings.TrimSpace(aud) == info.Aud {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			return nil, fmt.Errorf("%w: audience mismatch", ErrInvalidOAuthToken)
-		}
+	email := strings.ToLower(strings.TrimSpace(googleStringClaim(payload.Claims, "email")))
+	if email == "" {
+		return nil, fmt.Errorf("%w: missing email claim", ErrInvalidOAuthToken)
+	}
+	if !googleBoolClaim(payload.Claims, "email_verified") {
+		return nil, ErrOAuthEmailNotVerified
 	}
 
 	return &GoogleClaims{
-		Subject:       info.Sub,
-		Email:         strings.ToLower(strings.TrimSpace(info.Email)),
-		EmailVerified: emailVerified,
-		Name:          info.Name,
-		GivenName:     info.GivenName,
-		FamilyName:    info.FamilyName,
-		Picture:       info.Picture,
-		Audience:      info.Aud,
-		Issuer:        info.Iss,
-		ExpiresAt:     expSec,
+		Subject:       payload.Subject,
+		Email:         email,
+		EmailVerified: true,
+		Name:          googleStringClaim(payload.Claims, "name"),
+		GivenName:     googleStringClaim(payload.Claims, "given_name"),
+		FamilyName:    googleStringClaim(payload.Claims, "family_name"),
+		Picture:       googleStringClaim(payload.Claims, "picture"),
+		Audience:      payload.Audience,
+		Issuer:        payload.Issuer,
+		ExpiresAt:     payload.Expires,
 	}, nil
 }
 
-type MockGoogleTokenVerifier struct {
-	tokens map[string]*GoogleClaims
-}
-
-func NewMockGoogleTokenVerifier() *MockGoogleTokenVerifier {
-	return &MockGoogleTokenVerifier{
-		tokens: make(map[string]*GoogleClaims),
+func googleStringClaim(claims map[string]interface{}, key string) string {
+	if claims == nil {
+		return ""
+	}
+	switch value := claims[key].(type) {
+	case string:
+		return value
+	case fmt.Stringer:
+		return value.String()
+	default:
+		return ""
 	}
 }
 
-func (m *MockGoogleTokenVerifier) SetToken(token string, claims *GoogleClaims) {
-	m.tokens[token] = claims
+func googleBoolClaim(claims map[string]interface{}, key string) bool {
+	if claims == nil {
+		return false
+	}
+	switch value := claims[key].(type) {
+	case bool:
+		return value
+	case string:
+		return strings.EqualFold(strings.TrimSpace(value), "true")
+	default:
+		return false
+	}
 }
 
-func (m *MockGoogleTokenVerifier) VerifyToken(_ context.Context, idToken string) (*GoogleClaims, error) {
-	trimmed := strings.TrimSpace(idToken)
-	if claims, ok := m.tokens[trimmed]; ok {
-		if !claims.EmailVerified {
-			return nil, ErrOAuthEmailNotVerified
-		}
-		return claims, nil
-	}
-	if strings.HasPrefix(trimmed, "mock-google:") {
-		parts := strings.Split(trimmed, ":")
-		if len(parts) >= 3 {
-			return &GoogleClaims{
-				Subject:       parts[1],
-				Email:         strings.ToLower(strings.TrimSpace(parts[2])),
-				EmailVerified: true,
-				Name:          "Mock User",
-				Issuer:        "https://accounts.google.com",
-				ExpiresAt:     time.Now().Add(24 * time.Hour).Unix(),
-			}, nil
-		}
-	}
-	return nil, ErrInvalidOAuthToken
-}
-
+// GoogleAuthRequest carries the Google ID token issued by the native Google
+// Sign-In SDK. Profile attributes are intentionally NOT accepted here: they are
+// collected through the authenticated onboarding flow so that no server-trusted
+// account data can be fabricated by the client.
 type GoogleAuthRequest struct {
-	IDToken               string                `json:"id_token"`
-	DisplayName           string                `json:"display_name,omitempty"`
-	Birthdate             string                `json:"birthdate,omitempty"` // YYYY-MM-DD
-	Pronouns              []string              `json:"pronouns,omitempty"`
-	GenderIdentities      []string              `json:"gender_identities,omitempty"`
-	SexualOrientations    []string              `json:"sexual_orientations,omitempty"`
-	LookingFor            []string              `json:"looking_for,omitempty"`
-	PreferredGenders      []string              `json:"preferred_genders,omitempty"`
-	RelationshipIntents   []string              `json:"relationship_intents,omitempty"`
-	RelationshipStructure RelationshipStructure `json:"relationship_structure,omitempty"`
-	HeightCm              *int                  `json:"height_cm,omitempty"`
-	WeightKg              *int                  `json:"weight_kg,omitempty"`
+	IDToken string `json:"id_token"`
+}
+
+// LinkGoogleRequest links a verified Google identity to the authenticated Aura account.
+type LinkGoogleRequest struct {
+	IDToken string `json:"id_token"`
 }

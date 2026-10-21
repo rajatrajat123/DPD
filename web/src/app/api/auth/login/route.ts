@@ -1,7 +1,19 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { createSessionToken } from '@/lib/auth/session';
 
 const BACKEND_URL = process.env.AURA_API_URL || process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:8080';
+
+/**
+ * Production must never silently fall back to a localhost/LAN API URL: a
+ * misconfigured deployment should fail loudly instead of pointing at a
+ * developer machine.
+ */
+function backendUrlMisconfigured(): boolean {
+  return (
+    process.env.NODE_ENV === 'production' &&
+    !process.env.AURA_API_URL &&
+    !process.env.NEXT_PUBLIC_API_URL
+  );
+}
 
 export async function POST(req: NextRequest) {
   try {
@@ -15,8 +27,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    if (backendUrlMisconfigured()) {
+      return NextResponse.json(
+        { error: 'Authentication service is not configured' },
+        { status: 503 }
+      );
+    }
+
+    let backendRes: Response;
     try {
-      const backendRes = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
+      backendRes = await fetch(`${BACKEND_URL}/api/v1/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -25,95 +45,71 @@ export async function POST(req: NextRequest) {
         body: JSON.stringify({ email, password }),
         cache: 'no-store',
       });
-
-      const data = await backendRes.json();
-
-      if (!backendRes.ok) {
-        return NextResponse.json(
-          { error: data.message || data.error || 'Authentication failed' },
-          { status: backendRes.status }
-        );
-      }
-
-      // Success: backend returned AuthResponse with real JWT
-      const accessToken = data.access_token;
-      const res = NextResponse.json({
-        success: true,
-        user: data.user,
-        profile: data.profile,
-        redirect: '/app/discovery',
-      });
-
-      res.cookies.set('aura_session', accessToken, {
-        httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path: '/',
-        maxAge: data.expires_in || 86400 * 7,
-      });
-
-      res.cookies.set('aura_auth_state', '1', {
-        httpOnly: false,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'lax',
-        path: '/',
-        maxAge: data.expires_in || 86400 * 7,
-      });
-
-      if (data.refresh_token) {
-        res.cookies.set('aura_refresh', data.refresh_token, {
-          httpOnly: true,
-          secure: process.env.NODE_ENV === 'production',
-          sameSite: 'lax',
-          path: '/',
-          maxAge: 86400 * 30,
-        });
-      }
-
-      return res;
-    } catch (fetchErr) {
-      // Backend offline fallback in development mode
-      if (process.env.NODE_ENV !== 'production') {
-        const devUserId = 'usr_' + Buffer.from(email).toString('hex').slice(0, 12);
-        const token = createSessionToken(devUserId, email);
-        if (!token) {
-          return NextResponse.json(
-            { error: 'Session signing secret is not configured' },
-            { status: 500 }
-          );
-        }
-
-        const res = NextResponse.json({
-          success: true,
-          user: { id: devUserId, email },
-          warning: 'Backend API offline; created local developer session',
-          redirect: '/app/discovery',
-        });
-
-        res.cookies.set('aura_session', token, {
-          httpOnly: true,
-          secure: false,
-          sameSite: 'lax',
-          path: '/',
-          maxAge: 86400 * 7,
-        });
-
-        res.cookies.set('aura_auth_state', '1', {
-          httpOnly: false,
-          secure: false,
-          sameSite: 'lax',
-          path: '/',
-          maxAge: 86400 * 7,
-        });
-
-        return res;
-      }
-
+    } catch {
+      // The backend is the only authentication authority. If it cannot be
+      // reached we must never invent a user, a session or a success response.
       return NextResponse.json(
         { error: 'Authentication service temporarily unreachable' },
         { status: 503 }
       );
     }
+
+    let data: any = {};
+    try {
+      data = await backendRes.json();
+    } catch {
+      data = {};
+    }
+
+    if (!backendRes.ok) {
+      return NextResponse.json(
+        { error: data.message || data.error || 'Authentication failed' },
+        { status: backendRes.status }
+      );
+    }
+
+    const accessToken = data.access_token;
+    if (!accessToken) {
+      return NextResponse.json(
+        { error: 'Authentication service returned an invalid session' },
+        { status: 502 }
+      );
+    }
+
+    const res = NextResponse.json({
+      success: true,
+      user: data.user,
+      profile: data.profile,
+      redirect: '/app/discovery',
+    });
+
+    res.cookies.set('aura_session', accessToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: data.expires_in || 86400 * 7,
+    });
+
+    res.cookies.set('aura_auth_state', '1', {
+      httpOnly: false,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'lax',
+      path: '/',
+      maxAge: data.expires_in || 86400 * 7,
+    });
+
+    if (data.refresh_token) {
+      res.cookies.set('aura_refresh', data.refresh_token, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        path: '/',
+        maxAge: 86400 * 30,
+      });
+    }
+
+    return res;
   } catch (err: unknown) {
     return NextResponse.json(
       { error: err instanceof Error ? err.message : 'Invalid request payload' },

@@ -178,23 +178,78 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 	clientInfo := extractClientInfo(r)
 	resp, err := h.svc.AuthenticateWithGoogle(r.Context(), req, clientInfo)
 	if err != nil {
-		if errorsIs(err, ErrAccountNotActive) {
-			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Account is suspended or deactivated"))
-			return
-		}
-		if errorsIs(err, ErrOAuthEmailNotVerified) {
-			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "Google email is not verified"))
-			return
-		}
-		if errorsIs(err, ErrInvalidOAuthToken) || strings.Contains(strings.ToLower(err.Error()), "token") {
-			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, err.Error()))
-			return
-		}
-		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
+		h.writeGoogleAuthError(w, reqID, err)
 		return
 	}
 
 	apperror.WriteJSON(w, http.StatusOK, resp)
+}
+
+// writeGoogleAuthError maps Google authentication failures onto safe HTTP
+// responses. Configuration problems fail closed with 503 rather than being
+// reported as a credential error.
+func (h *Handler) writeGoogleAuthError(w http.ResponseWriter, reqID string, err error) {
+	if errorsIs(err, ErrGoogleAuthNotConfigured) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusServiceUnavailable, "GOOGLE_SIGN_IN_UNAVAILABLE", "Google sign-in is not configured on this server"))
+		return
+	}
+	if errorsIs(err, ErrAccountNotActive) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Account is suspended or deactivated"))
+		return
+	}
+	if errorsIs(err, ErrOAuthEmailNotVerified) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "Google email is not verified"))
+		return
+	}
+	if errorsIs(err, ErrGoogleAccountLinkRequired) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, "GOOGLE_ACCOUNT_LINK_REQUIRED", "An account already exists for this email; sign in with your password and link Google from settings"))
+		return
+	}
+	if errorsIs(err, ErrGoogleIdentityConflict) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, "GOOGLE_IDENTITY_CONFLICT", "This Google account is already linked to a different Aura account"))
+		return
+	}
+	if errorsIs(err, ErrGoogleEmailMismatch) {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, "GOOGLE_EMAIL_MISMATCH", "Google account email does not match your Aura account email"))
+		return
+	}
+	if errorsIs(err, ErrInvalidOAuthToken) || strings.Contains(strings.ToLower(err.Error()), "token") {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Google ID token is invalid or expired"))
+		return
+	}
+	apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
+}
+
+// LinkGoogle attaches a verified Google identity to the authenticated account.
+// The authenticated Aura session is the proof of ownership that authorises the link.
+func (h *Handler) LinkGoogle(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	user, ok := GetAuthUser(r.Context())
+	if !ok {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+		return
+	}
+
+	var req LinkGoogleRequest
+	if apiErr := validator.DecodeAndValidate(w, r, h.maxBodyBytes, &req); apiErr != nil {
+		apperror.WriteError(w, reqID, apiErr)
+		return
+	}
+	if strings.TrimSpace(req.IDToken) == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "id_token is required"))
+		return
+	}
+
+	if err := h.svc.LinkGoogleIdentity(r.Context(), user.ID, req); err != nil {
+		h.writeGoogleAuthError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]string{"status": "linked"})
 }
 
 func (h *Handler) RefreshToken(w http.ResponseWriter, r *http.Request) {

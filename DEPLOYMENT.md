@@ -102,3 +102,114 @@ npm run test:seo
 - **Database PITR**: Continuous Write-Ahead Log (WAL) shipping to encrypted cross-region object storage enabling Point-in-Time Recovery with **$\text{RPO} < 5\text{ minutes}$** and automated standby promotion with **$\text{RTO} < 30\text{ minutes}$**.
 - **Ledger Integrity Audits**: Automated hourly reconciliation job verifying $\sum \text{Debits} = \sum \text{Credits}$ across all `ledger_journals` and alerting immediately on any discrepancy.
 - **Quarterly DR Drills**: Automated restoration of production snapshots into an isolated recovery VPC to verify migration integrity and runbook accuracy.
+
+---
+
+## 5. Authentication Configuration (Google Sign-In, Sessions & Email Delivery)
+
+Aura has no fake or simulated authentication. Every identity is either proven by a
+password hash or by a Google ID token whose signature, issuer, audience and expiry
+are verified server-side. The sections below list the configuration that must be
+present for those flows to work. Where configuration is missing, the platform
+**fails closed** rather than inventing a user, a session or a success response.
+
+### 5.1 Google Cloud OAuth Project & Consent Screen
+
+1. Create (or reuse) a Google Cloud project for Aura and note its **project ID**.
+2. Configure **APIs & Services → OAuth consent screen**:
+   - User type: `External`.
+   - App name: `Aura`, plus support email, developer contact and a link to the Aura privacy policy and terms.
+   - Authorized domains: the production website domain (e.g. `auradating.com`).
+   - Scopes: `openid`, `email`, `profile` only. Aura never requests Google API scopes.
+   - Publish the consent screen (Unverified → In production) before public release; while in "Testing", only listed test users can sign in.
+3. On **APIs & Services → Credentials**, create the OAuth client IDs described below.
+
+### 5.2 OAuth Clients and Signing Fingerprints
+
+| Platform | Client type | Must match |
+| --- | --- | --- |
+| Android | Android | `android.package` = `com.aura.dating` (see `apps/mobile/app.json`) + the SHA-1 of the **actual signing keystore** |
+| iOS | iOS | `ios.bundleIdentifier` = `com.aura.dating` (see `apps/mobile/app.json`) |
+| Web / Expo Go | Web application | Authorized JavaScript origins + redirect URIs for the Expo proxy |
+
+Android signing fingerprints: register one Android OAuth client per keystore. The
+SHA-1 must come from the keystore that actually signs the build:
+
+```powershell
+# Debug keystore (local development only)
+keytool -list -v -keystore "$env:USERPROFILE\.android\debug.keystore" -alias androiddebugkey -storepass android -keypass android
+
+# EAS-managed release keystore (production)
+eas credentials -p android
+```
+
+For Play App Signing, register **both** the upload key SHA-1 and the Google Play
+App Signing key SHA-1, otherwise tokens issued by the installed production app are
+rejected as "wrong audience".
+
+### 5.3 Environment Variables
+
+Backend (`backend/`, from `.env`):
+
+```
+GOOGLE_OAUTH_AUDIENCES=<web-client-id>,<android-client-id>,<ios-client-id>
+```
+
+- Every OAuth client ID that can obtain an ID token must be listed.
+- Wildcards (`*`) are rejected in staging/production.
+- With no audience configured, `POST /api/v1/auth/google` returns HTTP 503 (`google sign-in is not configured on this server`) and no account is created.
+
+Website (`web/.env.local`):
+
+```
+AURA_API_URL=https://api.auradating.com        # required in production (503 otherwise)
+NEXT_PUBLIC_API_URL=https://api.auradating.com
+JWT_SIGNING_SECRET=<same 32+ byte secret as the backend>   # or AURA_SESSION_HMAC_SECRET
+```
+
+`web/src/lib/auth/session.ts` has **no** hardcoded fallback secret. If no signing
+secret of at least 32 characters is present, every website request is treated as
+unauthenticated and private routes redirect to `/auth/login`.
+
+Mobile (`apps/mobile/.env`, inlined by Expo at build time):
+
+```
+EXPO_PUBLIC_APP_ENV=production
+EXPO_PUBLIC_API_URL=https://api.auradating.com
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=<web-client-id>.apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=<android-client-id>.apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=<ios-client-id>.apps.googleusercontent.com
+```
+
+- A production build (`EXPO_PUBLIC_APP_ENV=production`, set by the `production` profile in `apps/mobile/eas.json`) **throws** instead of silently falling back to a developer LAN IP, and rejects a plaintext `http://` API URL.
+- With no Google client ID configured, the Google button reports "not configured" instead of fabricating a local identity.
+
+### 5.4 Native Build Requirement
+
+The mobile app uses `expo-auth-session` (`Google.useIdTokenAuthRequest`) plus
+`expo-web-browser`. The browser-based OpenID Connect flow it opens returns a real
+Google ID token, so it does **not** require `@react-native-google-signin/google-signin`.
+
+Caveats that are easy to get wrong:
+
+- Google Sign-In without the Expo proxy requires a **development build / standalone build** (not Expo Go), because the OAuth redirect uses the app's custom scheme (`aura://`) registered by `app.json`.
+- Configure `AURA_API_URL`/`EXPO_PUBLIC_API_URL` for the environment you are building; the backend also lists every client ID in `GOOGLE_OAUTH_AUDIENCES`.
+- Google authentication never marks an account as age-verified. Adult verification remains a separate Persona-backed flow.
+
+### 5.5 Transactional Email (OTP & Password Reset)
+
+Verification codes and password-reset links are sent by the backend through Resend:
+
+```
+RESEND_API_KEY=re_...                 # required in staging/production
+RESEND_FROM_EMAIL=Aura <security@aura.dating>
+PASSWORD_RESET_URL_BASE=https://auradating.com/auth/reset-password
+```
+
+The sender domain must be verified in Resend (DKIM + SPF + DMARC records) before
+delivery works. In development, omitting `RESEND_API_KEY` records a
+`dev_notification_sink_delivered_verification_otp` log line (with the OTP **length**
+only, never the code). In staging/production an unconfigured provider returns
+`ErrTransactionalEmailUnconfigured` instead of claiming delivery succeeded, and no
+plaintext password, OTP or reset token is ever logged.
+

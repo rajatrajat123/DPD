@@ -63,6 +63,8 @@ test('Media Pipeline & 3-Photo Requirement Verification', async (t) => {
       password: 'Passw0r!Valid',
       display_name: 'Media Pipeline Tester',
       birthdate: '1996-03-20',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(regRes.status, 200, 'Registration must succeed');

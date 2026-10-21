@@ -54,6 +54,7 @@ type Config struct {
 	AppleBundleID             string
 	GooglePlayCredentialsJSON string
 	GooglePlayPackageName     string
+	GoogleOAuthAudiences      []string
 
 	PersonaAPIKey        string
 	PersonaWebhookSecret string
@@ -172,6 +173,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		AppleBundleID:             getString(getenv, "APPLE_BUNDLE_ID", defaultBundleID),
 		GooglePlayCredentialsJSON: getString(getenv, "GOOGLE_PLAY_CREDENTIALS_JSON", ""),
 		GooglePlayPackageName:     getString(getenv, "GOOGLE_PLAY_PACKAGE_NAME", defaultPackageName),
+		GoogleOAuthAudiences:      parseStringSlice(getString(getenv, "GOOGLE_OAUTH_AUDIENCES", getString(getenv, "GOOGLE_CLIENT_ID", getString(getenv, "GOOGLE_OAUTH_CLIENT_ID", "")))),
 
 		PersonaAPIKey:        getString(getenv, "PERSONA_API_KEY", ""),
 		PersonaWebhookSecret: getString(getenv, "PERSONA_WEBHOOK_SECRET", ""),
@@ -228,6 +230,11 @@ func (c *Config) Validate() error {
 	}
 
 	if c.Environment == EnvStaging || c.Environment == EnvProduction {
+		for _, aud := range c.GoogleOAuthAudiences {
+			if aud == "*" {
+				errs = append(errs, errors.New("GOOGLE_OAUTH_AUDIENCES cannot contain wildcard '*'"))
+			}
+		}
 		if strings.Contains(c.JWTSigningSecret, "local-dev-only") || strings.Contains(c.JWTSigningSecret, "dev-only") || strings.Contains(c.JWTSigningSecret, "placeholder") {
 			errs = append(errs, errors.New("JWT_SIGNING_SECRET cannot use local development placeholder in staging or production"))
 		}
@@ -325,4 +332,19 @@ func resolveMediaStorageDir(rawPath string) string {
 		return abs
 	}
 	return filepath.Clean(rawPath)
+}
+
+func parseStringSlice(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	var res []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			res = append(res, p)
+		}
+	}
+	return res
 }

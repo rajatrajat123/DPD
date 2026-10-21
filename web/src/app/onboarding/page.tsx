@@ -18,8 +18,8 @@ function OnboardingContent() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Step 1: Profile details
-  const [bio, setBio] = useState('Intentional, thoughtful queer creative living in the city.');
+  // Step 1: Profile details (supplied by the member, never pre-filled with demo data)
+  const [bio, setBio] = useState('');
   const [smokingHabit, setSmokingHabit] = useState('NON_SMOKER');
   const [drinkingHabit, setDrinkingHabit] = useState('SOCIAL_DRINKER');
 
@@ -27,7 +27,7 @@ function OnboardingContent() {
   const [minAge, setMinAge] = useState(21);
   const [maxAge, setMaxAge] = useState(42);
   const [maxDistanceKm, setMaxDistanceKm] = useState(50);
-  const [preferredGenders, setPreferredGenders] = useState<string[]>(['non-binary', 'queer', 'transgender woman', 'cisgender woman']);
+  const [preferredGenders, setPreferredGenders] = useState<string[]>([]);
   const [nonSmokerOnly, setNonSmokerOnly] = useState(true); // Hard lifestyle dealbreaker
   const [verifiedOnly, setVerifiedOnly] = useState(false); // Hard dealbreaker
   const [requireMonogamous, setRequireMonogamous] = useState(false);
@@ -58,6 +58,10 @@ function OnboardingContent() {
   };
 
   // Step 4: Initiate Age Assurance
+  //
+  // The backend is the sole authority for age verification. The client never
+  // marks a member as verified: it starts the session and then reads back the
+  // authoritative status. A failed request leaves the member unverified.
   const initiateAgeAssurance = async () => {
     setLoading(true);
     setError(null);
@@ -66,12 +70,30 @@ function OnboardingContent() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
       });
-      const data = await res.json();
-      setAgeSessionId(data.session_id || 'dev_session');
-      setAgeStatus('VERIFIED'); // Processed via dev provider or initiated session
+      const data = await res.json().catch(() => null);
+
+      if (!res.ok) {
+        setAgeStatus('PENDING');
+        setError(
+          (data && (data.message || data.error)) ||
+            'Age assurance service is temporarily unavailable. Please try again.'
+        );
+        return;
+      }
+
+      setAgeSessionId(data?.session_id || null);
+
+      const statusRes = await fetch('/api/v1/age-assurance/status');
+      const statusData = await statusRes.json().catch(() => null);
+
+      if (statusRes.ok && statusData?.status === 'VERIFIED') {
+        setAgeStatus('VERIFIED');
+      } else {
+        setAgeStatus('PENDING');
+      }
     } catch {
-      setError('Could not connect to the age assurance gateway. Proceeding in development mode.');
-      setAgeStatus('VERIFIED');
+      setAgeStatus('PENDING');
+      setError('Could not reach the age assurance gateway. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -527,13 +549,22 @@ function OnboardingContent() {
                   <p style={{ color: 'var(--aura-taupe)', fontSize: '0.9rem', marginBottom: '1.25rem' }}>
                     We verify age using privacy-preserving zero-knowledge proof. No identity documents are permanently stored on our servers.
                   </p>
+                  {ageSessionId && (
+                    <p style={{ color: 'var(--aura-gold)', fontSize: '0.85rem', marginBottom: '1rem' }}>
+                      Verification session {ageSessionId} is pending. Complete the provider step, then check again.
+                    </p>
+                  )}
                   <button
                     type="button"
                     onClick={initiateAgeAssurance}
                     disabled={loading}
                     className="btn-gold"
                   >
-                    {loading ? 'Initiating Verification...' : 'Begin Age Assurance Verification'}
+                    {loading
+                      ? 'Initiating Verification...'
+                      : ageSessionId
+                        ? 'Check Verification Status'
+                        : 'Begin Age Assurance Verification'}
                   </button>
                 </div>
               )}

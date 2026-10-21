@@ -15,6 +15,8 @@ test('Premium Payment Checkout Flow Verification', async (t) => {
       password: 'Passw0r!Valid',
       display_name: 'Payment Tester',
       birthdate: '1995-08-12',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
   assert.equal(regRes.status, 200);

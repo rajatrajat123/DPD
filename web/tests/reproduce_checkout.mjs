@@ -14,6 +14,8 @@ async function testCheckoutFlow() {
       password: 'Passw0r!Valid',
       display_name: 'Stripe Tester',
       birthdate: '1996-05-20',
+      gender_identities: ['non-binary'],
+      sexual_orientations: ['queer'],
     }),
   });
 

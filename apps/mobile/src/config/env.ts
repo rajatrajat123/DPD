@@ -29,9 +29,26 @@ const getHostFromConstants = (): string | null => {
   return null;
 };
 
+const isProductionRuntime = (): boolean =>
+  (process.env.EXPO_PUBLIC_APP_ENV || 'development') === 'production';
+
 const getDefaultApiUrl = (): string => {
-  if (process.env.EXPO_PUBLIC_API_URL) {
-    return process.env.EXPO_PUBLIC_API_URL;
+  const configured = process.env.EXPO_PUBLIC_API_URL;
+
+  if (configured) {
+    if (isProductionRuntime() && configured.startsWith('http://')) {
+      throw new Error(
+        'EXPO_PUBLIC_API_URL must use HTTPS in production builds. Refusing to send credentials over plaintext HTTP.'
+      );
+    }
+    return configured;
+  }
+
+  // A production build must never silently talk to a developer LAN address.
+  if (isProductionRuntime()) {
+    throw new Error(
+      'EXPO_PUBLIC_API_URL is required for production builds. Set it to the public HTTPS Aura API origin (for example https://api.auradating.com) before building.'
+    );
   }
 
   const detectedHost = getHostFromConstants();
