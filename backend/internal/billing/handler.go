@@ -131,6 +131,7 @@ func (h *Handler) Verify(w http.ResponseWriter, r *http.Request) {
 	if req.Provider == "" {
 		req.Provider = ProviderStripe
 	}
+	req.UserID = authUser.ID
 
 	verified, err := h.svc.VerifyPurchase(r.Context(), authUser.ID, req, reqID)
 	if err != nil {
@@ -383,6 +384,12 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "Explicit acceptance of subscription terms and auto-renewal is required"))
 	case errors.Is(err, ErrIndiaMandateNotCompliant):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusUnprocessableEntity, "INDIA_MANDATE_NON_COMPLIANT", "India recurring e-mandate requires verified pre-debit notification sink (BLOCKED)"))
+	case errors.Is(err, ErrDuplicateTransaction):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "Duplicate payment transaction or already claimed by another user"))
+	case errors.Is(err, ErrPurchaseUserMismatch):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "PURCHASE_USER_MISMATCH", "Store purchase is bound to a different user account"))
+	case errors.Is(err, ErrReceiptValidationFailed), errors.Is(err, ErrInvalidReceiptData):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
 	default:
 		h.logger.Error("billing_handler_error", slog.String("error", err.Error()), slog.String("req_id", reqID))
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, "Internal billing error"))

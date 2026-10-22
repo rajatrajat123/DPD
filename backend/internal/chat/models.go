@@ -16,6 +16,8 @@ var (
 	ErrMessageTooLong          = errors.New("message body exceeds maximum length of 2000 characters")
 	ErrInvalidClientMessageID  = errors.New("invalid or missing client_message_id UUID")
 	ErrRateLimitExceeded       = errors.New("rate limit exceeded: please slow down")
+	ErrUnauthorizedDelete      = errors.New("unauthorized: caller is not the author of this message")
+	ErrMessageNotFound         = errors.New("message not found")
 )
 
 type MessageType string
@@ -126,11 +128,12 @@ type RegisterPushTokenRequest struct {
 type WSAction string
 
 const (
-	ActionMessageSend WSAction = "message.send"
-	ActionTypingStart WSAction = "typing.start"
-	ActionTypingStop  WSAction = "typing.stop"
-	ActionMessageRead WSAction = "message.read"
-	ActionPing        WSAction = "ping"
+	ActionMessageSend   WSAction = "message.send"
+	ActionMessageDelete WSAction = "message.delete"
+	ActionTypingStart   WSAction = "typing.start"
+	ActionTypingStop    WSAction = "typing.stop"
+	ActionMessageRead   WSAction = "message.read"
+	ActionPing          WSAction = "ping"
 )
 
 type WSClientMessage struct {
@@ -151,12 +154,20 @@ const (
 	EventMessageNew         WSEventType = "message.new"
 	EventMessageDelivered   WSEventType = "message.delivered"
 	EventMessageRead        WSEventType = "message.read"
+	EventMessageDeleted     WSEventType = "message.deleted"
 	EventTypingIndicator    WSEventType = "typing.indicator"
 	EventPresenceUpdate     WSEventType = "presence.update"
 	EventConversationRevoke WSEventType = "conversation.revoked"
 	EventPong               WSEventType = "pong"
 	EventError              WSEventType = "error"
 )
+
+type DeleteMessageResponse struct {
+	Success        bool       `json:"success"`
+	MessageID      string     `json:"message_id"`
+	ConversationID string     `json:"conversation_id"`
+	DeletedAt      *time.Time `json:"deleted_at"`
+}
 
 type WSServerMessage struct {
 	Type      WSEventType     `json:"type"`

@@ -864,4 +864,85 @@ func TestChat_ListConversationsEnrichesAvatarURL(t *testing.T) {
 	}
 }
 
+func TestChat_DeleteMessageForEveryone(t *testing.T) {
+	ctx := context.Background()
+	svc, chatRepo, identRepo, _ := setupTestChatSystem(t)
+
+	userA := "usr_del_a"
+	userB := "usr_del_b"
+	userC := "usr_del_c"
+	createTestUser(t, identRepo, userA, "userA@example.com", "Alice")
+	createTestUser(t, identRepo, userB, "userB@example.com", "Bob")
+	createTestUser(t, identRepo, userC, "userC@example.com", "Charlie")
+
+	match := &discovery.Match{
+		ID:         "match_del_1",
+		UserLowID:  userA,
+		UserHighID: userB,
+		Status:     discovery.MatchActive,
+		MatchedAt:  time.Now().UTC(),
+	}
+	chatRepo.SeedMatch(match)
+	conv, err := chatRepo.GetOrCreateConversationForMatch(ctx, match.ID)
+	if err != nil {
+		t.Fatalf("failed to create conversation: %v", err)
+	}
+
+	// 1. User A sends a message
+	sentMsg, err := svc.SendMessage(ctx, userA, conv.ID, SendMessageRequest{
+		ClientMessageID: "msg-del-1",
+		Body:            "Secret message that will be deleted",
+	})
+	if err != nil {
+		t.Fatalf("failed to send message: %v", err)
+	}
+
+	// 2. User B (recipient) attempts to delete User A's message -> Must fail with ErrUnauthorizedDelete
+	_, err = svc.DeleteMessageForEveryone(ctx, userB, conv.ID, sentMsg.ID)
+	if !errors.Is(err, ErrUnauthorizedDelete) {
+		t.Fatalf("expected ErrUnauthorizedDelete when recipient deletes, got: %v", err)
+	}
+
+	// 3. User C (non-participant) attempts to delete -> Must fail with ErrUnauthorizedParticipant
+	_, err = svc.DeleteMessageForEveryone(ctx, userC, conv.ID, sentMsg.ID)
+	if !errors.Is(err, ErrUnauthorizedParticipant) {
+		t.Fatalf("expected ErrUnauthorizedParticipant when non-participant deletes, got: %v", err)
+	}
+
+	// 4. User A (sender) deletes for everyone -> Must succeed
+	delResp, err := svc.DeleteMessageForEveryone(ctx, userA, conv.ID, sentMsg.ID)
+	if err != nil {
+		t.Fatalf("failed to delete message: %v", err)
+	}
+	if !delResp.Success || delResp.MessageID != sentMsg.ID {
+		t.Errorf("unexpected delete response: %+v", delResp)
+	}
+
+	// 5. Query messages: body must be replaced with placeholder, DeletedAt set
+	page, err := svc.GetMessages(ctx, conv.ID, userB, "", 50)
+	if err != nil {
+		t.Fatalf("failed to get messages: %v", err)
+	}
+	if len(page.Messages) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(page.Messages))
+	}
+	msg := page.Messages[0]
+	if msg.Body != "This message was deleted" {
+		t.Errorf("expected placeholder 'This message was deleted', got: %q", msg.Body)
+	}
+	if msg.DeletedAt == nil {
+		t.Errorf("expected DeletedAt to be non-nil")
+	}
+
+	// 6. Idempotent retry: deleting again succeeds without error
+	delResp2, err := svc.DeleteMessageForEveryone(ctx, userA, conv.ID, sentMsg.ID)
+	if err != nil {
+		t.Fatalf("idempotent delete failed: %v", err)
+	}
+	if !delResp2.Success {
+		t.Errorf("expected Success true on idempotent call, got false")
+	}
+}
+
+
 

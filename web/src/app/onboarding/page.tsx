@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect, Suspense } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { sanitizeRedirectPath } from '@/lib/validation/redirect';
 
 interface OnboardingPhoto {
   id: string;
@@ -231,11 +232,13 @@ function OnboardingContent() {
         }),
       });
 
-      router.push(redirectTarget);
+      const safeRedirect = sanitizeRedirectPath(redirectTarget, '/app/discovery');
+      router.push(safeRedirect);
       router.refresh();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Error finalizing profile. Proceeding to destination.');
-      router.push(redirectTarget);
+      const safeRedirect = sanitizeRedirectPath(redirectTarget, '/app/discovery');
+      router.push(safeRedirect);
     } finally {
       setLoading(false);
     }

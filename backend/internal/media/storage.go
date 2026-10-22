@@ -68,8 +68,12 @@ func NewFileStorageEngine(baseDir string, signingSecret string) (*FileStorageEng
 		return nil, fmt.Errorf("failed to create derivatives directory %s: %w", derivativesDir, err)
 	}
 
-	key := []byte(signingSecret)
+	key := []byte(strings.TrimSpace(signingSecret))
 	if len(key) == 0 {
+		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+		if env == "production" || env == "staging" {
+			return nil, errors.New("media token signing secret is required in production/staging")
+		}
 		key = []byte("default-aura-media-token-signing-secret-key-32b")
 	}
 

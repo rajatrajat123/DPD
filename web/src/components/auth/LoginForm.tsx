@@ -3,11 +3,13 @@
 import React, { useState } from 'react';
 import Link from 'next/link';
 import { useRouter, useSearchParams } from 'next/navigation';
+import { sanitizeRedirectPath } from '@/lib/validation/redirect';
 
 export function LoginForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTarget = searchParams.get('redirect') || '/app/discovery';
+  const safeRedirectTarget = sanitizeRedirectPath(redirectTarget, '/app/discovery');
 
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -38,7 +40,7 @@ export function LoginForm() {
         throw new Error(data.error || data.message || 'Invalid email or password.');
       }
 
-      router.push(redirectTarget);
+      router.push(safeRedirectTarget);
       router.refresh();
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -52,8 +54,8 @@ export function LoginForm() {
   };
 
   const registerHref =
-    redirectTarget && redirectTarget !== '/app/discovery'
-      ? `/auth/register?redirect=${encodeURIComponent(redirectTarget)}`
+    safeRedirectTarget && safeRedirectTarget !== '/app/discovery'
+      ? `/auth/register?redirect=${encodeURIComponent(safeRedirectTarget)}`
       : '/auth/register';
 
   return (

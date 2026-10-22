@@ -653,3 +653,113 @@ func TestService_RegistrationAttribution(t *testing.T) {
 	})
 }
 
+func TestService_DeleteAccount(t *testing.T) {
+	ctx := context.Background()
+	svc, repo := newTestService()
+
+	// 1. Register a test user
+	regReq := validRegisterReq()
+	regReq.Email = "delete_me@example.com"
+	authRes, err := svc.Register(ctx, regReq, ClientInfo{UserAgent: "TestAgent"})
+	if err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+	userID := authRes.User.ID
+
+	// Create profile, location, preferences for user
+	err = repo.UpsertProfile(ctx, &Profile{
+		UserID:      userID,
+		DisplayName: "DeleteMe",
+		Bio:         "I am about to delete my account",
+	})
+	if err != nil {
+		t.Fatalf("failed to upsert profile: %v", err)
+	}
+
+	// 2. Reject deletion if confirm_deletion is false
+	err = svc.DeleteAccount(ctx, userID, "Password123!Valid", false)
+	if !errors.Is(err, ErrDeleteConfirmationRequired) {
+		t.Fatalf("expected ErrDeleteConfirmationRequired, got: %v", err)
+	}
+
+	// 3. Reject deletion if password is incorrect
+	err = svc.DeleteAccount(ctx, userID, "WrongPassword123!", true)
+	if !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials for wrong password, got: %v", err)
+	}
+
+	// 4. Successful deletion with valid password and confirmation
+	err = svc.DeleteAccount(ctx, userID, "Password123!Valid", true)
+	if err != nil {
+		t.Fatalf("DeleteAccount failed: %v", err)
+	}
+
+	// Verify user record is anonymized and status is DELETED
+	deletedUser, err := repo.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID failed: %v", err)
+	}
+	if deletedUser.Status != StatusDeleted {
+		t.Errorf("expected status DELETED, got: %s", deletedUser.Status)
+	}
+	if !strings.HasPrefix(deletedUser.Email, "deleted_") || !strings.HasSuffix(deletedUser.Email, "@deleted.aura.dating") {
+		t.Errorf("expected anonymized email, got: %s", deletedUser.Email)
+	}
+	if deletedUser.PasswordHash != "" {
+		t.Errorf("expected cleared password hash, got: %s", deletedUser.PasswordHash)
+	}
+
+	// Verify profile is purged
+	_, err = repo.GetProfile(ctx, userID)
+	if !errors.Is(err, ErrProfileNotFound) {
+		t.Errorf("expected ErrProfileNotFound for purged profile, got: %v", err)
+	}
+
+	// 5. Subsequent deletion returns ErrAccountAlreadyDeleted
+	err = svc.DeleteAccount(ctx, userID, "Password123!Valid", true)
+	if !errors.Is(err, ErrAccountAlreadyDeleted) {
+		t.Fatalf("expected ErrAccountAlreadyDeleted on repeat call, got: %v", err)
+	}
+}
+
+func TestService_RequestAccountDeletionWeb(t *testing.T) {
+	ctx := context.Background()
+	svc, repo := newTestService()
+
+	// Register user
+	regReq := validRegisterReq()
+	regReq.Email = "web_delete@example.com"
+	authRes, err := svc.Register(ctx, regReq, ClientInfo{UserAgent: "TestAgent"})
+	if err != nil {
+		t.Fatalf("registration failed: %v", err)
+	}
+	userID := authRes.User.ID
+
+	// Reject if confirm is false
+	err = svc.RequestAccountDeletionWeb(ctx, "web_delete@example.com", "Leaving platform", false)
+	if !errors.Is(err, ErrDeleteConfirmationRequired) {
+		t.Fatalf("expected ErrDeleteConfirmationRequired, got: %v", err)
+	}
+
+	// Process valid request
+	err = svc.RequestAccountDeletionWeb(ctx, "web_delete@example.com", "Leaving platform", true)
+	if err != nil {
+		t.Fatalf("RequestAccountDeletionWeb failed: %v", err)
+	}
+
+	// User must be DELETED
+	deletedUser, err := repo.GetUserByID(ctx, userID)
+	if err != nil {
+		t.Fatalf("GetUserByID failed: %v", err)
+	}
+	if deletedUser.Status != StatusDeleted {
+		t.Errorf("expected status DELETED, got: %s", deletedUser.Status)
+	}
+
+	// Non-existent email should succeed without revealing non-existence
+	err = svc.RequestAccountDeletionWeb(ctx, "unknown_person@example.com", "Testing", true)
+	if err != nil {
+		t.Fatalf("expected nil error for non-existent user, got: %v", err)
+	}
+}
+

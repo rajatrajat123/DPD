@@ -385,6 +385,48 @@ func (h *Handler) Allowance(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ClaimSwipeAdReward handles POST /api/v1/swipes/claim-reward.
+func (h *Handler) ClaimSwipeAdReward(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	var req struct {
+		TransactionID string `json:"transaction_id"`
+		RawQuery      string `json:"raw_query"`
+	}
+	if r.Body != nil && r.ContentLength > 0 {
+		_ = validator.DecodeAndValidate(w, r, 16*1024, &req)
+	}
+
+	detail, err := h.svc.ClaimSwipeAdReward(r.Context(), authUser.ID, req.RawQuery, req.TransactionID)
+	if err != nil {
+		h.handleServiceError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"status":                  "REWARD_CLAIMED",
+		"user_id":                 authUser.ID,
+		"daily_quota":             detail.DailyQuota,
+		"remaining_likes":         detail.RemainingLikes,
+		"remaining_regular_likes": detail.RemainingRegularLikes,
+		"remaining_bonus_likes":   detail.RemainingBonusLikes,
+		"is_unlimited":            detail.IsUnlimited,
+		"is_introductory":         detail.IsIntroductory,
+		"window_start":            detail.WindowStart,
+		"window_reset_at":         detail.WindowResetAt,
+	})
+}
+
 // Rewind handles POST /api/v1/swipes/rewind.
 func (h *Handler) Rewind(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())

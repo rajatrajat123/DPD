@@ -16,6 +16,8 @@ backend/*.exe
 backend/**/*.exe
 *.exe
 **/*.exe
+*.exe~
+**/*.exe~
 backend/*.out
 backend/coverage.txt
 apps/mobile/dist/

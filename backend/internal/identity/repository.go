@@ -64,6 +64,8 @@ type Repository interface {
 	GetOAuthIdentityByEmail(ctx context.Context, provider, email string) (*OAuthIdentity, error)
 	UpdateOAuthIdentityLastLogin(ctx context.Context, id string) error
 	ListOAuthIdentitiesForUser(ctx context.Context, userID string) ([]*OAuthIdentity, error)
+
+	DeleteAccountData(ctx context.Context, userID string) error
 }
 
 // MemoryRepository provides a concurrent, in-memory implementation of Repository.
@@ -557,6 +559,54 @@ func (m *MemoryRepository) ListOAuthIdentitiesForUser(_ context.Context, userID 
 		}
 	}
 	return result, nil
+}
+
+func (m *MemoryRepository) DeleteAccountData(_ context.Context, userID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	u, ok := m.usersByID[userID]
+	if !ok {
+		return ErrUserNotFound
+	}
+
+	// Remove old email and phone from lookup maps
+	delete(m.usersByEmail, strings.ToLower(u.Email))
+	if u.PhoneE164 != nil {
+		delete(m.usersByPhone, *u.PhoneE164)
+	}
+
+	// Anonymize user record
+	anonEmail := fmt.Sprintf("deleted_%s@deleted.aura.dating", userID)
+	u.Status = StatusDeleted
+	u.Email = anonEmail
+	u.PhoneE164 = nil
+	u.PasswordHash = ""
+	u.EmailVerifiedAt = nil
+	u.PhoneVerifiedAt = nil
+	u.UpdatedAt = time.Now().UTC()
+	m.usersByEmail[anonEmail] = u
+
+	// Purge sessions
+	for sID, s := range m.sessions {
+		if s.UserID == userID {
+			delete(m.sessions, sID)
+		}
+	}
+
+	// Purge OAuth identities
+	for oID, o := range m.oauthIdentities {
+		if o.UserID == userID {
+			delete(m.oauthIdentities, oID)
+		}
+	}
+
+	// Purge profile, location, preferences
+	delete(m.profiles, userID)
+	delete(m.locations, userID)
+	delete(m.preferences, userID)
+
+	return nil
 }
 
 // PostgresRepository implements Repository using live PostgreSQL connection pool.
@@ -1232,4 +1282,72 @@ func (p *PostgresRepository) ListOAuthIdentitiesForUser(ctx context.Context, use
 		idents = append(idents, &ident)
 	}
 	return idents, rows.Err()
+}
+
+func (p *PostgresRepository) DeleteAccountData(ctx context.Context, userID string) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Soft-delete / redact messages sent by the user
+	_, err = tx.Exec(ctx, `
+		UPDATE messages
+		SET body = 'This message was deleted',
+		    deleted_at = COALESCE(deleted_at, NOW()),
+		    media_asset_id = NULL
+		WHERE sender_user_id = $1
+	`, userID)
+	if err != nil {
+		return fmt.Errorf("redacting user messages: %w", err)
+	}
+
+	// 2. Cascade deletions for all user-centric tables
+	tables := []string{
+		"user_sessions",
+		"user_oauth_identities",
+		"user_push_tokens",
+		"user_entitlements",
+		"user_favourites",
+		"swipes",
+		"user_blocks",
+		"profile_locations",
+		"dating_preferences",
+		"profiles",
+	}
+	for _, tbl := range tables {
+		switch tbl {
+		case "user_favourites":
+			_, err = tx.Exec(ctx, `DELETE FROM user_favourites WHERE user_id = $1 OR target_user_id = $1`, userID)
+		case "swipes":
+			_, err = tx.Exec(ctx, `DELETE FROM swipes WHERE actor_user_id = $1 OR target_user_id = $1`, userID)
+		case "user_blocks":
+			_, err = tx.Exec(ctx, `DELETE FROM user_blocks WHERE blocker_user_id = $1 OR blocked_user_id = $1`, userID)
+		default:
+			_, err = tx.Exec(ctx, fmt.Sprintf(`DELETE FROM %s WHERE user_id = $1`, tbl), userID)
+		}
+		if err != nil {
+			return fmt.Errorf("deleting from %s: %w", tbl, err)
+		}
+	}
+
+	// 3. Anonymize user record and mark status as DELETED (financial ledger rows in billing_transactions, etc. retain valid FK reference)
+	anonEmail := fmt.Sprintf("deleted_%s@deleted.aura.dating", userID)
+	_, err = tx.Exec(ctx, `
+		UPDATE users
+		SET status = 'DELETED',
+		    email = $2,
+		    phone_e164 = NULL,
+		    password_hash = '',
+		    email_verified_at = NULL,
+		    phone_verified_at = NULL,
+		    updated_at = NOW()
+		WHERE id = $1
+	`, userID, anonEmail)
+	if err != nil {
+		return fmt.Errorf("anonymizing user record: %w", err)
+	}
+
+	return tx.Commit(ctx)
 }

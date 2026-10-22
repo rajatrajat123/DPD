@@ -38,6 +38,10 @@ const nextConfig = {
             key: 'Permissions-Policy',
             value: 'camera=(), microphone=(), geolocation=(self)',
           },
+          {
+            key: 'Strict-Transport-Security',
+            value: 'max-age=63072000; includeSubDomains; preload',
+          },
         ],
       },
       {
@@ -55,6 +59,38 @@ const nextConfig = {
           {
             key: 'Pragma',
             value: 'no-cache',
+          },
+        ],
+      },
+      {
+        // Suppress caching on sensitive admin console routes
+        source: '/admin/:path*',
+        headers: [
+          {
+            key: 'X-Robots-Tag',
+            value: 'noindex, nofollow, noarchive, nosnippet',
+          },
+          {
+            key: 'Cache-Control',
+            value: 'private, no-cache, no-store, max-age=0, must-revalidate',
+          },
+          {
+            key: 'Pragma',
+            value: 'no-cache',
+          },
+        ],
+      },
+      {
+        // Suppress caching and indexing on internal admin API routes
+        source: '/api/admin/:path*',
+        headers: [
+          {
+            key: 'X-Robots-Tag',
+            value: 'noindex, nofollow, noarchive, nosnippet',
+          },
+          {
+            key: 'Cache-Control',
+            value: 'private, no-cache, no-store, max-age=0, must-revalidate',
           },
         ],
       },

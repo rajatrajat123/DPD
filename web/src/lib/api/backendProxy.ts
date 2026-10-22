@@ -104,11 +104,11 @@ export async function proxyToBackend(
     if (fallbackHandler) {
       return fallbackHandler();
     }
+    console.error(`[backendProxy] failed to proxy ${method} ${backendPath}:`, err);
     return NextResponse.json(
       {
         code: 'BACKEND_UNAVAILABLE',
         message: 'Aura backend API is currently unreachable',
-        error: String(err),
       },
       { status: 503 }
     );

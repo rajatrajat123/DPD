@@ -18,9 +18,16 @@ export interface ReadReceipt {
   read_at: string;
 }
 
+export interface MessageDeletedReceipt {
+  conversation_id: string;
+  message_id: string;
+  deleted_at: string;
+}
+
 export type MessageListener = (message: Message) => void;
 export type DeliveryListener = (receipt: DeliveredReceipt) => void;
 export type ReadReceiptListener = (receipt: ReadReceipt) => void;
+export type MessageDeletedListener = (receipt: MessageDeletedReceipt) => void;
 export type TypingListener = (data: { conversation_id: string; user_id: string; is_typing: boolean }) => void;
 export type ConnectionListener = (status: ConnectionStatus) => void;
 
@@ -51,7 +58,12 @@ export function normalizeMessage(raw: any): Message {
   else if (raw.status) status = raw.status;
 
   const senderId = raw.sender_user_id || raw.sender_id || '';
-  const textBody = raw.body !== undefined ? raw.body : (raw.content || '');
+  const isDeleted = Boolean(raw.deleted_at);
+  const textBody = isDeleted
+    ? 'This message was deleted'
+    : raw.body !== undefined
+    ? raw.body
+    : raw.content || '';
 
   return {
     id: raw.id || raw.client_message_id || generateUUID(),
@@ -61,12 +73,13 @@ export function normalizeMessage(raw: any): Message {
     client_message_id: raw.client_message_id,
     body: textBody,
     content: textBody,
-    message_type: raw.message_type || (raw.media_asset_id ? 'IMAGE' : 'TEXT'),
-    media_asset_id: raw.media_asset_id,
-    media_url: raw.media_url,
-    audio_duration_ms: raw.audio_duration_ms || raw.duration_ms,
+    message_type: isDeleted ? 'TEXT' : raw.message_type || (raw.media_asset_id ? 'IMAGE' : 'TEXT'),
+    media_asset_id: isDeleted ? undefined : raw.media_asset_id,
+    media_url: isDeleted ? undefined : raw.media_url,
+    audio_duration_ms: isDeleted ? undefined : raw.audio_duration_ms || raw.duration_ms,
     delivered_at: raw.delivered_at || null,
     read_at: raw.read_at || null,
+    deleted_at: raw.deleted_at || null,
     status,
     created_at: raw.created_at || new Date().toISOString(),
   };
@@ -195,6 +208,7 @@ class ChatWebSocketClient {
   private messageListeners: Set<MessageListener> = new Set();
   private deliveryListeners: Set<DeliveryListener> = new Set();
   private readListeners: Set<ReadReceiptListener> = new Set();
+  private deleteListeners: Set<MessageDeletedListener> = new Set();
   private typingListeners: Set<TypingListener> = new Set();
   private connectionListeners: Set<ConnectionListener> = new Set();
 
@@ -329,6 +343,27 @@ class ChatWebSocketClient {
     return () => this.readListeners.delete(listener);
   }
 
+  public onMessageDeleted(listener: MessageDeletedListener): () => void {
+    this.deleteListeners.add(listener);
+    return () => this.deleteListeners.delete(listener);
+  }
+
+  public notifyMessageDeleted(receipt: MessageDeletedReceipt): void {
+    this.deleteListeners.forEach((fn) => fn(receipt));
+  }
+
+  public deleteMessage(conversationId: string, messageId: string): boolean {
+    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) return false;
+    this.socket.send(
+      JSON.stringify({
+        action: 'message.delete',
+        conversation_id: conversationId,
+        message_id: messageId,
+      })
+    );
+    return true;
+  }
+
   public onTyping(listener: TypingListener): () => void {
     this.typingListeners.add(listener);
     return () => this.typingListeners.delete(listener);
@@ -366,6 +401,15 @@ class ChatWebSocketClient {
           read_at: payload.read_at || new Date().toISOString(),
         };
         this.readListeners.forEach((fn) => fn(receipt));
+        break;
+      }
+      case 'message.deleted': {
+        const receipt: MessageDeletedReceipt = {
+          conversation_id: String(payload.conversation_id),
+          message_id: String(payload.message_id),
+          deleted_at: payload.deleted_at || new Date().toISOString(),
+        };
+        this.deleteListeners.forEach((fn) => fn(receipt));
         break;
       }
       case 'typing.indicator':
@@ -544,6 +588,30 @@ export const chatService = {
       ...res,
       audio_duration_ms: durationMs || res.audio_duration_ms,
     });
+  },
+
+  /**
+   * Deletes a message for everyone in the conversation
+   */
+  async deleteMessageForEveryone(conversationId: string, messageId: string): Promise<boolean> {
+    const wsSent = chatWebSocket.deleteMessage(conversationId, messageId);
+    try {
+      const res = await api.delete<{ success: boolean; message_id: string; conversation_id: string; deleted_at: string }>(
+        `/api/v1/conversations/${conversationId}/messages/${messageId}`
+      );
+      if (res?.success) {
+        chatWebSocket.notifyMessageDeleted({
+          conversation_id: conversationId,
+          message_id: messageId,
+          deleted_at: res.deleted_at || new Date().toISOString(),
+        });
+        return true;
+      }
+      return wsSent;
+    } catch (err) {
+      if (wsSent) return true;
+      throw err;
+    }
   },
 
   /**

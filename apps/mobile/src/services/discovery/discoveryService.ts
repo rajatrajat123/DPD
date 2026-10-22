@@ -1,4 +1,5 @@
 import { api, ApiError } from '../api/client';
+import { SwipeAllowance } from '../ads/admobService';
 import {
   DiscoveryCandidate,
   DiscoveryPreferences,
@@ -286,6 +287,36 @@ export const discoveryService = {
       transaction_id: transactionId,
       raw_query: rawQuery,
     });
+  },
+
+  /**
+   * Claims 5 bonus likes for photo-verified profiles after rewarded ad completion
+   */
+  async claimSwipeAdReward(transactionId?: string, rawQuery?: string): Promise<SwipeAllowance> {
+    const res = await api.post<{
+      status: string;
+      user_id: string;
+      daily_quota: number;
+      remaining_likes: number;
+      remaining_regular_likes?: number;
+      remaining_bonus_likes?: number;
+      is_unlimited: boolean;
+      is_introductory?: boolean;
+      window_start?: string;
+      window_reset_at?: string;
+    }>('/api/v1/swipes/claim-reward', {
+      transaction_id: transactionId,
+      raw_query: rawQuery,
+    });
+    return {
+      remainingLikes: res.remaining_likes,
+      remainingRegularLikes: res.remaining_regular_likes,
+      remainingBonusLikes: res.remaining_bonus_likes,
+      isUnlimited: res.is_unlimited,
+      isIntroductory: res.is_introductory,
+      dailyQuota: res.daily_quota,
+      windowResetAt: res.window_reset_at,
+    };
   },
 
   /**

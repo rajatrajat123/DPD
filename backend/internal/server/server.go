@@ -69,6 +69,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	// Root & versioned health/readiness probes
 	mux.HandleFunc("/healthz", healthHandler.Liveness)
 	mux.HandleFunc("/readyz", healthHandler.Readiness)
+	mux.HandleFunc("/health/live", healthHandler.Liveness)
+	mux.HandleFunc("/health/ready", healthHandler.Readiness)
 	mux.HandleFunc("/api/v1/healthz", healthHandler.Liveness)
 	mux.HandleFunc("/api/v1/readyz", healthHandler.Readiness)
 
@@ -210,6 +212,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	// Linking Google to an existing account requires an authenticated session as
 	// proof of ownership before any identity is attached.
 	mux.Handle("/api/v1/auth/google/link", authMw(activeMw(http.HandlerFunc(identHandler.LinkGoogle))))
+	mux.Handle("/api/v1/auth/delete-account", authMw(activeMw(http.HandlerFunc(identHandler.DeleteAccount))))
+	mux.HandleFunc("/api/v1/auth/deletion-request", identHandler.RequestDeletionWeb)
 
 	// Authenticated Profile Endpoints
 	mux.Handle("/api/v1/profiles/me", memberMw(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -360,6 +364,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/swipes", communityMw(http.HandlerFunc(discoHandler.Swipe)))
 	mux.Handle("/api/v1/swipes/rewind", communityMw(http.HandlerFunc(discoHandler.Rewind)))
 	mux.Handle("/api/v1/swipes/allowance", communityMw(http.HandlerFunc(discoHandler.Allowance)))
+	mux.Handle("/api/v1/swipes/claim-reward", communityMw(http.HandlerFunc(discoHandler.ClaimSwipeAdReward)))
 	mux.Handle("/api/v1/matches", communityMw(http.HandlerFunc(discoHandler.Matches)))
 	mux.Handle("/api/v1/matches/", communityMw(http.HandlerFunc(discoHandler.MatchDetail)))
 	mux.Handle("/api/v1/blocks", communityMw(http.HandlerFunc(discoHandler.Block)))
@@ -451,7 +456,15 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	}
 
 	stripeAdapter := billing.NewStripeAdapter(cfg.StripeSecretKey, cfg.StripeWebhookSecret)
-	appleAdapter := billing.NewAppleAppStoreAdapter(cfg.AppleSharedSecret, cfg.AppleBundleID)
+	appleAdapter := billing.NewAppleAppStoreAdapterWithConfig(billing.AppleConfig{
+		BundleID:      cfg.AppleBundleID,
+		KeyID:         cfg.AppleKeyID,
+		IssuerID:      cfg.AppleIssuerID,
+		PrivateKeyPEM: cfg.ApplePrivateKey,
+		AppAppleID:    cfg.AppleAppAppleID,
+		Environment:   cfg.AppleEnvironment,
+		SharedSecret:  cfg.AppleSharedSecret,
+	})
 	googleAdapter := billing.NewGooglePlayAdapter(cfg.GooglePlayCredentialsJSON, cfg.GooglePlayPackageName)
 	providerRegistry := billing.NewProviderRegistry(stripeAdapter, appleAdapter, googleAdapter)
 

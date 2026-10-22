@@ -45,13 +45,37 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
+interface SessionClaims {
+  sub: string;
+  role?: string;
+  email?: string;
+  exp: number;
+}
+
+const ADMIN_ROLES = [
+  'SUPER_ADMIN',
+  'TRUST_AND_SAFETY',
+  'FINANCE_ADMIN',
+  'EDITORIAL_CMS',
+  'CUSTOMER_SUPPORT',
+  'AFFILIATE_MANAGER',
+];
+
+const ADMIN_SUBPATH_ROLES: Record<string, string[]> = {
+  '/admin/super': ['SUPER_ADMIN'],
+  '/admin/finance': ['SUPER_ADMIN', 'FINANCE_ADMIN'],
+  '/admin/moderation': ['SUPER_ADMIN', 'TRUST_AND_SAFETY'],
+  '/admin/affiliate': ['SUPER_ADMIN', 'AFFILIATE_MANAGER'],
+  '/admin/cms': ['SUPER_ADMIN', 'EDITORIAL_CMS'],
+  '/admin/support': ['SUPER_ADMIN', 'CUSTOMER_SUPPORT'],
+};
+
 /**
- * Verifies the HS256 signature and expiry of the Aura access token. The private
- * route guard must never grant access merely because a cookie is present.
+ * Cryptographically verifies and parses the HS256 JWT access token.
  */
-async function isSessionTokenValid(token: string, secret: string): Promise<boolean> {
+async function verifyAndDecodeSession(token: string, secret: string): Promise<SessionClaims | null> {
   const parts = token.split('.');
-  if (parts.length !== 3) return false;
+  if (parts.length !== 3) return null;
 
   const [headerB64, claimsB64, signatureB64] = parts;
   const encoder = new TextEncoder();
@@ -65,16 +89,33 @@ async function isSessionTokenValid(token: string, secret: string): Promise<boole
   const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(`${headerB64}.${claimsB64}`));
 
   if (!constantTimeEqual(bytesToBase64Url(new Uint8Array(signature)), signatureB64)) {
-    return false;
+    return null;
   }
 
   try {
     const claims = JSON.parse(new TextDecoder().decode(base64UrlToBytes(claimsB64)));
     const expMs = (claims.exp || 0) * 1000;
-    return Boolean(claims.sub) && expMs > Date.now();
+    if (!claims.sub || expMs <= Date.now()) {
+      return null;
+    }
+    return {
+      sub: claims.sub,
+      role: claims.role || 'MEMBER',
+      email: claims.email,
+      exp: expMs,
+    };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * Verifies the HS256 signature and expiry of the Aura access token. The private
+ * route guard must never grant access merely because a cookie is present.
+ */
+async function isSessionTokenValid(token: string, secret: string): Promise<boolean> {
+  const claims = await verifyAndDecodeSession(token, secret);
+  return claims !== null;
 }
 
 export async function middleware(request: NextRequest) {
@@ -107,12 +148,12 @@ export async function middleware(request: NextRequest) {
     const signingSecret = process.env.JWT_SIGNING_SECRET || process.env.AURA_SESSION_HMAC_SECRET;
 
     // A cookie is only accepted when it carries a valid, unexpired signature.
-    const hasValidSession = Boolean(
-      sessionToken &&
-        signingSecret &&
-        signingSecret.length >= 32 &&
-        (await isSessionTokenValid(sessionToken, signingSecret))
-    );
+    const sessionClaims =
+      sessionToken && signingSecret && signingSecret.length >= 32
+        ? await verifyAndDecodeSession(sessionToken, signingSecret)
+        : null;
+
+    const hasValidSession = Boolean(sessionClaims);
 
     if (!hasValidSession && !pathname.startsWith('/auth')) {
       const loginUrl = new URL('/auth/login', request.url);
@@ -126,6 +167,35 @@ export async function middleware(request: NextRequest) {
         'private, no-cache, no-store, max-age=0, must-revalidate'
       );
       return redirectResponse;
+    }
+
+    // Role-based Access Control for /admin routes
+    if (pathname.startsWith('/admin')) {
+      const userRole = sessionClaims?.role || 'MEMBER';
+      if (!ADMIN_ROLES.includes(userRole)) {
+        const unauthorizedUrl = new URL('/auth/unauthorized', request.url);
+        const redirectResponse = NextResponse.redirect(unauthorizedUrl, 302);
+        redirectResponse.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+        redirectResponse.headers.set(
+          'Cache-Control',
+          'private, no-cache, no-store, max-age=0, must-revalidate'
+        );
+        return redirectResponse;
+      }
+
+      // Check specific admin subpath access
+      for (const [subpath, allowedRoles] of Object.entries(ADMIN_SUBPATH_ROLES)) {
+        if (pathname.startsWith(subpath) && !allowedRoles.includes(userRole)) {
+          const fallbackUrl = new URL('/admin', request.url);
+          const redirectResponse = NextResponse.redirect(fallbackUrl, 302);
+          redirectResponse.headers.set('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+          redirectResponse.headers.set(
+            'Cache-Control',
+            'private, no-cache, no-store, max-age=0, must-revalidate'
+          );
+          return redirectResponse;
+        }
+      }
     }
 
     // Authenticated private page response

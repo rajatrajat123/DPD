@@ -14,7 +14,7 @@ interface SwipeQuotaModalProps {
   visible: boolean;
   userId: string;
   onClose: () => void;
-  onRewardGranted: (bonusAmount: number) => void;
+  onRewardGranted: (bonusAmount: number, transactionId?: string) => void;
   onUpgradePress: () => void;
 }
 
@@ -40,7 +40,7 @@ export const SwipeQuotaModal: React.FC<SwipeQuotaModalProps> = ({
       }
       const result = await admobService.showRewardedAd(userId, 'bonus_likes_reward');
       if (result.rewarded) {
-        onRewardGranted(result.rewardAmount);
+        onRewardGranted(result.rewardAmount >= 5 ? result.rewardAmount : 5, result.transactionId);
         onClose();
       } else {
         setAdMessage(result.error || 'Video was closed before earning the reward.');

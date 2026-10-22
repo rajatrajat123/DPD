@@ -204,6 +204,7 @@ export interface Message {
   media_asset_id?: string;
   delivered_at?: string | null;
   read_at?: string | null;
+  deleted_at?: string | null;
   created_at: string;
 
   // Backwards compatibility aliases

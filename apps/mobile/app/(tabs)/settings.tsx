@@ -7,6 +7,9 @@ import {
   Switch,
   TouchableOpacity,
   Alert,
+  Modal,
+  TextInput,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -18,7 +21,7 @@ import { config } from '../../src/config/env';
 
 export default function SettingsScreen() {
   const router = useRouter();
-  const { logout, setBiometricLock } = useAuth();
+  const { logout, setBiometricLock, deleteAccount } = useAuth();
   const { colors } = useTheme();
 
   const [biometricStatus, setBiometricStatus] = useState<BiometricStatus>({
@@ -28,6 +31,12 @@ export default function SettingsScreen() {
   });
   const [isBiometricActive, setIsBiometricActive] = useState(false);
   const [screenCaptureProtection, setScreenCaptureProtection] = useState(true);
+
+  // Account deletion modal state
+  const [isDeleteModalVisible, setIsDeleteModalVisible] = useState(false);
+  const [deletePassword, setDeletePassword] = useState('');
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   // Notification preferences
   const [pushEnabled, setPushEnabled] = useState(true);
@@ -134,6 +143,29 @@ export default function SettingsScreen() {
         },
       ]
     );
+  };
+
+  const handleConfirmDelete = async () => {
+    setDeleteError(null);
+    setIsDeleting(true);
+    try {
+      await deleteAccount(deletePassword, 'user_requested');
+      setIsDeleteModalVisible(false);
+      Alert.alert(
+        'Account Deleted',
+        'Your Aura account and all associated personal data have been permanently erased.',
+        [
+          {
+            text: 'OK',
+            onPress: () => router.replace('/(auth)/login'),
+          },
+        ]
+      );
+    } catch (err: any) {
+      setDeleteError(err?.message || 'Could not delete account. Please verify your password and try again.');
+    } finally {
+      setIsDeleting(false);
+    }
   };
 
   return (
@@ -272,15 +304,100 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        {/* Logout */}
-        <TouchableOpacity
-          style={[styles.logoutBtn, { backgroundColor: colors.card, borderColor: colors.ruby }]}
-          onPress={handleLogout}
-          activeOpacity={0.8}
-        >
-          <Text style={[styles.logoutBtnText, { color: colors.ruby }]}>Sign Out of Aura</Text>
-        </TouchableOpacity>
+        {/* Account Actions */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Account Management</Text>
+          <TouchableOpacity
+            style={[styles.logoutBtn, { backgroundColor: colors.card, borderColor: colors.borderSubtle, marginBottom: spacing.md }]}
+            onPress={handleLogout}
+            activeOpacity={0.8}
+            testID="settings-sign-out-btn"
+          >
+            <Text style={[styles.logoutBtnText, { color: colors.text }]}>Sign Out of Aura</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.deleteBtn, { backgroundColor: 'transparent', borderColor: colors.ruby }]}
+            onPress={() => {
+              setDeletePassword('');
+              setDeleteError(null);
+              setIsDeleteModalVisible(true);
+            }}
+            activeOpacity={0.8}
+            testID="delete-account-open-btn"
+          >
+            <Text style={[styles.deleteBtnText, { color: colors.ruby }]}>Permanently Delete Account</Text>
+          </TouchableOpacity>
+        </View>
       </ScrollView>
+
+      {/* Account Deletion Modal */}
+      <Modal
+        visible={isDeleteModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => !isDeleting && setIsDeleteModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modalContent, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[styles.modalTitle, { color: colors.ruby }]}>Permanently Delete Account?</Text>
+            
+            <Text style={[styles.modalWarningText, { color: colors.text }]}>
+              This action is permanent and irreversible. Your profile, photos, chat history, matches, and preferences will be permanently wiped from Aura.
+            </Text>
+
+            {/* In-Store Subscription Notice */}
+            <View style={[styles.modalNoticeBox, { backgroundColor: colors.background, borderColor: colors.gold }]}>
+              <Text style={[styles.modalNoticeTitle, { color: colors.gold }]}>⚠️ Important Store Subscription Notice</Text>
+              <Text style={[styles.modalNoticeBody, { color: colors.textMuted }]}>
+                Deleting your Aura account does NOT automatically cancel subscriptions purchased via Google Play or Apple App Store. You must cancel active subscriptions directly in your Google Play or Apple Store account settings to prevent future billing.
+              </Text>
+            </View>
+
+            {deleteError && (
+              <Text style={[styles.modalErrorText, { color: colors.ruby }]}>{deleteError}</Text>
+            )}
+
+            <Text style={[styles.inputLabel, { color: colors.textSubtle }]}>
+              Enter your password to verify ownership:
+            </Text>
+            <TextInput
+              style={[styles.passwordInput, { backgroundColor: colors.background, borderColor: colors.border, color: colors.text }]}
+              placeholder="Your password"
+              placeholderTextColor={colors.textSubtle}
+              secureTextEntry
+              value={deletePassword}
+              onChangeText={setDeletePassword}
+              editable={!isDeleting}
+              testID="delete-account-password-input"
+            />
+
+            <View style={styles.modalBtnRow}>
+              <TouchableOpacity
+                style={[styles.modalCancelBtn, { borderColor: colors.border }]}
+                onPress={() => setIsDeleteModalVisible(false)}
+                disabled={isDeleting}
+                testID="delete-account-cancel-btn"
+              >
+                <Text style={[styles.modalCancelBtnText, { color: colors.text }]}>Cancel</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.modalDeleteBtn, { backgroundColor: colors.ruby }]}
+                onPress={handleConfirmDelete}
+                disabled={isDeleting}
+                testID="delete-account-confirm-btn"
+              >
+                {isDeleting ? (
+                  <ActivityIndicator color="#ffffff" size="small" />
+                ) : (
+                  <Text style={styles.modalDeleteBtnText}>Delete Permanently</Text>
+                )}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -385,10 +502,104 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.md,
     alignItems: 'center',
     marginTop: spacing.md,
-    marginBottom: spacing.xxl,
   },
   logoutBtnText: {
     ...typography.button,
     color: colors.ruby,
+  },
+  deleteBtn: {
+    borderWidth: 1,
+    borderColor: colors.ruby,
+    borderRadius: borderRadius.md,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  deleteBtnText: {
+    ...typography.button,
+    color: colors.ruby,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: spacing.lg,
+  },
+  modalContent: {
+    width: '100%',
+    maxWidth: 400,
+    borderRadius: borderRadius.lg,
+    borderWidth: 1,
+    padding: spacing.xl,
+  },
+  modalTitle: {
+    ...typography.h3,
+    marginBottom: spacing.sm,
+    textAlign: 'center',
+  },
+  modalWarningText: {
+    ...typography.body,
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  modalNoticeBox: {
+    borderRadius: borderRadius.sm,
+    borderWidth: 1,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+  },
+  modalNoticeTitle: {
+    ...typography.caption,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  modalNoticeBody: {
+    ...typography.caption,
+    fontSize: 11,
+    lineHeight: 16,
+  },
+  modalErrorText: {
+    ...typography.caption,
+    marginBottom: spacing.sm,
+    textAlign: 'center',
+  },
+  inputLabel: {
+    ...typography.caption,
+    marginBottom: 6,
+  },
+  passwordInput: {
+    borderWidth: 1,
+    borderRadius: borderRadius.sm,
+    paddingHorizontal: spacing.md,
+    paddingVertical: spacing.sm,
+    fontSize: 14,
+    marginBottom: spacing.lg,
+  },
+  modalBtnRow: {
+    flexDirection: 'row',
+    gap: spacing.md,
+  },
+  modalCancelBtn: {
+    flex: 1,
+    borderWidth: 1,
+    borderRadius: borderRadius.sm,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+  },
+  modalCancelBtnText: {
+    ...typography.button,
+  },
+  modalDeleteBtn: {
+    flex: 1,
+    borderRadius: borderRadius.sm,
+    paddingVertical: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalDeleteBtnText: {
+    ...typography.button,
+    color: '#ffffff',
   },
 });

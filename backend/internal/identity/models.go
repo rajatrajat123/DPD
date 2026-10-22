@@ -396,3 +396,20 @@ type OAuthIdentity struct {
 	LinkedAt        time.Time `json:"linked_at"`
 	LastLoginAt     time.Time `json:"last_login_at"`
 }
+
+type DeleteAccountRequest struct {
+	Password        string `json:"password,omitempty"`
+	ConfirmDeletion bool   `json:"confirm_deletion"`
+	Reason          string `json:"reason,omitempty"`
+}
+
+type DeleteAccountResponse struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+type DeletionRequestExternalRequest struct {
+	Email           string `json:"email"`
+	Reason          string `json:"reason,omitempty"`
+	ConfirmDeletion bool   `json:"confirm_deletion"`
+}

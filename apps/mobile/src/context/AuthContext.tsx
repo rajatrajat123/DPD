@@ -23,6 +23,7 @@ interface AuthContextValue {
   loginWithGoogle: (payload: GoogleAuthPayload) => Promise<void>;
   register: (payload: RegisterPayload) => Promise<void>;
   logout: () => Promise<void>;
+  deleteAccount: (password?: string, reason?: string) => Promise<void>;
   refreshProfile: () => Promise<void>;
   unlockBiometric: () => Promise<boolean>;
   setBiometricLock: (enabled: boolean) => Promise<void>;
@@ -173,6 +174,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  const deleteAccount = async (password?: string, reason?: string) => {
+    setIsLoading(true);
+    try {
+      await authService.deleteAccount(password, reason);
+      await signOutGoogle();
+      chatService.setCurrentUserId(null);
+      chatService.resetUnreadState();
+      setUser(null);
+      setProfile(null);
+      setIsAgeVerified(false);
+      setOnboardingRequired(false);
+      setBiometricLocked(false);
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   const unlockBiometric = async (): Promise<boolean> => {
     const success = await privacyManager.authenticateBiometric('Unlock Aura');
     if (success) {
@@ -199,6 +217,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         loginWithGoogle,
         register,
         logout,
+        deleteAccount,
         refreshProfile,
         unlockBiometric,
         setBiometricLock,

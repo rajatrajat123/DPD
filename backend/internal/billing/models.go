@@ -21,6 +21,8 @@ var (
 	ErrInvalidReceiptData        = errors.New("valid signed store receipt_data is required for purchase verification")
 	ErrReceiptValidationFailed   = errors.New("store receipt validation failed")
 	ErrIndiaMandateNotCompliant  = errors.New("India recurring e-mandate requires verified pre-debit notification sink (BLOCKED)")
+	ErrDuplicateTransaction      = errors.New("duplicate payment transaction already processed or claimed by another user")
+	ErrPurchaseUserMismatch      = errors.New("store purchase is bound to a different user account")
 )
 
 const (
@@ -249,6 +251,7 @@ type VerifyPurchaseRequest struct {
 	PlanCode              string `json:"plan_code"`
 	ExternalTransactionID string `json:"external_transaction_id"`
 	ReceiptData           string `json:"receipt_data,omitempty"`
+	UserID                string `json:"user_id,omitempty"`
 }
 
 type SubscriptionStatusResponse struct {

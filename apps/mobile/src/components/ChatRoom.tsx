@@ -625,6 +625,27 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       }
     });
 
+    // Subscribe to message deleted events (Delete for Everyone)
+    const unsubDelete = chatWebSocket.onMessageDeleted((receipt) => {
+      if (receipt.conversation_id === conversationId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === receipt.message_id || m.client_message_id === receipt.message_id
+              ? {
+                  ...m,
+                  body: 'This message was deleted',
+                  content: 'This message was deleted',
+                  deleted_at: receipt.deleted_at,
+                  media_asset_id: undefined,
+                  media_url: undefined,
+                  message_type: 'TEXT',
+                }
+              : m
+          )
+        );
+      }
+    });
+
     // Subscribe to connection changes
     const unsubConn = chatWebSocket.onConnectionChange((status) => {
       setConnectionStatus(status);
@@ -637,6 +658,7 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
       unsubDelivery();
       unsubRead();
       unsubTyping();
+      unsubDelete();
       unsubConn();
     };
   }, [conversationId, recipientId, user?.id, loadMessages]);
@@ -1170,6 +1192,47 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     }
   };
 
+  const confirmDeleteMessage = useCallback((message: Message) => {
+    const msgId = message.id || message.client_message_id;
+    if (!msgId) return;
+
+    Alert.alert(
+      'Delete for Everyone?',
+      'This message will be deleted for everyone in this chat. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete for Everyone',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Optimistic local update
+              setMessages((prev) =>
+                prev.map((m) =>
+                  (m.id === msgId || m.client_message_id === msgId)
+                    ? {
+                        ...m,
+                        body: 'This message was deleted',
+                        content: 'This message was deleted',
+                        deleted_at: new Date().toISOString(),
+                        media_asset_id: undefined,
+                        media_url: undefined,
+                        message_type: 'TEXT',
+                      }
+                    : m
+                )
+              );
+              await chatService.deleteMessageForEveryone(conversationId, msgId);
+            } catch (err: any) {
+              Alert.alert('Error', err?.message || 'Could not delete message. Please try again.');
+            }
+          },
+        },
+      ],
+      { cancelable: true }
+    );
+  }, [conversationId]);
+
   const renderMessageItem = ({ item }: { item: Message }) => {
     const isMe =
       item.sender_user_id === user?.id ||
@@ -1178,17 +1241,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
     const timeFormatted = item.created_at
       ? new Date(item.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
       : '';
-    const textContent = item.body || item.content || '';
+    const isDeleted = Boolean(item.deleted_at);
+    const textContent = isDeleted ? 'This message was deleted' : (item.body || item.content || '');
     const isRead = Boolean(item.read_at) || item.status === 'READ';
     const isDelivered = Boolean(item.delivered_at) || item.status === 'DELIVERED';
     const isFailed = item.status === 'FAILED';
     const isPending = item.status === 'PENDING';
 
-    const isAudio = item.message_type === 'AUDIO' || item.message_type === 'VOICE_NOTE';
-    const isVideo = item.message_type === 'VIDEO';
+    const isAudio = !isDeleted && (item.message_type === 'AUDIO' || item.message_type === 'VOICE_NOTE');
+    const isVideo = !isDeleted && (item.message_type === 'VIDEO');
     const isImage =
-      item.message_type === 'IMAGE' ||
-      (Boolean(item.media_asset_id) && !isVideo && !isAudio);
+      !isDeleted &&
+      (item.message_type === 'IMAGE' || (Boolean(item.media_asset_id) && !isVideo && !isAudio));
 
     const assetInfo = item.media_asset_id ? mediaAssetUrls[item.media_asset_id] : null;
     const hasMediaError = Boolean(item.media_asset_id && mediaAssetErrors[item.media_asset_id]);
@@ -1421,7 +1485,14 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
 
           {/* Text / Caption */}
           {Boolean(textContent) && (
-            <Text style={[styles.msgText, isMe ? styles.msgTextMe : styles.msgTextThem, { color: colors.text }]}>
+            <Text
+              style={[
+                styles.msgText,
+                isMe ? styles.msgTextMe : styles.msgTextThem,
+                { color: isDeleted ? colors.textSubtle : colors.text },
+                isDeleted && { fontStyle: 'italic' },
+              ]}
+            >
               {textContent}
             </Text>
           )}
@@ -1442,6 +1513,18 @@ export const ChatRoom: React.FC<ChatRoomProps> = ({
           {/* Metadata Row */}
           <View style={styles.msgMetaRow}>
             <Text style={[styles.msgTime, { color: colors.textSubtle }]}>{timeFormatted}</Text>
+            {isMe && !isDeleted && !isPending && !isFailed && (
+              <TouchableOpacity
+                onPress={() => confirmDeleteMessage(item)}
+                accessibilityRole="button"
+                accessibilityLabel="Delete message for everyone"
+                testID="delete-message-btn"
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ marginLeft: 6 }}
+              >
+                <Text style={{ fontSize: 11, color: colors.textSubtle }}>🗑️</Text>
+              </TouchableOpacity>
+            )}
             {isMe && (
               <Text style={isRead ? [styles.readReceiptGold, { color: colors.gold }] : [styles.readReceipt, { color: colors.textSubtle }]}>
                 {isFailed ? ' ⚠️' : isPending ? ' 🕒' : isRead ? ' ✓✓' : isDelivered ? ' ✓✓' : ' ✓'}

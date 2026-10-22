@@ -3,14 +3,22 @@ package billing_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +27,8 @@ import (
 	"github.com/auradating/platform/backend/internal/discovery"
 	"github.com/auradating/platform/backend/internal/identity"
 	"github.com/stripe/stripe-go/v74"
+	"google.golang.org/api/androidpublisher/v3"
+	"google.golang.org/api/option"
 )
 
 type mockPreDebitSink struct {
@@ -497,112 +507,588 @@ func TestExplicitConsentRequired(t *testing.T) {
 	}
 }
 
-func TestStoreReceiptVerification(t *testing.T) {
-	svc, repo := setupTestBillingService(t)
+func generateTestPKI(t *testing.T) (*x509.Certificate, *ecdsa.PrivateKey, *x509.Certificate, *ecdsa.PrivateKey, *x509.CertPool) {
+	t.Helper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate root key: %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			CommonName:   "Test Apple Root CA",
+			Organization: []string{"Apple Inc."},
+		},
+		NotBefore:             time.Now().Add(-1 * time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		BasicConstraintsValid: true,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("failed to create root cert: %v", err)
+	}
+	rootCert, _ := x509.ParseCertificate(rootDER)
+
+	leafKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("failed to generate leaf key: %v", err)
+	}
+	leafTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			CommonName:   "Test App Store Signing",
+			Organization: []string{"Apple Inc."},
+		},
+		NotBefore: time.Now().Add(-1 * time.Hour),
+		NotAfter:  time.Now().Add(24 * time.Hour),
+		KeyUsage:  x509.KeyUsageDigitalSignature,
+	}
+	leafDER, err := x509.CreateCertificate(rand.Reader, leafTemplate, rootCert, &leafKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("failed to create leaf cert: %v", err)
+	}
+	leafCert, _ := x509.ParseCertificate(leafDER)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(rootCert)
+
+	return rootCert, rootKey, leafCert, leafKey, pool
+}
+
+func buildTestAppleJWS(t *testing.T, leafCert, rootCert *x509.Certificate, leafKey *ecdsa.PrivateKey, payload billing.AppleTransactionPayload) string {
+	t.Helper()
+	header := map[string]any{
+		"alg": "ES256",
+		"x5c": []string{
+			base64.StdEncoding.EncodeToString(leafCert.Raw),
+			base64.StdEncoding.EncodeToString(rootCert.Raw),
+		},
+	}
+	hBytes, _ := json.Marshal(header)
+	pBytes, _ := json.Marshal(payload)
+
+	signingInput := base64.RawURLEncoding.EncodeToString(hBytes) + "." + base64.RawURLEncoding.EncodeToString(pBytes)
+	h := sha256.Sum256([]byte(signingInput))
+	r, s, err := ecdsa.Sign(rand.Reader, leafKey, h[:])
+	if err != nil {
+		t.Fatalf("failed to sign JWS: %v", err)
+	}
+	rBytes := r.Bytes()
+	sBytes := s.Bytes()
+	sig := make([]byte, 64)
+	copy(sig[32-len(rBytes):32], rBytes)
+	copy(sig[64-len(sBytes):], sBytes)
+
+	return signingInput + "." + base64.RawURLEncoding.EncodeToString(sig)
+}
+
+func TestStoreReceiptVerification_Apple(t *testing.T) {
+	rootCert, _, leafCert, leafKey, testPool := generateTestPKI(t)
+	appleAdapter := billing.NewAppleAppStoreAdapter("apple_secret", "com.aura.dating")
+	appleAdapter.SetRootCertificates(testPool)
+
+	repo := billing.NewMemoryRepository()
+	reg := billing.NewProviderRegistry(appleAdapter)
+	svc := billing.NewService(repo, reg, nil)
 	ctx := context.Background()
-	userID := "usr_iap_1"
+	userID := "usr_apple_test"
 
 	// 1. Missing receipt data must fail with ErrInvalidReceiptData
 	_, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderAppleAppStore,
 		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_iap_1",
+		ExternalTransactionID: "",
 		ReceiptData:           "",
-	}, "corr_iap_1")
+	}, "corr_apple_1")
 	if !errors.Is(err, billing.ErrInvalidReceiptData) {
 		t.Errorf("expected ErrInvalidReceiptData for empty receipt, got %v", err)
 	}
 
-	// Invariant: Entitlement must NOT be granted when verification fails
-	hasUnlimited, _ := repo.HasEntitlement(ctx, userID, billing.EntitlementUnlimitedSwipes)
-	if hasUnlimited {
-		t.Errorf("entitlement must not be granted for unverified transaction")
+	// 2. Valid Apple JWS signed with trusted leaf cert verifies cleanly
+	validPayload := billing.AppleTransactionPayload{
+		TransactionID:         "100000099887766",
+		OriginalTransactionID: "100000099887766",
+		BundleID:              "com.aura.dating",
+		ProductID:             billing.PlanAuraPlusMonthly,
+		PurchaseDate:          time.Now().UnixMilli(),
+		ExpiresDate:           time.Now().Add(30 * 24 * time.Hour).UnixMilli(),
+		Type:                  "Auto-Renewable Subscription",
+		Environment:           "Sandbox",
+		AppAccountToken:       userID,
+	}
+	validJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, validPayload)
+
+	verified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "100000099887766",
+		ReceiptData:           validJWS,
+	}, "corr_apple_2")
+	if err != nil {
+		t.Fatalf("expected valid JWS to verify successfully: %v", err)
+	}
+	if verified.ExternalChargeID != "100000099887766" {
+		t.Errorf("expected external charge ID 100000099887766, got %s", verified.ExternalChargeID)
 	}
 
-	// 2. Apple Bundle ID mismatch must fail with ErrReceiptValidationFailed
-	badBundleReceipt := `{"bundle_id":"com.fraudulent.app","product_id":"AURA_PLUS_MONTHLY","transaction_id":"tx_1","status":"ACTIVE"}`
+	// Entitlement must be granted after successful verification
+	hasUnlimited, _ := repo.HasEntitlement(ctx, userID, billing.EntitlementUnlimitedSwipes)
+	if !hasUnlimited {
+		t.Errorf("expected UNLIMITED_SWIPES entitlement granted after verified purchase")
+	}
+
+	// 3. Tampered JWS signature must be rejected
+	parts := strings.Split(validJWS, ".")
+	tamperedPayload := `{"bundleId":"com.aura.dating","productId":"AURA_PLUS_MONTHLY","tampered":true}`
+	tamperedJWS := parts[0] + "." + base64.RawURLEncoding.EncodeToString([]byte(tamperedPayload)) + "." + parts[2]
 	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderAppleAppStore,
 		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_iap_2",
-		ReceiptData:           badBundleReceipt,
-	}, "corr_iap_2")
+		ExternalTransactionID: "tx_tampered",
+		ReceiptData:           tamperedJWS,
+	}, "corr_apple_3")
 	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
-		t.Errorf("expected ErrReceiptValidationFailed for bundle mismatch, got %v", err)
+		t.Errorf("expected ErrReceiptValidationFailed for tampered JWS signature, got %v", err)
 	}
 
-	// 3. Valid Apple receipt data matching configured bundle ID (com.aura.dating) succeeds
-	validAppleReceipt := `{"bundle_id":"com.aura.dating","product_id":"AURA_PLUS_MONTHLY","transaction_id":"tx_apple_valid","status":"ACTIVE","expires_date_ms":` + fmt.Sprintf("%d", time.Now().Add(30*24*time.Hour).UnixMilli()) + `}`
-	verifiedApple, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+	// 4. Untrusted root CA / invalid certificate chain rejected
+	_, otherKey, otherLeaf, _, _ := generateTestPKI(t)
+	untrustedJWS := buildTestAppleJWS(t, otherLeaf, rootCert, otherKey, validPayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderAppleAppStore,
 		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_apple_valid",
-		ReceiptData:           validAppleReceipt,
-	}, "corr_iap_3")
-	if err != nil {
-		t.Fatalf("expected valid Apple receipt to verify, got %v", err)
-	}
-	if verifiedApple.ExternalChargeID != "tx_apple_valid" {
-		t.Errorf("unexpected external charge id: %s", verifiedApple.ExternalChargeID)
+		ExternalTransactionID: "tx_untrusted",
+		ReceiptData:           untrustedJWS,
+	}, "corr_apple_4")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for untrusted cert chain, got %v", err)
 	}
 
-	// 4. Google Play Package Name mismatch must fail with ErrReceiptValidationFailed
-	badGoogleReceipt := `{"package_name":"com.fraudulent.app","product_id":"AURA_PLUS_MONTHLY","purchase_token":"tok_fraud","purchase_state":0}`
+	// 5. Bundle ID mismatch rejected
+	badBundlePayload := validPayload
+	badBundlePayload.TransactionID = "tx_bad_bundle"
+	badBundlePayload.BundleID = "com.fraudulent.dating"
+	badBundleJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, badBundlePayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_bad_bundle",
+		ReceiptData:           badBundleJWS,
+	}, "corr_apple_5")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for bundle ID mismatch, got %v", err)
+	}
+
+	// 6. Product ID mismatch rejected
+	badProdPayload := validPayload
+	badProdPayload.TransactionID = "tx_bad_prod"
+	badProdPayload.ProductID = "WRONG_PLAN_CODE"
+	badProdJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, badProdPayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_bad_prod",
+		ReceiptData:           badProdJWS,
+	}, "corr_apple_6")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for product ID mismatch, got %v", err)
+	}
+
+	// 7. Revoked / refunded transaction rejected
+	revokedPayload := validPayload
+	revokedPayload.TransactionID = "tx_revoked"
+	revokedPayload.RevocationDate = time.Now().Add(-1 * time.Hour).UnixMilli()
+	revokedPayload.RevocationReason = 1
+	revokedJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, revokedPayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_revoked",
+		ReceiptData:           revokedJWS,
+	}, "corr_apple_7")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for revoked transaction, got %v", err)
+	}
+
+	// 8. Expired subscription rejected
+	expiredPayload := validPayload
+	expiredPayload.TransactionID = "tx_expired"
+	expiredPayload.ExpiresDate = time.Now().Add(-2 * time.Hour).UnixMilli()
+	expiredJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, expiredPayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_expired",
+		ReceiptData:           expiredJWS,
+	}, "corr_apple_8")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for expired subscription, got %v", err)
+	}
+
+	// 9. Account mismatch (appAccountToken bound to another user) rejected
+	mismatchPayload := validPayload
+	mismatchPayload.TransactionID = "tx_mismatch"
+	mismatchPayload.AppAccountToken = "usr_different_account_999"
+	mismatchJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, mismatchPayload)
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_mismatch",
+		ReceiptData:           mismatchJWS,
+	}, "corr_apple_9")
+	if !errors.Is(err, billing.ErrPurchaseUserMismatch) {
+		t.Errorf("expected ErrPurchaseUserMismatch for account mismatch, got %v", err)
+	}
+
+	// 10. App Store Server API server-to-server HTTP query
+	serverECKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	serverPayload := validPayload
+	serverPayload.TransactionID = "tx_server_to_server_123"
+	serverJWS := buildTestAppleJWS(t, leafCert, rootCert, leafKey, serverPayload)
+
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/inApps/v1/transactions/tx_server_to_server_123") {
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"signedTransactionInfo": serverJWS,
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mockServer.Close()
+
+	appleAdapter.SetBaseURL(mockServer.URL)
+	appleAdapter.SetCredentials("KEY12345", "57246542-96fe-1a63-e053-0824d011072a", serverECKey, "sandbox")
+
+	serverVerified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_server_to_server_123",
+	}, "corr_apple_10")
+	if err != nil {
+		t.Fatalf("expected server-to-server query to verify successfully: %v", err)
+	}
+	if serverVerified.ExternalChargeID != "tx_server_to_server_123" {
+		t.Errorf("unexpected charge id from server API: %s", serverVerified.ExternalChargeID)
+	}
+}
+
+func TestStoreReceiptVerification_GooglePlay(t *testing.T) {
+	ctx := context.Background()
+	userID := "usr_google_test"
+	repo := billing.NewMemoryRepository()
+
+	var subAcknowledged bool
+	var prodConsumed bool
+	var mu sync.Mutex
+
+	mockGoogleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case strings.Contains(r.URL.Path, "/purchases/subscriptionsv2/tokens/tok_active_sub"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subscriptionState": "SUBSCRIPTION_STATE_ACTIVE",
+				"lineItems": []map[string]any{
+					{
+						"productId":               billing.PlanAuraPlusMonthly,
+						"expiryTime":              time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+						"latestSuccessfulOrderId": "GPA.1234-5678-90123",
+					},
+				},
+				"externalAccountIdentifiers": map[string]string{
+					"obfuscatedExternalAccountId": userID,
+				},
+			})
+		case strings.Contains(r.URL.Path, "/purchases/subscriptionsv2/tokens/tok_pending_sub"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subscriptionState": "SUBSCRIPTION_STATE_PENDING",
+				"lineItems": []map[string]any{
+					{
+						"productId":  billing.PlanAuraPlusMonthly,
+						"expiryTime": time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/purchases/subscriptionsv2/tokens/tok_expired_sub"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subscriptionState": "SUBSCRIPTION_STATE_EXPIRED",
+				"lineItems": []map[string]any{
+					{
+						"productId":  billing.PlanAuraPlusMonthly,
+						"expiryTime": time.Now().Add(-2 * time.Hour).Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/purchases/subscriptionsv2/tokens/tok_wrong_prod"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subscriptionState": "SUBSCRIPTION_STATE_ACTIVE",
+				"lineItems": []map[string]any{
+					{
+						"productId":  "WRONG_PRODUCT_ID",
+						"expiryTime": time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, "/purchases/subscriptionsv2/tokens/tok_mismatch_sub"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"subscriptionState": "SUBSCRIPTION_STATE_ACTIVE",
+				"lineItems": []map[string]any{
+					{
+						"productId":  billing.PlanAuraPlusMonthly,
+						"expiryTime": time.Now().Add(30 * 24 * time.Hour).Format(time.RFC3339),
+					},
+				},
+				"externalAccountIdentifiers": map[string]string{
+					"obfuscatedExternalAccountId": "usr_another_account",
+				},
+			})
+		case strings.Contains(r.URL.Path, ":acknowledge"):
+			subAcknowledged = true
+			w.WriteHeader(http.StatusNoContent)
+		case strings.Contains(r.URL.Path, "/purchases/productsv2/tokens/tok_valid_consumable"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"orderId": "GPA.9999-8888-77777",
+				"purchaseStateContext": map[string]string{
+					"purchaseState": "PURCHASED",
+				},
+				"productLineItem": []map[string]any{
+					{
+						"productId": billing.PlanBoostSingle,
+					},
+				},
+				"obfuscatedExternalAccountId": userID,
+			})
+		case strings.Contains(r.URL.Path, "/purchases/productsv2/tokens/tok_pending_consumable"):
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"purchaseStateContext": map[string]string{
+					"purchaseState": "PENDING",
+				},
+				"productLineItem": []map[string]any{
+					{
+						"productId": billing.PlanBoostSingle,
+					},
+				},
+			})
+		case strings.Contains(r.URL.Path, ":consume") || strings.Contains(r.URL.Path, "/consume"):
+			prodConsumed = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mockGoogleServer.Close()
+
+	googleSvc, err := androidpublisher.NewService(ctx,
+		option.WithEndpoint(mockGoogleServer.URL),
+		option.WithHTTPClient(mockGoogleServer.Client()),
+		option.WithoutAuthentication(),
+	)
+	if err != nil {
+		t.Fatalf("failed to create mock androidpublisher service: %v", err)
+	}
+
+	googleAdapter := billing.NewGooglePlayAdapter(`{"project_id":"aura-dev"}`, "com.aura.dating")
+	googleAdapter.SetService(googleSvc)
+
+	reg := billing.NewProviderRegistry(googleAdapter)
+	svc := billing.NewService(repo, reg, nil)
+
+	// 1. Valid subscription purchase verified via purchases.subscriptionsv2.get
+	verified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "GPA.1234-5678-90123",
+		ReceiptData:           "tok_active_sub",
+	}, "corr_gplay_1")
+	if err != nil {
+		t.Fatalf("expected valid Google Play subscription to verify: %v", err)
+	}
+	if verified.ExternalChargeID != "GPA.1234-5678-90123" {
+		t.Errorf("unexpected charge ID: %s", verified.ExternalChargeID)
+	}
+
+	mu.Lock()
+	if !subAcknowledged {
+		t.Errorf("expected subscription to be durably acknowledged via Google Play API")
+	}
+	mu.Unlock()
+
+	// 2. Pending purchase state rejected
 	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderGooglePlay,
 		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_gplay_bad",
-		ReceiptData:           badGoogleReceipt,
-	}, "corr_iap_4")
+		ExternalTransactionID: "tx_pending",
+		ReceiptData:           "tok_pending_sub",
+	}, "corr_gplay_2")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for pending subscription, got %v", err)
+	}
+
+	// 3. Expired purchase state rejected
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_expired",
+		ReceiptData:           "tok_expired_sub",
+	}, "corr_gplay_3")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for expired subscription, got %v", err)
+	}
+
+	// 4. Product ID mismatch rejected
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_wrong_prod",
+		ReceiptData:           "tok_wrong_prod",
+	}, "corr_gplay_4")
+	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
+		t.Errorf("expected ErrReceiptValidationFailed for product mismatch, got %v", err)
+	}
+
+	// 5. Package name mismatch in receipt JSON rejected
+	badPkgReceipt := `{"packageName":"com.other.app","purchaseToken":"tok_active_sub"}`
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "tx_bad_pkg",
+		ReceiptData:           badPkgReceipt,
+	}, "corr_gplay_5")
 	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
 		t.Errorf("expected ErrReceiptValidationFailed for package mismatch, got %v", err)
 	}
 
-	// 5. Valid Google Play purchase matching configured package name (com.aura.dating) succeeds
-	validGoogleReceipt := `{"package_name":"com.aura.dating","product_id":"AURA_PLUS_MONTHLY","purchase_token":"tok_valid_gplay","purchase_state":0}`
-	verifiedGoogle, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+	// 6. Account mismatch rejected
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderGooglePlay,
 		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_gplay_valid",
-		ReceiptData:           validGoogleReceipt,
-	}, "corr_iap_5")
+		ExternalTransactionID: "tx_mismatch",
+		ReceiptData:           "tok_mismatch_sub",
+	}, "corr_gplay_6")
+	if !errors.Is(err, billing.ErrPurchaseUserMismatch) {
+		t.Errorf("expected ErrPurchaseUserMismatch for account mismatch, got %v", err)
+	}
+
+	// 7. Consumable purchase (BOOST_SINGLE) verified via purchases.productsv2.getproductpurchasev2 and consumed
+	initialCredits, _ := repo.GetBoostCredits(ctx, userID)
+	consumableVerified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanBoostSingle,
+		ExternalTransactionID: "GPA.9999-8888-77777",
+		ReceiptData:           "tok_valid_consumable",
+	}, "corr_gplay_7")
 	if err != nil {
-		t.Fatalf("expected valid Google Play purchase to verify, got %v", err)
+		t.Fatalf("expected valid consumable purchase to verify: %v", err)
 	}
-	if verifiedGoogle.ExternalChargeID != "tx_gplay_valid" {
-		t.Errorf("unexpected external charge id: %s", verifiedGoogle.ExternalChargeID)
+	if consumableVerified.TransactionType != billing.TxBoostPurchase {
+		t.Errorf("expected BOOST_PURCHASE transaction type, got %s", consumableVerified.TransactionType)
 	}
 
-	// 6. Dynamic Rebrand verification: changing configured identifiers verifies new name and strictly rejects old
-	rebrandedApple := billing.NewAppleAppStoreAdapter("apple_secret", "com.rebranded.dating")
-	rebrandedGoogle := billing.NewGooglePlayAdapter(`{"project_id":"rebrand-dev"}`, "com.rebranded.dating")
-	rebrandedReg := billing.NewProviderRegistry(billing.NewStripeAdapter("sk_test", "whsec_test"), rebrandedApple, rebrandedGoogle)
-	rebrandedSvc := billing.NewService(repo, rebrandedReg, nil)
+	// Boost credit granted
+	afterCredits, _ := repo.GetBoostCredits(ctx, userID)
+	if afterCredits != initialCredits+1 {
+		t.Errorf("expected boost credit incremented by 1 (initial=%d, after=%d)", initialCredits, afterCredits)
+	}
 
-	// Old identifier now fails
-	_, err = rebrandedSvc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
-		Provider:              billing.ProviderAppleAppStore,
-		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_old_aura",
-		ReceiptData:           validAppleReceipt, // contains com.aura.dating
-	}, "corr_rebrand_1")
+	mu.Lock()
+	if !prodConsumed {
+		t.Errorf("expected consumable purchase to be consumed via Google Play API")
+	}
+	mu.Unlock()
+
+	// 8. Pending consumable purchase rejected
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderGooglePlay,
+		PlanCode:              billing.PlanBoostSingle,
+		ExternalTransactionID: "tx_pending_cons",
+		ReceiptData:           "tok_pending_consumable",
+	}, "corr_gplay_8")
 	if !errors.Is(err, billing.ErrReceiptValidationFailed) {
-		t.Errorf("expected ErrReceiptValidationFailed when verifying old identifier against rebranded adapter, got %v", err)
+		t.Errorf("expected ErrReceiptValidationFailed for pending consumable, got %v", err)
+	}
+}
+
+func TestStoreReceiptVerification_ReplayProtection(t *testing.T) {
+	rootCert, _, leafCert, leafKey, testPool := generateTestPKI(t)
+	appleAdapter := billing.NewAppleAppStoreAdapter("apple_secret", "com.aura.dating")
+	appleAdapter.SetRootCertificates(testPool)
+
+	repo := billing.NewMemoryRepository()
+	reg := billing.NewProviderRegistry(appleAdapter)
+	svc := billing.NewService(repo, reg, nil)
+	ctx := context.Background()
+
+	userA := "usr_alice"
+	userB := "usr_bob"
+
+	payload := billing.AppleTransactionPayload{
+		TransactionID:         "tx_unique_charge_555",
+		OriginalTransactionID: "tx_unique_charge_555",
+		BundleID:              "com.aura.dating",
+		ProductID:             billing.PlanBoostSingle,
+		PurchaseDate:          time.Now().UnixMilli(),
+		Type:                  "Consumable",
+		Environment:           "Sandbox",
+	}
+	jws := buildTestAppleJWS(t, leafCert, rootCert, leafKey, payload)
+
+	// 1. Initial purchase by userA succeeds and grants 1 boost credit
+	_, err := svc.VerifyPurchase(ctx, userA, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanBoostSingle,
+		ExternalTransactionID: "tx_unique_charge_555",
+		ReceiptData:           jws,
+	}, "corr_replay_1")
+	if err != nil {
+		t.Fatalf("initial purchase failed: %v", err)
 	}
 
-	// Rebranded receipt succeeds
-	rebrandedReceipt := `{"bundle_id":"com.rebranded.dating","product_id":"AURA_PLUS_MONTHLY","transaction_id":"tx_rebrand_ok","status":"ACTIVE"}`
-	verifiedRebrand, err := rebrandedSvc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
-		Provider:              billing.ProviderAppleAppStore,
-		PlanCode:              billing.PlanAuraPlusMonthly,
-		ExternalTransactionID: "tx_rebrand_ok",
-		ReceiptData:           rebrandedReceipt,
-	}, "corr_rebrand_2")
-	if err != nil {
-		t.Fatalf("expected rebranded receipt to verify cleanly, got %v", err)
+	creditsAfterFirst, _ := repo.GetBoostCredits(ctx, userA)
+	if creditsAfterFirst != 1 {
+		t.Fatalf("expected exactly 1 boost credit granted, got %d", creditsAfterFirst)
 	}
-	if verifiedRebrand.ExternalChargeID != "tx_rebrand_ok" {
-		t.Errorf("unexpected charge ID: %s", verifiedRebrand.ExternalChargeID)
+
+	// 2. Replay attempt by SAME user returns existing verified transaction idempotently WITHOUT granting duplicate credit
+	_, err = svc.VerifyPurchase(ctx, userA, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanBoostSingle,
+		ExternalTransactionID: "tx_unique_charge_555",
+		ReceiptData:           jws,
+	}, "corr_replay_2")
+	if err != nil {
+		t.Fatalf("expected idempotent success for same user replay, got err=%v", err)
+	}
+
+	creditsAfterReplay, _ := repo.GetBoostCredits(ctx, userA)
+	if creditsAfterReplay != 1 {
+		t.Errorf("replay granted duplicate credit! expected 1, got %d", creditsAfterReplay)
+	}
+
+	// 3. Replay attempt by DIFFERENT user (userB) must be REJECTED with ErrDuplicateTransaction
+	_, err = svc.VerifyPurchase(ctx, userB, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderAppleAppStore,
+		PlanCode:              billing.PlanBoostSingle,
+		ExternalTransactionID: "tx_unique_charge_555",
+		ReceiptData:           jws,
+	}, "corr_replay_3")
+	if !errors.Is(err, billing.ErrDuplicateTransaction) {
+		t.Errorf("expected ErrDuplicateTransaction when different user attempts replay, got %v", err)
+	}
+
+	userBCredits, _ := repo.GetBoostCredits(ctx, userB)
+	if userBCredits != 0 {
+		t.Errorf("attacker userB was granted credit! expected 0, got %d", userBCredits)
 	}
 }
 

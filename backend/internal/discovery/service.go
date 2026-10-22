@@ -1021,6 +1021,37 @@ func (s *Service) UnlockDiscoveryMessageAdBonus(ctx context.Context, userID stri
 	return s.repo.UnlockDiscoveryMessageAdBonus(ctx, userID)
 }
 
+// ClaimSwipeAdReward verifies the rewarded ad completion and grants 5 bonus likes for photo-verified profiles.
+func (s *Service) ClaimSwipeAdReward(ctx context.Context, userID, rawQuery, transactionID string) (*SwipeAllowanceDetail, error) {
+	rawQuery = strings.TrimSpace(rawQuery)
+	transactionID = strings.TrimSpace(transactionID)
+
+	var txID string
+	if rawQuery != "" {
+		reward, err := s.verifier.VerifyCallback(rawQuery)
+		if err != nil {
+			return nil, err
+		}
+		if reward.UserID != "" && reward.UserID != userID {
+			return nil, errors.New("reward user_id does not match authenticated user")
+		}
+		txID = reward.TransactionID
+	} else if transactionID != "" {
+		if !s.verifier.isTestSignatureAllowed() {
+			return nil, errors.New("raw_query cryptographic SSV callback is required in production; client transaction ID not accepted")
+		}
+		txID = transactionID
+	} else {
+		return nil, errors.New("ad verification required: valid cryptographic SSV callback or test transaction is required")
+	}
+
+	if err := s.repo.RecordAdReward(ctx, userID, txID, 5); err != nil {
+		return nil, err
+	}
+
+	return s.repo.GetSwipeAllowanceDetail(ctx, userID)
+}
+
 func (s *Service) ListMessageRequests(ctx context.Context, userID, folder string) ([]MessageRequest, error) {
 	return s.repo.ListMessageRequests(ctx, userID, folder)
 }

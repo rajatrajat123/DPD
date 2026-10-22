@@ -15,6 +15,10 @@ type PreDebitNotificationSink interface {
 	DeliverPreDebitNotice(ctx context.Context, notice PreDebitNotice) error
 }
 
+type PurchaseAcknowledger interface {
+	AcknowledgePurchase(ctx context.Context, req VerifyPurchaseRequest, verified *VerifiedTransaction) error
+}
+
 type Service struct {
 	repo             Repository
 	providers        *ProviderRegistry
@@ -106,9 +110,36 @@ func (s *Service) VerifyPurchase(
 		return nil, err
 	}
 
+	if req.UserID == "" {
+		req.UserID = userID
+	}
+
 	verified, err := adapter.VerifyPurchase(ctx, req, *product)
 	if err != nil {
 		return nil, fmt.Errorf("purchase verification failed: %w", err)
+	}
+
+	// Persistent Idempotency & Replay Protection:
+	// Verify that the external transaction has not already been claimed or granted.
+	if verified.ExternalChargeID != "" {
+		existingTx, err := s.repo.GetTransactionByExternalID(ctx, adapter.Name(), verified.ExternalChargeID)
+		if err == nil && existingTx != nil {
+			if existingTx.UserID != userID {
+				s.logger.Warn("purchase_replay_attempt_detected",
+					slog.String("existing_user_id", existingTx.UserID),
+					slog.String("request_user_id", userID),
+					slog.String("provider", adapter.Name()),
+					slog.String("charge_id", verified.ExternalChargeID),
+				)
+				return nil, fmt.Errorf("%w: transaction %s already claimed by another user", ErrDuplicateTransaction, verified.ExternalChargeID)
+			}
+			s.logger.Info("purchase_idempotent_duplicate_submission",
+				slog.String("user_id", userID),
+				slog.String("charge_id", verified.ExternalChargeID),
+			)
+			// Return verified transaction idempotently without granting duplicate entitlements/boosts
+			return verified, nil
+		}
 	}
 
 	// Record payment transaction
@@ -208,6 +239,18 @@ func (s *Service) VerifyPurchase(
 	)
 	if err == nil {
 		_ = s.repo.PublishOutboxEvent(ctx, txEnv)
+	}
+
+	// Acknowledge or consume eligible purchases only after the backend has durably processed the transaction
+	if ack, ok := adapter.(PurchaseAcknowledger); ok {
+		if ackErr := ack.AcknowledgePurchase(ctx, req, verified); ackErr != nil {
+			s.logger.Warn("purchase_acknowledgement_warning",
+				slog.String("error", ackErr.Error()),
+				slog.String("user_id", userID),
+				slog.String("provider", adapter.Name()),
+				slog.String("charge_id", verified.ExternalChargeID),
+			)
+		}
 	}
 
 	return verified, nil

@@ -31,6 +31,8 @@ var (
 	ErrTransactionalEmailUnconfigured = errors.New("transactional email provider unconfigured: delivery blocked in production/staging")
 	ErrOnboardingRequired             = errors.New("profile onboarding is required before this account can be used")
 	ErrBirthdateImmutable             = errors.New("birthdate cannot be changed once the profile exists")
+	ErrDeleteConfirmationRequired     = errors.New("explicit confirmation is required to delete account")
+	ErrAccountAlreadyDeleted          = errors.New("account is already deleted")
 )
 
 // ValidatePasswordPolicy verifies that a password satisfies Aura's security policy:
@@ -1530,4 +1532,79 @@ func (s *Service) AdminResetPassword(ctx context.Context, actorID string, target
 		}
 	}
 	return reset, nil
+}
+
+// DeleteAccount permanently deletes/anonymizes user data, revokes sessions, and removes discovery data.
+func (s *Service) DeleteAccount(ctx context.Context, userID, password string, confirmDeletion bool) error {
+	if !confirmDeletion {
+		return ErrDeleteConfirmationRequired
+	}
+
+	user, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if user.Status == StatusDeleted {
+		return ErrAccountAlreadyDeleted
+	}
+
+	// If user has a password set, require password verification
+	if user.PasswordHash != "" {
+		if strings.TrimSpace(password) == "" {
+			return ErrInvalidCredentials
+		}
+		valid, err := VerifyPassword(password, user.PasswordHash)
+		if err != nil || !valid {
+			return ErrInvalidCredentials
+		}
+	}
+
+	// 1. Revoke all user sessions
+	_ = s.repo.RevokeAllUserSessions(ctx, userID)
+
+	// 2. Cascade delete & anonymize user data
+	if err := s.repo.DeleteAccountData(ctx, userID); err != nil {
+		return fmt.Errorf("deleting account data: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("user account permanently deleted and anonymized", slog.String("user_id", userID))
+	}
+	return nil
+}
+
+// RequestAccountDeletionWeb processes an external deletion request from Google Play compliance web form.
+func (s *Service) RequestAccountDeletionWeb(ctx context.Context, email, reason string, confirm bool) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return errors.New("email is required")
+	}
+	if !confirm {
+		return ErrDeleteConfirmationRequired
+	}
+
+	user, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			// Fail silently to avoid user enumeration
+			return nil
+		}
+		return err
+	}
+	if user.Status == StatusDeleted {
+		return nil
+	}
+
+	_ = s.repo.RevokeAllUserSessions(ctx, user.ID)
+	if err := s.repo.DeleteAccountData(ctx, user.ID); err != nil {
+		return fmt.Errorf("deleting account data: %w", err)
+	}
+
+	if s.logger != nil {
+		s.logger.Info("external account deletion request processed",
+			slog.String("user_id", user.ID),
+			slog.String("reason", reason),
+		)
+	}
+	return nil
 }

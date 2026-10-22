@@ -499,6 +499,47 @@ export default function DiscoveryScreen() {
     }
   };
 
+  const claimBonusReward = async (transactionId?: string, fallbackAmount: number = 5) => {
+    try {
+      const updated = await discoveryService.claimSwipeAdReward(transactionId);
+      setAllowance(updated);
+    } catch {
+      setAllowance((prev) =>
+        prev
+          ? {
+              ...prev,
+              remainingLikes: prev.remainingLikes + fallbackAmount,
+              remainingBonusLikes: (prev.remainingBonusLikes || 0) + fallbackAmount,
+            }
+          : {
+              remainingLikes: fallbackAmount,
+              remainingBonusLikes: fallbackAmount,
+              isUnlimited: false,
+              dailyQuota: 15,
+            }
+      );
+    }
+  };
+
+  const handleRewardedAdBreak = async () => {
+    const userId = profile?.id || 'aura_user';
+    try {
+      const result = await admobService.showRewardedAd(userId, 'swipe_cadence_reward');
+      if (result.rewarded) {
+        await claimBonusReward(result.transactionId, result.rewardAmount >= 5 ? result.rewardAmount : 5);
+        await adBreakManager.onAdCompleted();
+        Alert.alert(
+          'Bonus Likes Granted!',
+          'You completed 15 swipes and earned +5 bonus likes for photo-verified profiles!'
+        );
+      } else {
+        adBreakManager.onAdFailed();
+      }
+    } catch {
+      adBreakManager.onAdFailed();
+    }
+  };
+
   const handleSwipe = async (direction: 'LIKE' | 'PASS' | 'SUPER_SPARK', introNote?: string) => {
     Keyboard.dismiss();
     if (isSwipingRef.current) return;
@@ -542,20 +583,12 @@ export default function DiscoveryScreen() {
       );
     }
 
-    // Trigger full-screen interstitial ad break after every 15 unique browsed profiles for free users
+    // Trigger rewarded ad break after 15 unique browsed profiles for free users
     const isFreeUser = !allowance || !allowance.isUnlimited;
     if (isFreeUser && isGoogleMobileAdsAvailable()) {
       const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
       if (shouldTriggerBreak) {
-        admobService.showInterstitialAd().then((completed) => {
-          if (completed) {
-            adBreakManager.onAdCompleted();
-          } else {
-            adBreakManager.onAdFailed();
-          }
-        }).catch(() => {
-          adBreakManager.onAdFailed();
-        });
+        handleRewardedAdBreak();
       }
     }
 
@@ -702,18 +735,7 @@ export default function DiscoveryScreen() {
     if (isFreeUser && isGoogleMobileAdsAvailable()) {
       const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
       if (shouldTriggerBreak) {
-        admobService
-          .showInterstitialAd()
-          .then((completed) => {
-            if (completed) {
-              adBreakManager.onAdCompleted();
-            } else {
-              adBreakManager.onAdFailed();
-            }
-          })
-          .catch(() => {
-            adBreakManager.onAdFailed();
-          });
+        handleRewardedAdBreak();
       }
     }
 
@@ -1166,17 +1188,9 @@ export default function DiscoveryScreen() {
         visible={showQuotaModal}
         userId={profile?.id || 'aura_user'}
         onClose={() => setShowQuotaModal(false)}
-        onRewardGranted={async (bonusAmount) => {
-          try {
-            const updated = await admobService.getSwipeAllowance();
-            setAllowance(updated);
-          } catch {
-            setAllowance((prev) =>
-              prev
-                ? { ...prev, remainingLikes: prev.remainingLikes + (bonusAmount || 5) }
-                : { remainingLikes: bonusAmount || 5, isUnlimited: false, dailyQuota: 15 }
-            );
-          }
+        onRewardGranted={async (bonusAmount, txId) => {
+          await claimBonusReward(txId, bonusAmount || 5);
+          await adBreakManager.onAdCompleted();
           Alert.alert(
             'Bonus Likes Granted!',
             `You earned +${bonusAmount || 5} likes for photo-verified profiles from watching a sponsored video.`

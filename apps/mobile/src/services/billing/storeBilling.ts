@@ -230,8 +230,8 @@ export const storeBilling = {
         return { success: false, statusMessage: 'User cancelled or purchase failed.' };
       }
 
-      const receipt = purchase.transactionReceipt || '';
-      const txId = purchase.transactionId || `tx_${Date.now()}`;
+      const receipt = (purchase as any).purchaseToken || purchase.transactionReceipt || '';
+      const txId = purchase.transactionId || (purchase as any).orderId || `tx_${Date.now()}`;
 
       // Server-side verification with authoritative Go backend
       const verifyResult = await this.verifyStorePurchase(planCode, txId, receipt);
@@ -271,8 +271,8 @@ export const storeBilling = {
         return { success: false, statusMessage: 'User cancelled or purchase failed.' };
       }
 
-      const receipt = purchase.transactionReceipt || '';
-      const txId = purchase.transactionId || `tx_${Date.now()}`;
+      const receipt = (purchase as any).purchaseToken || purchase.transactionReceipt || '';
+      const txId = purchase.transactionId || (purchase as any).orderId || `tx_${Date.now()}`;
 
       const verifyResult = await this.verifyStorePurchase(planCode, txId, receipt);
 

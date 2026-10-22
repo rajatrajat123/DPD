@@ -36,6 +36,8 @@ type Repository interface {
 	DeclineMessageRequest(ctx context.Context, requestID, recipientID string) error
 	BlockMessageRequest(ctx context.Context, requestID, recipientID string) error
 	CanAccessMediaAsset(ctx context.Context, assetID, userID string) (bool, error)
+	GetMessage(ctx context.Context, messageID string) (*Message, error)
+	DeleteMessageForEveryone(ctx context.Context, messageID, senderUserID string) (*Message, error)
 }
 
 // -----------------------------------------------------------------------------
@@ -367,7 +369,6 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 			SELECT id, conversation_id, sender_user_id, client_message_id, body, message_type, media_asset_id, delivered_at, read_at, deleted_at, created_at
 			FROM messages
 			WHERE conversation_id = $1
-			  AND deleted_at IS NULL
 			  AND (
 				created_at < (SELECT created_at FROM messages WHERE id = $2)
 				OR (created_at = (SELECT created_at FROM messages WHERE id = $2) AND id < $2)
@@ -380,7 +381,7 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 		query := `
 			SELECT id, conversation_id, sender_user_id, client_message_id, body, message_type, media_asset_id, delivered_at, read_at, deleted_at, created_at
 			FROM messages
-			WHERE conversation_id = $1 AND deleted_at IS NULL
+			WHERE conversation_id = $1
 			ORDER BY created_at DESC, id DESC
 			LIMIT $2
 		`
@@ -409,6 +410,11 @@ func (r *PostgresRepository) ListMessages(ctx context.Context, conversationID st
 			&m.CreatedAt,
 		); err != nil {
 			return nil, "", false, fmt.Errorf("failed to scan message: %w", err)
+		}
+		if m.DeletedAt != nil {
+			m.Body = "This message was deleted"
+			m.MediaAssetID = nil
+			m.MessageType = MessageTypeText
 		}
 		msgs = append(msgs, &m)
 	}
@@ -779,6 +785,83 @@ func (r *PostgresRepository) CanAccessMediaAsset(ctx context.Context, assetID, u
 	return exists, nil
 }
 
+func (r *PostgresRepository) GetMessage(ctx context.Context, messageID string) (*Message, error) {
+	query := `
+		SELECT id, conversation_id, sender_user_id, client_message_id, body, message_type, media_asset_id, delivered_at, read_at, deleted_at, created_at
+		FROM messages
+		WHERE id = $1
+	`
+	var m Message
+	err := r.pool.QueryRow(ctx, query, messageID).Scan(
+		&m.ID,
+		&m.ConversationID,
+		&m.SenderUserID,
+		&m.ClientMessageID,
+		&m.Body,
+		&m.MessageType,
+		&m.MediaAssetID,
+		&m.DeliveredAt,
+		&m.ReadAt,
+		&m.DeletedAt,
+		&m.CreatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrMessageNotFound
+		}
+		return nil, fmt.Errorf("failed to get message: %w", err)
+	}
+	if m.DeletedAt != nil {
+		m.Body = "This message was deleted"
+		m.MediaAssetID = nil
+		m.MessageType = MessageTypeText
+	}
+	return &m, nil
+}
+
+func (r *PostgresRepository) DeleteMessageForEveryone(ctx context.Context, messageID, senderUserID string) (*Message, error) {
+	existing, err := r.GetMessage(ctx, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if existing.SenderUserID != senderUserID {
+		return nil, ErrUnauthorizedDelete
+	}
+	if existing.DeletedAt != nil {
+		return existing, nil
+	}
+
+	query := `
+		UPDATE messages
+		SET deleted_at = NOW(),
+		    body = '',
+		    media_asset_id = NULL
+		WHERE id = $1 AND sender_user_id = $2
+		RETURNING id, conversation_id, sender_user_id, client_message_id, body, message_type, media_asset_id, delivered_at, read_at, deleted_at, created_at
+	`
+	var m Message
+	err = r.pool.QueryRow(ctx, query, messageID, senderUserID).Scan(
+		&m.ID,
+		&m.ConversationID,
+		&m.SenderUserID,
+		&m.ClientMessageID,
+		&m.Body,
+		&m.MessageType,
+		&m.MediaAssetID,
+		&m.DeliveredAt,
+		&m.ReadAt,
+		&m.DeletedAt,
+		&m.CreatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to delete message: %w", err)
+	}
+	m.Body = "This message was deleted"
+	m.MediaAssetID = nil
+	m.MessageType = MessageTypeText
+	return &m, nil
+}
+
 // -----------------------------------------------------------------------------
 // MemoryRepository
 // -----------------------------------------------------------------------------
@@ -1079,8 +1162,68 @@ func (m *MemoryRepository) ListMessages(ctx context.Context, conversationID stri
 	}
 
 	res := make([]*Message, len(slice))
-	copy(res, slice)
+	for i, orig := range slice {
+		cp := *orig
+		if cp.DeletedAt != nil {
+			cp.Body = "This message was deleted"
+			cp.MediaAssetID = nil
+			cp.MessageType = MessageTypeText
+		}
+		res[i] = &cp
+	}
 	return res, nextCursor, hasMore, nil
+}
+
+func (m *MemoryRepository) GetMessage(ctx context.Context, messageID string) (*Message, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, convMsgs := range m.messages {
+		for _, msg := range convMsgs {
+			if msg.ID == messageID {
+				cp := *msg
+				if cp.DeletedAt != nil {
+					cp.Body = "This message was deleted"
+					cp.MediaAssetID = nil
+					cp.MessageType = MessageTypeText
+				}
+				return &cp, nil
+			}
+		}
+	}
+	return nil, ErrMessageNotFound
+}
+
+func (m *MemoryRepository) DeleteMessageForEveryone(ctx context.Context, messageID, senderUserID string) (*Message, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, convMsgs := range m.messages {
+		for _, msg := range convMsgs {
+			if msg.ID == messageID {
+				if msg.SenderUserID != senderUserID {
+					return nil, ErrUnauthorizedDelete
+				}
+				if msg.DeletedAt != nil {
+					cp := *msg
+					cp.Body = "This message was deleted"
+					cp.MediaAssetID = nil
+					cp.MessageType = MessageTypeText
+					return &cp, nil
+				}
+				now := time.Now().UTC()
+				msg.DeletedAt = &now
+				msg.Body = ""
+				msg.MediaAssetID = nil
+				cp := *msg
+				cp.Body = "This message was deleted"
+				cp.MediaAssetID = nil
+				cp.MessageType = MessageTypeText
+				return &cp, nil
+			}
+		}
+	}
+	return nil, ErrMessageNotFound
 }
 
 func (m *MemoryRepository) MarkMessagesRead(ctx context.Context, conversationID, readerUserID string) (int, error) {

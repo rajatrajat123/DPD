@@ -297,6 +297,78 @@ func (s *Service) RegisterPushToken(ctx context.Context, userID, token, platform
 	return s.notif.RegisterPushToken(ctx, userID, token, platform, deviceID)
 }
 
+// DeleteMessageForEveryone allows the sender of a message to delete it for all conversation participants.
+func (s *Service) DeleteMessageForEveryone(ctx context.Context, senderUserID, conversationID, messageID string) (*DeleteMessageResponse, error) {
+	senderUserID = strings.TrimSpace(senderUserID)
+	conversationID = strings.TrimSpace(conversationID)
+	messageID = strings.TrimSpace(messageID)
+
+	if senderUserID == "" || conversationID == "" || messageID == "" {
+		return nil, ErrMessageNotFound
+	}
+
+	// 1. Verify conversation membership & match eligibility
+	conv, err := s.repo.GetConversation(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	if !conv.IsParticipant(senderUserID) {
+		return nil, ErrUnauthorizedParticipant
+	}
+
+	eligible, err := s.repo.CheckActiveMatchEligibility(ctx, conversationID, senderUserID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check match eligibility: %w", err)
+	}
+	if !eligible {
+		return nil, ErrMatchInactive
+	}
+
+	// 2. Fetch message and verify author
+	msg, err := s.repo.GetMessage(ctx, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if msg.ConversationID != conversationID {
+		return nil, ErrMessageNotFound
+	}
+	if msg.SenderUserID != senderUserID {
+		return nil, ErrUnauthorizedDelete
+	}
+
+	// 3. Delete message in repository (idempotent)
+	deletedMsg, err := s.repo.DeleteMessageForEveryone(ctx, messageID, senderUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 4. Invalidate associated media if present
+	if msg.MediaAssetID != nil && s.mediaSvc != nil {
+		_ = s.mediaSvc.DeleteAsset(ctx, *msg.MediaAssetID, senderUserID)
+	}
+
+	// 5. Broadcast EventMessageDeleted to both participants via WebSocket
+	recipientID := conv.OtherParticipantID(senderUserID)
+	deletePayload := map[string]any{
+		"conversation_id": conversationID,
+		"message_id":      messageID,
+		"sender_user_id":  senderUserID,
+		"deleted_at":      deletedMsg.DeletedAt,
+	}
+	deleteEvent, _ := NewWSEvent(EventMessageDeleted, deletePayload)
+	if deleteEvent != nil {
+		s.hub.DeliverToUser(senderUserID, deleteEvent)
+		s.hub.DeliverToUser(recipientID, deleteEvent)
+	}
+
+	return &DeleteMessageResponse{
+		Success:        true,
+		MessageID:      messageID,
+		ConversationID: conversationID,
+		DeletedAt:      deletedMsg.DeletedAt,
+	}, nil
+}
+
 // handleClientWSAction processes inbound WebSocket frames from an authenticated connection.
 func (s *Service) handleClientWSAction(client *Client, action WSClientMessage) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -346,6 +418,9 @@ func (s *Service) handleClientWSAction(client *Client, action WSClientMessage) {
 
 	case ActionMessageRead:
 		_ = s.MarkRead(ctx, action.ConversationID, client.userID)
+
+	case ActionMessageDelete:
+		_, _ = s.DeleteMessageForEveryone(ctx, client.userID, action.ConversationID, action.MessageID)
 	}
 }
 

@@ -968,3 +968,83 @@ func (h *Handler) AdminSupportResetPassword(w http.ResponseWriter, r *http.Reque
 		"message":    "Password reset link generated and dispatched to member email",
 	})
 }
+
+// DeleteAccount handles POST /api/v1/auth/delete-account (authenticated).
+func (h *Handler) DeleteAccount(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	var req DeleteAccountRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Invalid request body"))
+		return
+	}
+
+	if err := h.svc.DeleteAccount(r.Context(), authUser.ID, req.Password, req.ConfirmDeletion); err != nil {
+		switch {
+		case errors.Is(err, ErrDeleteConfirmationRequired):
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Explicit confirmation required to permanently delete account"))
+		case errors.Is(err, ErrInvalidCredentials):
+			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Incorrect password"))
+		case errors.Is(err, ErrAccountAlreadyDeleted):
+			apperror.WriteError(w, reqID, apperror.New(http.StatusGone, "ACCOUNT_ALREADY_DELETED", "Account is already deleted"))
+		default:
+			apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
+		}
+		return
+	}
+
+	// Clear session cookie if present
+	http.SetCookie(w, &http.Cookie{
+		Name:     "aura_session",
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+
+	apperror.WriteJSON(w, http.StatusOK, DeleteAccountResponse{
+		Success: true,
+		Message: "Your account and associated personal data have been permanently deleted.",
+	})
+}
+
+// RequestDeletionWeb handles POST /api/v1/auth/deletion-request (public web endpoint for Google Play compliance).
+func (h *Handler) RequestDeletionWeb(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	var req DeletionRequestExternalRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Invalid request body"))
+		return
+	}
+
+	if err := h.svc.RequestAccountDeletionWeb(r.Context(), req.Email, req.Reason, req.ConfirmDeletion); err != nil {
+		if errors.Is(err, ErrDeleteConfirmationRequired) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Explicit confirmation required to delete account"))
+			return
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, DeleteAccountResponse{
+		Success: true,
+		Message: "Deletion request received and processed successfully.",
+	})
+}

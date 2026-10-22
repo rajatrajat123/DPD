@@ -144,6 +144,21 @@ func (h *Handler) ConversationMessages(w http.ResponseWriter, r *http.Request) {
 
 	// Sub-action: /messages
 	if len(parts) > 1 && parts[1] == "messages" {
+		if len(parts) > 2 && parts[2] != "" {
+			messageID := parts[2]
+			if r.Method == http.MethodDelete {
+				resp, err := h.svc.DeleteMessageForEveryone(r.Context(), authUser.ID, convID, messageID)
+				if err != nil {
+					h.handleError(w, reqID, err)
+					return
+				}
+				apperror.WriteJSON(w, http.StatusOK, resp)
+				return
+			}
+			apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+			return
+		}
+
 		switch r.Method {
 		case http.MethodGet:
 			limit := 50
@@ -217,6 +232,10 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 	switch {
 	case errors.Is(err, ErrConversationNotFound), errors.Is(err, discovery.ErrMatchNotFound):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Conversation or match not found"))
+	case errors.Is(err, ErrMessageNotFound):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Message not found"))
+	case errors.Is(err, ErrUnauthorizedDelete):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Cannot delete message: only the sender may delete for everyone"))
 	case errors.Is(err, ErrUnauthorizedParticipant):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Access to conversation denied"))
 	case errors.Is(err, ErrMatchInactive):

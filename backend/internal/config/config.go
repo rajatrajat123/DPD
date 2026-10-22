@@ -52,6 +52,11 @@ type Config struct {
 	StripeWebhookSecret       string
 	AppleSharedSecret         string
 	AppleBundleID             string
+	AppleKeyID                string
+	AppleIssuerID             string
+	ApplePrivateKey           string
+	AppleAppAppleID           string
+	AppleEnvironment          string
 	GooglePlayCredentialsJSON string
 	GooglePlayPackageName     string
 	GoogleOAuthAudiences      []string
@@ -171,6 +176,11 @@ func Load(getenv func(string) string) (*Config, error) {
 		StripeWebhookSecret:       getString(getenv, "STRIPE_WEBHOOK_SECRET", "whsec_test_placeholder"),
 		AppleSharedSecret:         getString(getenv, "APPLE_SHARED_SECRET", "apple_secret_placeholder"),
 		AppleBundleID:             getString(getenv, "APPLE_BUNDLE_ID", defaultBundleID),
+		AppleKeyID:                getString(getenv, "APPLE_KEY_ID", getString(getenv, "APPLE_APP_STORE_KEY_ID", "")),
+		AppleIssuerID:             getString(getenv, "APPLE_ISSUER_ID", getString(getenv, "APPLE_APP_STORE_ISSUER_ID", "")),
+		ApplePrivateKey:           getString(getenv, "APPLE_PRIVATE_KEY", getString(getenv, "APPLE_APP_STORE_PRIVATE_KEY", "")),
+		AppleAppAppleID:           getString(getenv, "APPLE_APP_APPLE_ID", getString(getenv, "APPLE_APP_STORE_APP_ID", "")),
+		AppleEnvironment:          strings.ToLower(getString(getenv, "APPLE_ENVIRONMENT", getString(getenv, "APPLE_APP_STORE_ENVIRONMENT", ""))),
 		GooglePlayCredentialsJSON: getString(getenv, "GOOGLE_PLAY_CREDENTIALS_JSON", ""),
 		GooglePlayPackageName:     getString(getenv, "GOOGLE_PLAY_PACKAGE_NAME", defaultPackageName),
 		GoogleOAuthAudiences:      parseStringSlice(getString(getenv, "GOOGLE_OAUTH_AUDIENCES", getString(getenv, "GOOGLE_CLIENT_ID", getString(getenv, "GOOGLE_OAUTH_CLIENT_ID", "")))),
