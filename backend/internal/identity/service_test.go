@@ -529,3 +529,127 @@ func TestService_PasswordReset_DetailedSecuritySuite(t *testing.T) {
 	}
 }
 
+type mockRegistrationAttributor struct {
+	validCodes   map[string]bool
+	attributions map[string]string // userID -> partnerCode
+}
+
+func (m *mockRegistrationAttributor) ValidatePartnerCode(_ context.Context, partnerCode string) error {
+	if !m.validCodes[partnerCode] {
+		return fmt.Errorf("invalid or nonexistent referral partner code")
+	}
+	return nil
+}
+
+func (m *mockRegistrationAttributor) AttributeRegistration(_ context.Context, referredUserID, partnerCode, clickToken string) error {
+	if existing, ok := m.attributions[referredUserID]; ok {
+		if existing == partnerCode {
+			return nil // safe idempotency
+		}
+		return fmt.Errorf("user has already been attributed to an affiliate")
+	}
+	m.attributions[referredUserID] = partnerCode
+	return nil
+}
+
+func TestService_RegistrationAttribution(t *testing.T) {
+	ctx := context.Background()
+	testSecret := "super-secret-jwt-key-32-bytes-long!"
+
+	t.Run("valid referral code is verified and attributed upon successful registration", func(t *testing.T) {
+		repo := NewMemoryRepository()
+		mockAttr := &mockRegistrationAttributor{
+			validCodes:   map[string]bool{"PRIDE2026": true},
+			attributions: make(map[string]string),
+		}
+		svc := NewService(repo, testSecret, WithRegistrationAttributor(mockAttr))
+
+		req := validRegisterReq()
+		req.Email = "referred_user@aura.dating"
+		req.ReferralCode = "pride2026" // case-insensitive
+
+		resp, err := svc.Register(ctx, req, ClientInfo{IPAddress: "192.168.1.50"})
+		if err != nil {
+			t.Fatalf("expected registration to succeed, got: %v", err)
+		}
+		if resp == nil || resp.User.ID == "" {
+			t.Fatalf("expected valid auth response with user ID")
+		}
+
+		if attributed, ok := mockAttr.attributions[resp.User.ID]; !ok || attributed != "PRIDE2026" {
+			t.Errorf("expected user %s to be attributed to PRIDE2026, got %s", resp.User.ID, attributed)
+		}
+	})
+
+	t.Run("organic registration without referral code succeeds without attribution", func(t *testing.T) {
+		repo := NewMemoryRepository()
+		mockAttr := &mockRegistrationAttributor{
+			validCodes:   map[string]bool{"PRIDE2026": true},
+			attributions: make(map[string]string),
+		}
+		svc := NewService(repo, testSecret, WithRegistrationAttributor(mockAttr))
+
+		req := validRegisterReq()
+		req.Email = "organic_user@aura.dating"
+		req.ReferralCode = ""
+
+		resp, err := svc.Register(ctx, req, ClientInfo{})
+		if err != nil {
+			t.Fatalf("expected organic registration to succeed, got: %v", err)
+		}
+		if _, ok := mockAttr.attributions[resp.User.ID]; ok {
+			t.Errorf("organic user should not have attribution")
+		}
+	})
+
+	t.Run("invalid referral code is rejected before user account is created", func(t *testing.T) {
+		repo := NewMemoryRepository()
+		mockAttr := &mockRegistrationAttributor{
+			validCodes:   map[string]bool{"PRIDE2026": true},
+			attributions: make(map[string]string),
+		}
+		svc := NewService(repo, testSecret, WithRegistrationAttributor(mockAttr))
+
+		req := validRegisterReq()
+		req.Email = "rejected_user@aura.dating"
+		req.ReferralCode = "INVALID_CODE"
+
+		_, err := svc.Register(ctx, req, ClientInfo{})
+		if err == nil {
+			t.Fatalf("expected invalid referral code to fail registration")
+		}
+		if !strings.Contains(err.Error(), "invalid or nonexistent referral partner code") {
+			t.Errorf("expected error message about invalid partner code, got: %v", err)
+		}
+
+		// Verify account was NOT created
+		_, err = repo.GetUserByEmail(ctx, req.Email)
+		if !errors.Is(err, ErrUserNotFound) {
+			t.Errorf("user account should not exist in repository when validation fails, got: %v", err)
+		}
+	})
+
+	t.Run("retry and idempotency behavior", func(t *testing.T) {
+		mockAttr := &mockRegistrationAttributor{
+			validCodes:   map[string]bool{"PARTNER_A": true, "PARTNER_B": true},
+			attributions: make(map[string]string),
+		}
+
+		userID := "user_repeat_123"
+		// First attribution
+		if err := mockAttr.AttributeRegistration(ctx, userID, "PARTNER_A", ""); err != nil {
+			t.Fatalf("first attribution failed: %v", err)
+		}
+
+		// Idempotent retry with same partner
+		if err := mockAttr.AttributeRegistration(ctx, userID, "PARTNER_A", ""); err != nil {
+			t.Fatalf("idempotent retry with same partner should succeed, got: %v", err)
+		}
+
+		// Attempting to overwrite with different partner is rejected
+		if err := mockAttr.AttributeRegistration(ctx, userID, "PARTNER_B", ""); err == nil {
+			t.Fatalf("expected duplicate attribution with different partner code to be rejected")
+		}
+	})
+}
+

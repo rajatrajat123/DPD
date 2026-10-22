@@ -130,7 +130,7 @@ present for those flows to work. Where configuration is missing, the platform
 | --- | --- | --- |
 | Android | Android | `android.package` = `com.aura.dating` (see `apps/mobile/app.json`) + the SHA-1 of the **actual signing keystore** |
 | iOS | iOS | `ios.bundleIdentifier` = `com.aura.dating` (see `apps/mobile/app.json`) |
-| Web / Expo Go | Web application | Authorized JavaScript origins + redirect URIs for the Expo proxy |
+| Web (server) | Web application | Passed to `GoogleSignin.configure({ webClientId })`. Required for the Android SDK to return an ID token; native builds do not need redirect URIs. |
 
 Android signing fingerprints: register one Android OAuth client per keystore. The
 SHA-1 must come from the keystore that actually signs the build:
@@ -182,19 +182,58 @@ EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=<ios-client-id>.apps.googleusercontent.com
 ```
 
 - A production build (`EXPO_PUBLIC_APP_ENV=production`, set by the `production` profile in `apps/mobile/eas.json`) **throws** instead of silently falling back to a developer LAN IP, and rejects a plaintext `http://` API URL.
-- With no Google client ID configured, the Google button reports "not configured" instead of fabricating a local identity.
+- When the client ID its platform needs is missing (on Android that is the Web client ID), the Google button reports "not configured" instead of fabricating a local identity.
 
 ### 5.4 Native Build Requirement
 
-The mobile app uses `expo-auth-session` (`Google.useIdTokenAuthRequest`) plus
-`expo-web-browser`. The browser-based OpenID Connect flow it opens returns a real
-Google ID token, so it does **not** require `@react-native-google-signin/google-signin`.
+The mobile app uses `@react-native-google-signin/google-signin` (the maintained
+native Google Sign-In module, `~16.1.5`) to obtain a genuine Google ID token.
+`GoogleSignInButton.tsx` then sends only that token to `POST /api/v1/auth/google`;
+the backend verifies it and issues the Aura session.
+
+Why not `expo-auth-session`: its Google provider drives a browser-based
+authorization request and sends the platform client ID as `client_id`. Google does
+not accept an Android OAuth client in that browser flow (an Android client is
+matched by `android.package` + signing SHA-1 inside the native SDK), so the
+previous flow could not complete on a real Android build.
+
+Requirements:
+
+- The module contains native code, so it **cannot** run in Expo Go. Use a
+  **development build** (the `development` profile in `apps/mobile/eas.json`) or a
+  standalone build.
+- `GoogleSignin.configure({ webClientId })` must receive the **Web application**
+  client ID. Google's Android SDK does not return an ID token without it.
+- Android needs no extra file: without Firebase no `google-services.json` is used.
+  The Android OAuth client is matched by package name + SHA-1 (§5.2).
+- The Gradle dependency and module resolution come from Expo/React Native
+  autolinking (`apps/mobile/android/settings.gradle`); no manual Gradle edit is
+  required.
+- An iOS build additionally requires the package's config plugin, because the iOS
+  SDK needs its URL scheme in `Info.plist`:
+  `["@react-native-google-signin/google-signin", { "iosUrlScheme": "com.googleusercontent.apps.<ios-client-id>" }]`
+  Do not add it before the real iOS client ID exists — the plugin throws if the
+  value is missing or does not start with `com.googleusercontent.apps.`.
 
 Caveats that are easy to get wrong:
 
-- Google Sign-In without the Expo proxy requires a **development build / standalone build** (not Expo Go), because the OAuth redirect uses the app's custom scheme (`aura://`) registered by `app.json`.
-- Configure `AURA_API_URL`/`EXPO_PUBLIC_API_URL` for the environment you are building; the backend also lists every client ID in `GOOGLE_OAUTH_AUDIENCES`.
-- Google authentication never marks an account as age-verified. Adult verification remains a separate Persona-backed flow.
+- `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID` is **not** passed to the SDK. It is the
+  reference value for the Cloud Console registration and for the backend's
+  `GOOGLE_OAUTH_AUDIENCES`. Which client ID Google puts in the token's `aud`
+  depends on the platform it was issued for, so list the Web **and** Android (and
+  iOS) client IDs in `GOOGLE_OAUTH_AUDIENCES`.
+- Google authentication never marks an account as age-verified. Adult verification
+  remains a separate Persona-backed flow.
+- The `aura` scheme declared in `apps/mobile/app.json` is still used for deep
+  links, but it is no longer part of the Google sign-in redirect.
+
+Supplying the client IDs to an EAS build: `EXPO_PUBLIC_*` values are inlined at
+build time, so they must exist in the build environment, not just locally. Use the
+`env` block of the relevant profile in `apps/mobile/eas.json`, or EAS environment
+variables (`eas env:create --name EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID ...`).
+For a **local** development build, `apps/mobile/.env.local` is also honoured by the
+Expo CLI. The values are not secrets (they ship inside the APK), but they must match
+`GOOGLE_OAUTH_AUDIENCES` on the backend exactly.
 
 ### 5.5 Transactional Email (OTP & Password Reset)
 

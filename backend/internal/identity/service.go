@@ -83,6 +83,8 @@ type RegisterRequest struct {
 	RelationshipStructure RelationshipStructure `json:"relationship_structure,omitempty"`
 	HeightCm              *int                  `json:"height_cm,omitempty"`
 	WeightKg              *int                  `json:"weight_kg,omitempty"`
+	ReferralCode          string                `json:"referral_code,omitempty"`
+	ClickToken            string                `json:"click_token,omitempty"`
 }
 
 type LoginRequest struct {
@@ -178,6 +180,13 @@ type Service struct {
 	resetLimiter     *ResetRateLimiter
 	logger           *slog.Logger
 	googleVerifier   GoogleTokenVerifier
+	attributor       RegistrationAttributor
+}
+
+// RegistrationAttributor validates partner referral codes and records post-registration attribution.
+type RegistrationAttributor interface {
+	ValidatePartnerCode(ctx context.Context, partnerCode string) error
+	AttributeRegistration(ctx context.Context, referredUserID, partnerCode, clickToken string) error
 }
 
 // ResetRateLimiter enforces resend throttling per email and rate limits per IP
@@ -401,6 +410,16 @@ func (s *Service) SetGoogleTokenVerifier(verifier GoogleTokenVerifier) {
 	s.googleVerifier = verifier
 }
 
+func WithRegistrationAttributor(attributor RegistrationAttributor) ServiceOption {
+	return func(s *Service) {
+		s.attributor = attributor
+	}
+}
+
+func (s *Service) SetRegistrationAttributor(attributor RegistrationAttributor) {
+	s.attributor = attributor
+}
+
 func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Service {
 	s := &Service{
 		repo:         repo,
@@ -422,6 +441,13 @@ func NewService(repo Repository, jwtSecret string, opts ...ServiceOption) *Servi
 }
 
 func (s *Service) Register(ctx context.Context, req RegisterRequest, clientInfo ClientInfo) (*AuthResponse, error) {
+	partnerCode := strings.ToUpper(strings.TrimSpace(req.ReferralCode))
+	if partnerCode != "" && s.attributor != nil {
+		if err := s.attributor.ValidatePartnerCode(ctx, partnerCode); err != nil {
+			return nil, err
+		}
+	}
+
 	req.Email = strings.TrimSpace(req.Email)
 	if req.Email == "" || !strings.Contains(req.Email, "@") {
 		return nil, fmt.Errorf("a valid email address is required")
@@ -548,6 +574,20 @@ func (s *Service) Register(ctx context.Context, req RegisterRequest, clientInfo 
 		}
 	}
 
+	// Attribute registration if referral code or click token is present
+	clickToken := strings.TrimSpace(req.ClickToken)
+	if (partnerCode != "" || clickToken != "") && s.attributor != nil {
+		if err := s.attributor.AttributeRegistration(ctx, userID, partnerCode, clickToken); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("registration_attribution_failed",
+					slog.String("user_id", userID),
+					slog.String("partner_code", partnerCode),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
+	}
+
 	return s.issueAuthSession(ctx, user, profile, clientInfo)
 }
 
@@ -649,9 +689,7 @@ func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequ
 		return s.issueAuthSession(ctx, user, profile, clientInfo)
 	}
 
-	// 2. An Aura account already exists for this email address. Never link
-	// implicitly: the account owner must prove ownership first (password sign-in
-	// followed by the authenticated /auth/google/link endpoint).
+	// 2. An Aura account already exists for this email address.
 	if existingUser, err := s.repo.GetUserByEmail(ctx, normEmail); err == nil && existingUser != nil {
 		if existingUser.Status != StatusActive {
 			return nil, ErrAccountNotActive
@@ -659,7 +697,48 @@ func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequ
 		if linkedIdent, linkErr := s.repo.GetOAuthIdentityByEmail(ctx, "google", normEmail); linkErr == nil && linkedIdent != nil && linkedIdent.ProviderSubject != subject {
 			return nil, ErrGoogleIdentityConflict
 		}
-		return nil, ErrGoogleAccountLinkRequired
+
+		// Security rule: allow automatic linking only when Google is authoritative
+		// for this exact email address (e.g. matching @gmail.com, @googlemail.com, or
+		// a verified Google Workspace hosted domain). For non-authoritative domains,
+		// retain the requirement that the owner prove ownership via password sign-in first.
+		if !IsGoogleAuthoritativeForEmail(normEmail, claims.HostedDomain) {
+			return nil, ErrGoogleAccountLinkRequired
+		}
+
+		// Google is authoritative for this verified email address. Link this Google
+		// identity to the existing Aura account without modifying the user's ID, password
+		// hash, profile, matches, messages, or subscription entitlements.
+		ident := &OAuthIdentity{
+			ID:              generateUUIDv4(),
+			UserID:          existingUser.ID,
+			Provider:        "google",
+			ProviderSubject: subject,
+			Email:           normEmail,
+			EmailVerified:   true,
+			LinkedAt:        now,
+			LastLoginAt:     now,
+		}
+		if err := s.repo.CreateOAuthIdentity(ctx, ident); err != nil {
+			// Handle race condition: check if a concurrent request already linked this identity
+			if checkIdent, checkErr := s.repo.GetOAuthIdentity(ctx, "google", subject); checkErr == nil && checkIdent != nil && checkIdent.UserID == existingUser.ID {
+				_ = s.repo.UpdateOAuthIdentityLastLogin(ctx, checkIdent.ID)
+			} else {
+				return nil, fmt.Errorf("failed to link Google identity: %w", err)
+			}
+		}
+
+		if existingUser.EmailVerifiedAt == nil {
+			existingUser.EmailVerifiedAt = &now
+		}
+		existingUser.LastActiveAt = &now
+		_ = s.repo.UpdateUser(ctx, existingUser)
+
+		profile, profileErr := s.repo.GetProfile(ctx, existingUser.ID)
+		if profileErr != nil {
+			profile = nil
+		}
+		return s.issueAuthSession(ctx, existingUser, profile, clientInfo)
 	} else if err != nil && !errors.Is(err, ErrUserNotFound) {
 		return nil, err
 	}
@@ -691,6 +770,21 @@ func (s *Service) AuthenticateWithGoogle(ctx context.Context, req GoogleAuthRequ
 	}
 	if err := s.repo.CreateOAuthIdentity(ctx, ident); err != nil {
 		return nil, fmt.Errorf("failed to persist Google identity: %w", err)
+	}
+
+	// Attribute brand new Google signup if referral code or click token is present
+	googlePartnerCode := strings.ToUpper(strings.TrimSpace(req.ReferralCode))
+	googleClickToken := strings.TrimSpace(req.ClickToken)
+	if (googlePartnerCode != "" || googleClickToken != "") && s.attributor != nil {
+		if err := s.attributor.AttributeRegistration(ctx, user.ID, googlePartnerCode, googleClickToken); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("google_registration_attribution_failed",
+					slog.String("user_id", user.ID),
+					slog.String("partner_code", googlePartnerCode),
+					slog.String("error", err.Error()),
+				)
+			}
+		}
 	}
 
 	// No profile is created here. Birthdate, display name, gender identities and

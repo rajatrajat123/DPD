@@ -12,11 +12,13 @@
     "postinstall": "patch-package"
   },
   "dependencies": {
+    "@react-native-google-signin/google-signin": "~16.1.5",
     "expo": "~57.0.28",
     "expo-asset": "~57.0.20",
     "expo-audio": "~57.0.5",
     "expo-auth-session": "~57.0.16",
     "expo-constants": "~57.0.21",
+    "expo-dev-client": "~57.0.20",
     "expo-image-manipulator": "~57.0.21",
     "expo-image-picker": "~57.0.20",
     "expo-linking": "~57.0.12",

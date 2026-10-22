@@ -11,12 +11,14 @@ import {
   RefreshControl,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { colors, typography, spacing, borderRadius, useTheme } from '../../src/theme';
 import Constants from 'expo-constants';
 import { storeBilling } from '../../src/services/billing/storeBilling';
 import { BillingPlan, EntitlementsResponse, Subscription } from '../../src/types';
 
 export default function MembershipScreen() {
+  const router = useRouter();
   const { colors } = useTheme();
   const [plans, setPlans] = useState<BillingPlan[]>([]);
   const [entitlements, setEntitlements] = useState<EntitlementsResponse | null>(null);
@@ -303,6 +305,25 @@ export default function MembershipScreen() {
               </TouchableOpacity>
             </View>
           </View>
+
+          {/* Referral Free Access Reward Banner */}
+          <TouchableOpacity
+            style={[styles.statusCard, { backgroundColor: colors.card, borderColor: colors.gold, marginTop: spacing.md, padding: spacing.md }]}
+            onPress={() => router.push('/referrals')}
+            activeOpacity={0.8}
+          >
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <View style={{ flex: 1, marginRight: spacing.sm }}>
+                <Text style={{ ...typography.caption, color: colors.gold, fontWeight: '700', letterSpacing: 1 }}>
+                  FREE ACCESS REWARDS
+                </Text>
+                <Text style={{ ...typography.body, color: colors.text, fontWeight: '600', marginTop: 2 }}>
+                  🎁 Invite friends for up to 60 days of free access
+                </Text>
+              </View>
+              <Text style={{ color: colors.gold, fontSize: 18, fontWeight: '700' }}>➔</Text>
+            </View>
+          </TouchableOpacity>
 
           {/* Active Entitlements Matrix */}
           <View style={styles.section}>

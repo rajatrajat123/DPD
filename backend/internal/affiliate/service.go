@@ -16,9 +16,14 @@ import (
 )
 
 type Service struct {
-	repo           Repository
-	payoutRegistry *PayoutRegistry
-	logger         *slog.Logger
+	repo               Repository
+	payoutRegistry     *PayoutRegistry
+	logger             *slog.Logger
+	userVerifier       UserVerificationChecker
+	entitlementGranter EntitlementGranter
+	subChecker         SubscriptionChecker
+	rewardConfig       UserReferralRewardConfig
+	siteURL            string
 }
 
 func NewService(repo Repository, payoutRegistry *PayoutRegistry, logger *slog.Logger) *Service {
@@ -29,7 +34,28 @@ func NewService(repo Repository, payoutRegistry *PayoutRegistry, logger *slog.Lo
 		repo:           repo,
 		payoutRegistry: payoutRegistry,
 		logger:         logger,
+		rewardConfig:   DefaultUserReferralRewardConfig(),
 	}
+}
+
+func (s *Service) SetUserVerificationChecker(checker UserVerificationChecker) {
+	s.userVerifier = checker
+}
+
+func (s *Service) SetEntitlementGranter(granter EntitlementGranter) {
+	s.entitlementGranter = granter
+}
+
+func (s *Service) SetSubscriptionChecker(checker SubscriptionChecker) {
+	s.subChecker = checker
+}
+
+func (s *Service) SetRewardConfig(cfg UserReferralRewardConfig) {
+	s.rewardConfig = cfg
+}
+
+func (s *Service) SetSiteURL(url string) {
+	s.siteURL = strings.TrimRight(url, "/")
 }
 
 // RegisterAffiliate registers a member as an affiliate partner.
@@ -169,11 +195,36 @@ func (s *Service) TrackClick(ctx context.Context, req TrackClickRequest) (*Click
 	}, nil
 }
 
+// ValidatePartnerCode checks whether a partner code exists and belongs to an ACTIVE affiliate.
+func (s *Service) ValidatePartnerCode(ctx context.Context, partnerCode string) error {
+	code := strings.ToUpper(strings.TrimSpace(partnerCode))
+	if code == "" {
+		return nil
+	}
+	aff, err := s.repo.GetAffiliateByPartnerCode(ctx, code)
+	if err != nil {
+		return ErrInvalidPartnerCode
+	}
+	if aff.Status != StatusActive {
+		return ErrAffiliateNotActive
+	}
+	return nil
+}
+
 // AttributeRegistration binds a newly registered user to an affiliate.
 func (s *Service) AttributeRegistration(ctx context.Context, referredUserID, partnerCode, campaignSlug string) (*ReferralAttribution, error) {
 	code := strings.ToUpper(strings.TrimSpace(partnerCode))
 	if code == "" {
 		return nil, nil // Organic registration
+	}
+
+	// Idempotency check: verify if this user is already attributed
+	existing, err := s.repo.GetAttributionByReferredUser(ctx, referredUserID)
+	if err == nil && existing != nil {
+		if strings.EqualFold(existing.PartnerCode, code) {
+			return existing, nil
+		}
+		return nil, ErrDuplicateAttribution
 	}
 
 	aff, err := s.repo.GetAffiliateByPartnerCode(ctx, code)
@@ -206,6 +257,13 @@ func (s *Service) AttributeRegistration(ctx context.Context, referredUserID, par
 	}
 
 	if err := s.repo.CreateAttribution(ctx, attr); err != nil {
+		// Handle concurrent registration or idempotent retry
+		if existing, checkErr := s.repo.GetAttributionByReferredUser(ctx, referredUserID); checkErr == nil && existing != nil {
+			if strings.EqualFold(existing.PartnerCode, code) {
+				return existing, nil
+			}
+			return nil, ErrDuplicateAttribution
+		}
 		s.logger.Error("failed_to_create_attribution", slog.String("error", err.Error()))
 		return nil, err
 	}
@@ -229,6 +287,27 @@ func (s *Service) AttributeRegistration(ctx context.Context, referredUserID, par
 	_ = s.repo.PublishOutboxEvent(ctx, env)
 
 	return attr, nil
+}
+
+// AttributeRegistrationWithToken resolves partner code and optional click token,
+// populating campaign metadata from the click log if available.
+func (s *Service) AttributeRegistrationWithToken(ctx context.Context, referredUserID, partnerCode, clickToken string) (*ReferralAttribution, error) {
+	code := strings.ToUpper(strings.TrimSpace(partnerCode))
+	token := strings.TrimSpace(clickToken)
+	campaign := ""
+
+	if token != "" {
+		if click, err := s.repo.GetClickByToken(ctx, token); err == nil && click != nil {
+			if code == "" {
+				code = strings.ToUpper(strings.TrimSpace(click.PartnerCode))
+			}
+			if click.CampaignSlug != nil {
+				campaign = *click.CampaignSlug
+			}
+		}
+	}
+
+	return s.AttributeRegistration(ctx, referredUserID, code, campaign)
 }
 
 // ProcessVerifiedTransaction calculates and accrues commissions on verified billing transactions.

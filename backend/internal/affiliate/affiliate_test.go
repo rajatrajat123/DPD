@@ -89,7 +89,7 @@ func TestAffiliateRegistrationAndCampaigns(t *testing.T) {
 }
 
 func TestReferralAttributionAndAntiFraud(t *testing.T) {
-	svc, _ := setupTestAffiliateService(t)
+	svc, repo := setupTestAffiliateService(t)
 	ctx := context.Background()
 
 	aff, _ := svc.RegisterAffiliate(ctx, "usr_affiliate_boss", affiliate.RegisterAffiliateRequest{
@@ -97,19 +97,89 @@ func TestReferralAttributionAndAntiFraud(t *testing.T) {
 		TermsAccepted: true,
 	})
 
-	// 1. Self-referral block: affiliate cannot attribute their own account
-	_, err := svc.AttributeRegistration(ctx, "usr_affiliate_boss", "PRIDE_AMBASSADOR", "default")
+	// 1. Organic registration (empty partner code) produces nil attribution without error
+	attrOrganic, err := svc.AttributeRegistration(ctx, "usr_organic_member", "", "")
+	if err != nil || attrOrganic != nil {
+		t.Fatalf("expected nil attribution for organic user, got %v, err %v", attrOrganic, err)
+	}
+
+	// 2. Validate partner code helper
+	if err := svc.ValidatePartnerCode(ctx, "PRIDE_AMBASSADOR"); err != nil {
+		t.Errorf("expected valid partner code, got %v", err)
+	}
+	if err := svc.ValidatePartnerCode(ctx, "NON_EXISTENT"); err != affiliate.ErrInvalidPartnerCode {
+		t.Errorf("expected ErrInvalidPartnerCode, got %v", err)
+	}
+
+	// 3. Inactive partner code rejection
+	affInactive, _ := svc.RegisterAffiliate(ctx, "usr_affiliate_suspended", affiliate.RegisterAffiliateRequest{
+		PartnerCode:   "SUSPENDED_PARTNER",
+		TermsAccepted: true,
+	})
+	_ = repo.UpdateAffiliateStatus(ctx, affInactive.ID, affiliate.StatusSuspended, affiliate.TierStandard, nil)
+	if err := svc.ValidatePartnerCode(ctx, "SUSPENDED_PARTNER"); err != affiliate.ErrAffiliateNotActive {
+		t.Errorf("expected ErrAffiliateNotActive, got %v", err)
+	}
+	if _, err := svc.AttributeRegistration(ctx, "usr_some_member", "SUSPENDED_PARTNER", ""); err != affiliate.ErrAffiliateNotActive {
+		t.Errorf("expected ErrAffiliateNotActive on attribution, got %v", err)
+	}
+
+	// 4. Self-referral block: affiliate cannot attribute their own account
+	_, err = svc.AttributeRegistration(ctx, "usr_affiliate_boss", "PRIDE_AMBASSADOR", "default")
 	if err != affiliate.ErrSelfReferralBlocked {
 		t.Errorf("expected ErrSelfReferralBlocked, got %v", err)
 	}
 
-	// 2. Successful attribution of new user
+	// 5. Successful attribution of new user
 	attr, err := svc.AttributeRegistration(ctx, "usr_new_dating_member", "PRIDE_AMBASSADOR", "instagram_story")
 	if err != nil {
 		t.Fatalf("failed to attribute registration: %v", err)
 	}
 	if attr.AffiliateID != aff.ID {
 		t.Errorf("expected affiliate ID %s, got %s", aff.ID, attr.AffiliateID)
+	}
+
+	// 6. Safe idempotency on retry with SAME partner code
+	attrRetry, err := svc.AttributeRegistration(ctx, "usr_new_dating_member", "PRIDE_AMBASSADOR", "instagram_story")
+	if err != nil {
+		t.Fatalf("expected idempotent success on retry with same partner code, got: %v", err)
+	}
+	if attrRetry.ID != attr.ID {
+		t.Errorf("expected existing attribution ID %s, got %s", attr.ID, attrRetry.ID)
+	}
+
+	// 7. Duplicate attribution rejection when attempting to replace with DIFFERENT partner code
+	affOther, _ := svc.RegisterAffiliate(ctx, "usr_affiliate_other", affiliate.RegisterAffiliateRequest{
+		PartnerCode:   "OTHER_AMBASSADOR",
+		TermsAccepted: true,
+	})
+	_ = affOther
+	_, err = svc.AttributeRegistration(ctx, "usr_new_dating_member", "OTHER_AMBASSADOR", "promo")
+	if err != affiliate.ErrDuplicateAttribution {
+		t.Errorf("expected ErrDuplicateAttribution when trying to overwrite attribution, got %v", err)
+	}
+
+	// 8. AttributeRegistrationWithToken resolves campaign from click token
+	clickResp, err := svc.TrackClick(ctx, affiliate.TrackClickRequest{
+		PartnerCode:  "PRIDE_AMBASSADOR",
+		CampaignSlug: "summer_pride",
+		LandingURL:   "https://auradating.com/r/PRIDE_AMBASSADOR?sub_id=summer_pride",
+		ClientIP:     "192.168.1.100",
+		UserAgent:    "Mozilla/5.0",
+	})
+	if err != nil {
+		t.Fatalf("failed to track click: %v", err)
+	}
+
+	attrWithToken, err := svc.AttributeRegistrationWithToken(ctx, "usr_token_referred", "", clickResp.ClickToken)
+	if err != nil {
+		t.Fatalf("failed to attribute registration with token: %v", err)
+	}
+	if attrWithToken.AffiliateID != aff.ID {
+		t.Errorf("expected affiliate ID %s, got %s", aff.ID, attrWithToken.AffiliateID)
+	}
+	if attrWithToken.SubCampaign == nil || *attrWithToken.SubCampaign != "summer_pride" {
+		t.Errorf("expected campaign summer_pride, got %v", attrWithToken.SubCampaign)
 	}
 }
 

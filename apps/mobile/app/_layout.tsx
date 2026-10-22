@@ -117,6 +117,7 @@ function ThemedApp() {
           <Stack.Screen name="search" options={{ headerShown: false }} />
           <Stack.Screen name="profile/[id]" options={{ headerShown: false }} />
           <Stack.Screen name="favourites" options={{ headerShown: false }} />
+          <Stack.Screen name="referrals" options={{ headerShown: false }} />
         </Stack>
       </ThemedNavigationGuard>
       {/* Global privacy veil shielding sensitive content in app switcher and biometric lock */}

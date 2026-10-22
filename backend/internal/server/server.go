@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -497,8 +498,26 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	affHandler := affiliate.NewHandler(affSvc, logger)
 	affHandler.SetStepUpVerifier(stepUpVerifier)
 
+	// Wire affiliate registration attribution into identity service
+	identSvc.SetRegistrationAttributor(&affiliateRegistrationAdapter{affSvc: affSvc})
+
+	// Wire in-app user referral rewards dependencies
+	affSvc.SetUserVerificationChecker(&userVerificationAdapter{identityRepo: identityRepo})
+	affSvc.SetEntitlementGranter(&entitlementGranterAdapter{billingRepo: billingRepo})
+	affSvc.SetSubscriptionChecker(&subscriptionCheckerAdapter{billingRepo: billingRepo})
+	siteURL := os.Getenv("NEXT_PUBLIC_SITE_URL")
+	if siteURL == "" {
+		siteURL = "https://auradating.com"
+	}
+	affSvc.SetSiteURL(siteURL)
+
 	// Public Referral Link Redirect (e.g. /r/{partner_code})
 	mux.HandleFunc("/r/", affHandler.ReferralRedirect)
+	mux.HandleFunc("/api/v1/affiliates/validate/", affHandler.ValidatePartner)
+
+	// In-App User Referral & Rewards Endpoints
+	mux.Handle("/api/v1/referrals/me", memberMw(http.HandlerFunc(affHandler.UserReferralMe)))
+	mux.Handle("/api/v1/referrals/refresh", memberMw(http.HandlerFunc(affHandler.UserReferralRefresh)))
 
 	// Authenticated Affiliate Endpoints
 	mux.Handle("/api/v1/affiliates/register", memberMw(http.HandlerFunc(affHandler.Register)))
@@ -506,6 +525,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/affiliates/me/payout-settings", memberMw(http.HandlerFunc(affHandler.UpdatePayoutSettings)))
 	mux.Handle("/api/v1/affiliates/campaigns", memberMw(http.HandlerFunc(affHandler.Campaigns)))
 	mux.Handle("/api/v1/affiliates/reports/conversions", memberMw(http.HandlerFunc(affHandler.ConversionsReport)))
+	mux.Handle("/api/v1/affiliates/referrals", memberMw(http.HandlerFunc(affHandler.Referrals)))
 	mux.Handle("/api/v1/affiliates/ledger/balance", memberMw(http.HandlerFunc(affHandler.LedgerBalance)))
 	mux.Handle("/api/v1/affiliates/payouts/request", memberMw(http.HandlerFunc(affHandler.RequestPayout)))
 	mux.Handle("/api/v1/affiliates/payouts", memberMw(http.HandlerFunc(affHandler.Payouts)))
@@ -743,4 +763,86 @@ func (s *Server) AnalyticsService() *analytics.Service {
 // CMSService returns the CMS service instance for lifecycle management.
 func (s *Server) CMSService() *cms.Service {
 	return s.cmsSvc
+}
+
+type affiliateRegistrationAdapter struct {
+	affSvc *affiliate.Service
+}
+
+func (a *affiliateRegistrationAdapter) ValidatePartnerCode(ctx context.Context, partnerCode string) error {
+	return a.affSvc.ValidatePartnerCode(ctx, partnerCode)
+}
+
+func (a *affiliateRegistrationAdapter) AttributeRegistration(ctx context.Context, referredUserID, partnerCode, clickToken string) error {
+	_, err := a.affSvc.AttributeRegistrationWithToken(ctx, referredUserID, partnerCode, clickToken)
+	return err
+}
+
+type userVerificationAdapter struct {
+	identityRepo identity.Repository
+}
+
+func (a *userVerificationAdapter) IsUserVerified(ctx context.Context, userID string) (bool, string, *time.Time, error) {
+	u, err := a.identityRepo.GetUserByID(ctx, userID)
+	if err != nil || u == nil {
+		return false, "", nil, err
+	}
+	// Check moderation status: suspended or banned accounts never count as verified
+	if u.Status != identity.StatusActive {
+		return false, maskUserIdentifier(u.Email, u.PhoneE164), nil, nil
+	}
+	masked := maskUserIdentifier(u.Email, u.PhoneE164)
+	if u.EmailVerifiedAt != nil {
+		return true, masked, u.EmailVerifiedAt, nil
+	}
+	if u.PhoneVerifiedAt != nil {
+		return true, masked, u.PhoneVerifiedAt, nil
+	}
+	return false, masked, nil, nil
+}
+
+func maskUserIdentifier(email string, phone *string) string {
+	if email != "" {
+		parts := strings.Split(email, "@")
+		if len(parts) == 2 {
+			name := parts[0]
+			if len(name) <= 2 {
+				return name[:1] + "***@" + parts[1]
+			}
+			return name[:2] + "***@" + parts[1]
+		}
+	}
+	if phone != nil && len(*phone) >= 4 {
+		p := *phone
+		return p[:len(p)-4] + "****"
+	}
+	return "Friend"
+}
+
+type entitlementGranterAdapter struct {
+	billingRepo billing.Repository
+}
+
+func (a *entitlementGranterAdapter) GrantRewardEntitlement(ctx context.Context, userID string, code string, expiresAt time.Time, metadata map[string]any) error {
+	return a.billingRepo.GrantEntitlements(ctx, userID, []string{code}, affiliate.SourceReferralReward, expiresAt, metadata)
+}
+
+func (a *entitlementGranterAdapter) RevokeRewardEntitlement(ctx context.Context, userID string) error {
+	return a.billingRepo.RevokeEntitlements(ctx, userID, affiliate.SourceReferralReward)
+}
+
+type subscriptionCheckerAdapter struct {
+	billingRepo billing.Repository
+}
+
+func (a *subscriptionCheckerAdapter) GetPaidSubscription(ctx context.Context, userID string) (bool, string, error) {
+	sub, err := a.billingRepo.GetActiveSubscriptionByUserID(ctx, userID)
+	if err != nil || sub == nil || !sub.IsActive() {
+		return false, "", nil
+	}
+	tier := billing.TierPlus
+	if strings.Contains(sub.PlanCode, "BLACK") {
+		tier = billing.TierBlack
+	}
+	return true, tier, nil
 }

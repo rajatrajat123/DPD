@@ -35,6 +35,7 @@ type GoogleClaims struct {
 	Subject       string `json:"sub"`
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
+	HostedDomain  string `json:"hd,omitempty"`
 	Name          string `json:"name"`
 	GivenName     string `json:"given_name"`
 	FamilyName    string `json:"family_name"`
@@ -190,6 +191,7 @@ func (v *GoogleIDTokenVerifier) claimsFromPayload(payload *idtoken.Payload) (*Go
 		Subject:       payload.Subject,
 		Email:         email,
 		EmailVerified: true,
+		HostedDomain:  strings.ToLower(strings.TrimSpace(googleStringClaim(payload.Claims, "hd"))),
 		Name:          googleStringClaim(payload.Claims, "name"),
 		GivenName:     googleStringClaim(payload.Claims, "given_name"),
 		FamilyName:    googleStringClaim(payload.Claims, "family_name"),
@@ -198,6 +200,41 @@ func (v *GoogleIDTokenVerifier) claimsFromPayload(payload *idtoken.Payload) (*Go
 		Issuer:        payload.Issuer,
 		ExpiresAt:     payload.Expires,
 	}, nil
+}
+
+// IsGoogleAuthoritativeForEmail reports whether Google is authoritative for the
+// email domain, guaranteeing that ownership of this address is controlled by Google.
+//
+// Authoritative domains:
+// 1. Consumer Gmail domains: @gmail.com and @googlemail.com.
+// 2. Google Workspace domains where Google issues the token with the matching
+//    hosted domain claim (hd).
+//
+// For all other email domains (e.g. personal Google accounts created using Yahoo,
+// Outlook, or custom non-Workspace domains), Google is not authoritative and
+// accounts must not be linked automatically based only on email_verified.
+func IsGoogleAuthoritativeForEmail(email, hostedDomain string) bool {
+	normEmail := strings.ToLower(strings.TrimSpace(email))
+	parts := strings.Split(normEmail, "@")
+	if len(parts) != 2 {
+		return false
+	}
+	user := strings.TrimSpace(parts[0])
+	domain := strings.TrimSpace(parts[1])
+	if user == "" || domain == "" {
+		return false
+	}
+
+	if domain == "gmail.com" || domain == "googlemail.com" {
+		return true
+	}
+
+	hd := strings.ToLower(strings.TrimSpace(hostedDomain))
+	if hd != "" && hd == domain {
+		return true
+	}
+
+	return false
 }
 
 func googleStringClaim(claims map[string]interface{}, key string) string {
@@ -233,7 +270,9 @@ func googleBoolClaim(claims map[string]interface{}, key string) bool {
 // collected through the authenticated onboarding flow so that no server-trusted
 // account data can be fabricated by the client.
 type GoogleAuthRequest struct {
-	IDToken string `json:"id_token"`
+	IDToken      string `json:"id_token"`
+	ReferralCode string `json:"referral_code,omitempty"`
+	ClickToken   string `json:"click_token,omitempty"`
 }
 
 // LinkGoogleRequest links a verified Google identity to the authenticated Aura account.

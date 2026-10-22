@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useState } from 'react';
 import {
   TouchableOpacity,
   Text,
@@ -6,16 +6,17 @@ import {
   ActivityIndicator,
   View,
   Alert,
+  Platform,
 } from 'react-native';
-import * as Google from 'expo-auth-session/providers/google';
-import * as WebBrowser from 'expo-web-browser';
+import {
+  GoogleSignin,
+  isErrorWithCode,
+  isSuccessResponse,
+  statusCodes,
+} from '@react-native-google-signin/google-signin';
 import { useAuth } from '../context/AuthContext';
 import { colors, typography, spacing, borderRadius } from '../theme';
 import { ApiError } from '../services/api/client';
-
-// Required so the browser redirect from the Google consent screen is completed
-// and the authentication result is handed back to the app.
-WebBrowser.maybeCompleteAuthSession();
 
 /**
  * Google OAuth client IDs for the Aura Google Cloud project.
@@ -23,18 +24,54 @@ WebBrowser.maybeCompleteAuthSession();
  * These are injected at build time through EXPO_PUBLIC_* variables (see
  * `.env.example`). The same client IDs must be listed on the backend in
  * GOOGLE_OAUTH_AUDIENCES so that the returned ID token audience is accepted.
+ *
+ * `googleWebClientId` is the "server" (Web application) client ID. Google's
+ * native Sign-In SDK requires it to return an ID token, so it is the value
+ * handed to `GoogleSignin.configure({ webClientId })`.
+ *
+ * `googleAndroidClientId` is NOT passed to the SDK: Android OAuth clients are
+ * bound to the Android package name plus the signing SHA-1 fingerprint in the
+ * Cloud Console, and the native SDK matches them automatically. It is kept
+ * exported as the reference value that must be registered there and listed in
+ * the backend's GOOGLE_OAUTH_AUDIENCES.
  */
 export const googleWebClientId = (process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID || '').trim();
 export const googleIosClientId = (process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID || '').trim();
 export const googleAndroidClientId = (process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID || '').trim();
 
 /**
- * Google Sign-In can only run when at least one OAuth client ID is configured.
- * Without configuration the button fails with a clear message instead of
- * fabricating a local identity.
+ * Google Sign-In can only run when the client ID that this platform needs is
+ * configured. Android cannot produce an ID token without the Web client ID;
+ * iOS can use either its own client ID or the Web client ID. Without
+ * configuration the button fails with a clear message instead of fabricating a
+ * local identity.
  */
 export const isGoogleSignInConfigured = (): boolean =>
-  Boolean(googleWebClientId || googleIosClientId || googleAndroidClientId);
+  Platform.OS === 'ios'
+    ? Boolean(googleIosClientId || googleWebClientId)
+    : Boolean(googleWebClientId);
+
+/**
+ * Signs out the active user from Google Play Services on this device.
+ *
+ * This clears the cached Google account session for the Aura app without
+ * revoking OAuth permissions or removing the Google account from the phone.
+ * The next "Continue with Google" attempt will present the account chooser dialog.
+ */
+export async function signOutGoogle(): Promise<void> {
+  try {
+    if (Platform.OS !== 'web' && isGoogleSignInConfigured()) {
+      GoogleSignin.configure({
+        webClientId: googleWebClientId || undefined,
+        iosClientId: googleIosClientId || undefined,
+        scopes: ['openid', 'email', 'profile'],
+      });
+      await GoogleSignin.signOut();
+    }
+  } catch {
+    // If not signed in with Google or native module is not initialized, ignore gracefully
+  }
+}
 
 interface GoogleSignInButtonProps {
   onSuccess?: () => void;
@@ -53,15 +90,6 @@ export const GoogleSignInButton: React.FC<GoogleSignInButtonProps> = ({
   const [loading, setLoading] = useState(false);
   const configured = isGoogleSignInConfigured();
 
-  // Uses the official Expo Google provider (expo-auth-session) to run Google's
-  // real OpenID Connect flow and return a genuine Google-issued ID token.
-  const [request, response, promptAsync] = Google.useIdTokenAuthRequest({
-    clientId: googleWebClientId || undefined,
-    iosClientId: googleIosClientId || undefined,
-    androidClientId: googleAndroidClientId || undefined,
-    scopes: ['openid', 'email', 'profile'],
-  });
-
   const notifyError = useCallback(
     (err: unknown) => {
       const message =
@@ -76,59 +104,67 @@ export const GoogleSignInButton: React.FC<GoogleSignInButtonProps> = ({
     [onError]
   );
 
-  useEffect(() => {
-    if (!response) return;
-
-    if (response.type === 'success') {
-      const idToken = response.params?.id_token;
-      if (!idToken) {
-        notifyError(new Error('Google did not return an ID token for this request.'));
-        setLoading(false);
-        return;
-      }
-
-      const complete = async () => {
-        try {
-          // Only the verified ID token is sent. The backend resolves the Google
-          // identity, creates or finds the Aura account, and issues real Aura
-          // access + refresh sessions. Profile details are never invented here.
-          await loginWithGoogle({ id_token: idToken });
-          onSuccess?.();
-        } catch (err) {
-          notifyError(err);
-        } finally {
-          setLoading(false);
-        }
-      };
-      void complete();
-      return;
-    }
-
-    if (response.type === 'error') {
-      notifyError(new Error(response.error?.message || 'Google sign-in failed.'));
-    }
-    setLoading(false);
-  }, [response, loginWithGoogle, notifyError, onSuccess]);
-
   const handleGoogleSignIn = async () => {
     if (loading || disabled) return;
 
     if (!configured) {
       notifyError(
         new Error(
-          'Google Sign-In is not configured for this build. Set the EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID, EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID or EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID environment variables.'
+          'Google Sign-In is not configured for this build. Set EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID (and EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID for iOS) environment variables.'
         )
       );
       return;
     }
 
-    if (!request) return;
-
     setLoading(true);
     try {
-      await promptAsync();
+      // Configured lazily so importing this module never touches native code.
+      // Google's own SDK performs the real sign-in and issues the ID token; no
+      // identity is ever constructed here.
+      GoogleSignin.configure({
+        webClientId: googleWebClientId || undefined,
+        iosClientId: googleIosClientId || undefined,
+        scopes: ['openid', 'email', 'profile'],
+      });
+
+      // Android only (always resolves true on iOS); prompts the user to update
+      // Google Play Services when required.
+      await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+
+      // Clear any cached local Google session before opening the account picker
+      // so the native account chooser is always displayed to allow account selection.
+      try {
+        await GoogleSignin.signOut();
+      } catch {
+        // Safe to ignore if not previously signed in
+      }
+
+      const response = await GoogleSignin.signIn();
+
+      if (!isSuccessResponse(response)) {
+        // The user dismissed the Google account picker; nothing was authenticated.
+        return;
+      }
+
+      const idToken = response.data.idToken;
+      if (!idToken) {
+        notifyError(new Error('Google did not return an ID token for this request.'));
+        return;
+      }
+
+      // Only the Google-issued ID token is sent. The backend verifies its
+      // signature, issuer, audience and expiry, then resolves the Google
+      // identity and issues real Aura access + refresh sessions. Profile
+      // details are never invented here.
+      await loginWithGoogle({ id_token: idToken });
+      onSuccess?.();
     } catch (err) {
+      if (isErrorWithCode(err) && err.code === statusCodes.SIGN_IN_CANCELLED) {
+        // Cancellation is a normal outcome, not an authentication failure.
+        return;
+      }
       notifyError(err);
+    } finally {
       setLoading(false);
     }
   };

@@ -2598,6 +2598,24 @@ export default function ProfileScreen() {
           )}
         </View>
 
+        {/* Referral Rewards Shortcut */}
+        <TouchableOpacity
+          style={[styles.securityCard, { backgroundColor: colors.card, borderColor: colors.gold }]}
+          onPress={() => router.push('/referrals')}
+          activeOpacity={0.8}
+        >
+          <View style={[styles.securityIconWrap, { backgroundColor: colors.cardElevated }]}>
+            <Text style={styles.securityIcon}>🎁</Text>
+          </View>
+          <View style={styles.securityInfo}>
+            <Text style={[styles.securityTitle, { color: colors.gold }]}>Invite Friends & Earn Free Access</Text>
+            <Text style={styles.securityDesc}>
+              Get your unique invite link. Earn 30 to 60 days of free access for verified referrals.
+            </Text>
+          </View>
+          <Text style={[styles.securityChevron, { color: colors.gold }]}>➔</Text>
+        </TouchableOpacity>
+
         {/* Security & Privacy Shortcut */}
         <TouchableOpacity
           style={[styles.securityCard, { backgroundColor: colors.card, borderColor: colors.border }]}

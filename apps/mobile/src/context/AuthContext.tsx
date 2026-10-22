@@ -3,6 +3,7 @@ import { authService, LoginPayload, RegisterPayload, GoogleAuthPayload } from '.
 import { secureStorage } from '../services/storage/secureStore';
 import { privacyManager } from '../services/security/privacyManager';
 import { chatWebSocket, chatService } from '../services/chat/chatService';
+import { signOutGoogle } from '../components/GoogleSignInButton';
 import { User, Profile } from '../types';
 
 interface AuthContextValue {
@@ -159,6 +160,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setIsLoading(true);
     try {
       await authService.logout();
+      await signOutGoogle();
       chatService.setCurrentUserId(null);
       chatService.resetUnreadState();
       setUser(null);

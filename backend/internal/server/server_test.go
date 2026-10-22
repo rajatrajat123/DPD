@@ -253,6 +253,36 @@ func TestServer_RoutesAndErrorEnvelope(t *testing.T) {
 		}
 	})
 
+	t.Run("GET /api/v1/affiliates/validate/{code} rejects invalid code with 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/affiliates/validate/NONEXISTENT_PARTNER", nil)
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 Not Found, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("POST /api/v1/auth/register with invalid referral code fails with 400", func(t *testing.T) {
+		payload := `{
+			"email": "invalid_ref_reg@aura.dating",
+			"password": "Password123!",
+			"display_name": "Test User",
+			"birthdate": "1995-05-15",
+			"gender_identities": ["WOMAN"],
+			"sexual_orientations": ["LESBIAN"],
+			"referral_code": "DOES_NOT_EXIST"
+		}`
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/register", strings.NewReader(payload))
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("expected 400 Bad Request on invalid referral code, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
 	t.Run("POST /api/v1/age-assurance/session rejects unauthenticated request with 401", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/session", nil)
 		rec := httptest.NewRecorder()

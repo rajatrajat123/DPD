@@ -28,6 +28,7 @@ type Repository interface {
 	GetCampaignBySlug(ctx context.Context, affiliateID, slug string) (*AffiliateCampaign, error)
 	ListCampaigns(ctx context.Context, affiliateID string) ([]AffiliateCampaign, error)
 	RecordClick(ctx context.Context, click *ReferralClick) error
+	GetClickByToken(ctx context.Context, token string) (*ReferralClick, error)
 	IncrementCampaignClick(ctx context.Context, affiliateID, slug string) error
 	IncrementCampaignConversion(ctx context.Context, affiliateID, slug string) error
 
@@ -56,6 +57,9 @@ type Repository interface {
 	UpdatePayoutBatch(ctx context.Context, batch *PayoutBatch) error
 
 	PublishOutboxEvent(ctx context.Context, event events.Envelope) error
+
+	GetUserReferralReward(ctx context.Context, userID string) (*UserReferralReward, error)
+	UpsertUserReferralReward(ctx context.Context, reward *UserReferralReward) error
 }
 
 // MemoryRepository provides in-memory thread-safe storage for unit testing.
@@ -76,6 +80,7 @@ type MemoryRepository struct {
 	journals     map[string]*LedgerJournal       // id -> journal
 	entries      []LedgerEntry
 	payouts      map[string]*PayoutBatch // id -> payout
+	userRewards  map[string]*UserReferralReward // userID -> reward
 	outboxEvents []events.Envelope
 }
 
@@ -94,6 +99,7 @@ func NewMemoryRepository() *MemoryRepository {
 		accountsByID: make(map[string]*LedgerAccount),
 		journals:     make(map[string]*LedgerJournal),
 		payouts:      make(map[string]*PayoutBatch),
+		userRewards:  make(map[string]*UserReferralReward),
 	}
 
 	// Seed default commission rules
@@ -125,7 +131,8 @@ func (m *MemoryRepository) CreateAffiliate(ctx context.Context, aff *Affiliate) 
 		return ErrAffiliateAlreadyExists
 	}
 	if aff.ID == "" {
-		aff.ID = fmt.Sprintf("aff_%d", time.Now().UnixNano())
+		m.seq++
+		aff.ID = fmt.Sprintf("aff_%d_%d", time.Now().UnixNano(), m.seq)
 	}
 	now := time.Now().UTC()
 	aff.CreatedAt = now
@@ -290,7 +297,8 @@ func (m *MemoryRepository) RecordClick(ctx context.Context, click *ReferralClick
 	defer m.mu.Unlock()
 
 	if click.ID == "" {
-		click.ID = fmt.Sprintf("clk_%d", time.Now().UnixNano())
+		m.seq++
+		click.ID = fmt.Sprintf("clk_%d_%d", time.Now().UnixNano(), m.seq)
 	}
 	if click.ClickedAt.IsZero() {
 		click.ClickedAt = time.Now().UTC()
@@ -298,6 +306,18 @@ func (m *MemoryRepository) RecordClick(ctx context.Context, click *ReferralClick
 	cp := *click
 	m.clicks[click.ClickToken] = &cp
 	return nil
+}
+
+func (m *MemoryRepository) GetClickByToken(ctx context.Context, token string) (*ReferralClick, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	click, ok := m.clicks[token]
+	if !ok {
+		return nil, nil
+	}
+	cp := *click
+	return &cp, nil
 }
 
 func (m *MemoryRepository) IncrementCampaignClick(ctx context.Context, affiliateID, slug string) error {
@@ -327,7 +347,8 @@ func (m *MemoryRepository) CreateAttribution(ctx context.Context, attr *Referral
 	defer m.mu.Unlock()
 
 	if attr.ID == "" {
-		attr.ID = fmt.Sprintf("attr_%d", time.Now().UnixNano())
+		m.seq++
+		attr.ID = fmt.Sprintf("attr_%d_%d", time.Now().UnixNano(), m.seq)
 	}
 	if attr.AttributedAt.IsZero() {
 		attr.AttributedAt = time.Now().UTC()
@@ -697,6 +718,37 @@ func (m *MemoryRepository) PublishOutboxEvent(ctx context.Context, event events.
 	return nil
 }
 
+func (m *MemoryRepository) GetUserReferralReward(_ context.Context, userID string) (*UserReferralReward, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	r, ok := m.userRewards[userID]
+	if !ok {
+		return nil, nil
+	}
+	cpy := *r
+	return &cpy, nil
+}
+
+func (m *MemoryRepository) UpsertUserReferralReward(_ context.Context, reward *UserReferralReward) error {
+	if reward == nil || reward.UserID == "" {
+		return errors.New("reward and userID are required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if reward.ID == "" {
+		m.seq++
+		reward.ID = fmt.Sprintf("rew_%d_%d", time.Now().UnixNano(), m.seq)
+	}
+	now := time.Now().UTC()
+	if reward.CreatedAt.IsZero() {
+		reward.CreatedAt = now
+	}
+	reward.UpdatedAt = now
+	cpy := *reward
+	m.userRewards[reward.UserID] = &cpy
+	return nil
+}
+
 // PostgresRepository implements Repository using PostgreSQL.
 type PostgresRepository struct {
 	pool *pgxpool.Pool
@@ -922,6 +974,26 @@ func (p *PostgresRepository) RecordClick(ctx context.Context, click *ReferralCli
 		RETURNING id, clicked_at
 	`
 	return p.pool.QueryRow(ctx, query, click.AffiliateID, click.PartnerCode, click.CampaignSlug, click.ClickToken, click.IPHash, click.UserAgentHash, click.LandingURL).Scan(&click.ID, &click.ClickedAt)
+}
+
+func (p *PostgresRepository) GetClickByToken(ctx context.Context, token string) (*ReferralClick, error) {
+	query := `
+		SELECT id, affiliate_id, partner_code, campaign_slug, click_token, ip_hash, user_agent_hash, landing_url, clicked_at
+		FROM referral_clicks
+		WHERE click_token = $1
+	`
+	var c ReferralClick
+	err := p.pool.QueryRow(ctx, query, token).Scan(
+		&c.ID, &c.AffiliateID, &c.PartnerCode, &c.CampaignSlug, &c.ClickToken,
+		&c.IPHash, &c.UserAgentHash, &c.LandingURL, &c.ClickedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &c, nil
 }
 
 func (p *PostgresRepository) IncrementCampaignClick(ctx context.Context, affiliateID, slug string) error {
@@ -1426,4 +1498,48 @@ func (p *PostgresRepository) PublishOutboxEvent(ctx context.Context, event event
 		event.SchemaVersion, event.OccurredAt, event.CorrelationID, event.Payload,
 	)
 	return err
+}
+
+func (p *PostgresRepository) GetUserReferralReward(ctx context.Context, userID string) (*UserReferralReward, error) {
+	query := `
+		SELECT id, user_id, partner_code, verified_count, reward_tier, reward_status, activated_at, expires_at, created_at, updated_at
+		FROM user_referral_rewards
+		WHERE user_id = $1
+		LIMIT 1
+	`
+	var r UserReferralReward
+	err := p.pool.QueryRow(ctx, query, userID).Scan(
+		&r.ID, &r.UserID, &r.PartnerCode, &r.VerifiedCount, &r.RewardTier, &r.RewardStatus,
+		&r.ActivatedAt, &r.ExpiresAt, &r.CreatedAt, &r.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (p *PostgresRepository) UpsertUserReferralReward(ctx context.Context, reward *UserReferralReward) error {
+	query := `
+		INSERT INTO user_referral_rewards (
+			id, user_id, partner_code, verified_count, reward_tier, reward_status, activated_at, expires_at, created_at, updated_at
+		)
+		VALUES (COALESCE(NULLIF($1, '')::UUID, gen_random_uuid()), $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		ON CONFLICT (user_id) DO UPDATE SET
+			partner_code = EXCLUDED.partner_code,
+			verified_count = EXCLUDED.verified_count,
+			reward_tier = EXCLUDED.reward_tier,
+			reward_status = EXCLUDED.reward_status,
+			activated_at = EXCLUDED.activated_at,
+			expires_at = EXCLUDED.expires_at,
+			updated_at = NOW()
+		RETURNING id, created_at, updated_at
+	`
+	return p.pool.QueryRow(
+		ctx, query,
+		reward.ID, reward.UserID, reward.PartnerCode, reward.VerifiedCount, reward.RewardTier, reward.RewardStatus,
+		reward.ActivatedAt, reward.ExpiresAt,
+	).Scan(&reward.ID, &reward.CreatedAt, &reward.UpdatedAt)
 }

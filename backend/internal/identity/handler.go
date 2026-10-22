@@ -108,6 +108,19 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// If no explicit referral code was provided in request body, check aura_ref cookie
+	if strings.TrimSpace(req.ReferralCode) == "" {
+		if cookie, err := r.Cookie("aura_ref"); err == nil && cookie != nil && cookie.Value != "" {
+			parts := strings.SplitN(cookie.Value, ":", 2)
+			if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+				req.ReferralCode = strings.TrimSpace(parts[0])
+			}
+			if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+				req.ClickToken = strings.TrimSpace(parts[1])
+			}
+		}
+	}
+
 	clientInfo := extractClientInfo(r)
 	resp, err := h.svc.Register(r.Context(), req, clientInfo)
 	if err != nil {
@@ -173,6 +186,19 @@ func (h *Handler) GoogleAuth(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.IDToken) == "" {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "id_token is required"))
 		return
+	}
+
+	// If no explicit referral code was provided in request body, check aura_ref cookie
+	if strings.TrimSpace(req.ReferralCode) == "" {
+		if cookie, err := r.Cookie("aura_ref"); err == nil && cookie != nil && cookie.Value != "" {
+			parts := strings.SplitN(cookie.Value, ":", 2)
+			if len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+				req.ReferralCode = strings.TrimSpace(parts[0])
+			}
+			if len(parts) > 1 && strings.TrimSpace(parts[1]) != "" {
+				req.ClickToken = strings.TrimSpace(parts[1])
+			}
+		}
 	}
 
 	clientInfo := extractClientInfo(r)

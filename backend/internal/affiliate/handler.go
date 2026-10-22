@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/auradating/platform/backend/internal/apperror"
 	"github.com/auradating/platform/backend/internal/identity"
@@ -402,6 +403,84 @@ func (h *Handler) ReferralRedirect(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, resp.DestinationURL, http.StatusFound)
 }
 
+// ValidatePartner handles GET /api/v1/affiliates/validate/{partner_code}.
+func (h *Handler) ValidatePartner(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	prefix := "/api/v1/affiliates/validate/"
+	code := strings.TrimPrefix(r.URL.Path, prefix)
+	code = strings.Trim(code, "/")
+	if err := h.svc.ValidatePartnerCode(r.Context(), code); err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"valid":        true,
+		"partner_code": strings.ToUpper(strings.TrimSpace(code)),
+	})
+}
+
+// Referrals handles GET /api/v1/affiliates/referrals.
+func (h *Handler) Referrals(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	aff, err := h.svc.repo.GetAffiliateByUserID(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	limit := 50
+	if lStr := r.URL.Query().Get("limit"); lStr != "" {
+		if l, err := strconv.Atoi(lStr); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	attrs, err := h.svc.repo.ListAttributionsByAffiliate(r.Context(), aff.ID, limit)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	type ReferralItem struct {
+		ID           string    `json:"id"`
+		PartnerCode  string    `json:"partner_code"`
+		SubCampaign  *string   `json:"sub_campaign,omitempty"`
+		AttributedAt time.Time `json:"attributed_at"`
+	}
+
+	items := make([]ReferralItem, 0, len(attrs))
+	for _, a := range attrs {
+		items = append(items, ReferralItem{
+			ID:           a.ID,
+			PartnerCode:  a.PartnerCode,
+			SubCampaign:  a.SubCampaign,
+			AttributedAt: a.AttributedAt,
+		})
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"referrals": items,
+		"count":     len(items),
+	})
+}
+
 // Admin handlers
 func (h *Handler) AdminListAffiliates(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
@@ -600,6 +679,52 @@ func (h *Handler) checkAdmin(w http.ResponseWriter, r *http.Request, reqID strin
 	return true
 }
 
+// UserReferralMe handles GET /api/v1/referrals/me.
+func (h *Handler) UserReferralMe(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	status, err := h.svc.GetUserReferralStatus(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, status)
+}
+
+// UserReferralRefresh handles POST /api/v1/referrals/refresh.
+func (h *Handler) UserReferralRefresh(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only POST is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	status, err := h.svc.EvaluateUserReferralReward(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, status)
+}
+
 func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 	switch {
 	case errors.Is(err, ErrAffiliateNotFound):
@@ -608,6 +733,10 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "Affiliate account already exists"))
 	case errors.Is(err, ErrInvalidPartnerCode):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Invalid partner code"))
+	case errors.Is(err, ErrAffiliateNotActive):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeBusinessRuleViolation, "Affiliate account is not active"))
+	case errors.Is(err, ErrDuplicateAttribution):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "User has already been attributed to an affiliate"))
 	case errors.Is(err, ErrSelfReferralBlocked):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeBusinessRuleViolation, "Self-referral is prohibited"))
 	case errors.Is(err, ErrInsufficientPayable):

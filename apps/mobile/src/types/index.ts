@@ -392,3 +392,34 @@ export interface RemoveFavouriteResponse {
   target_user_id: string;
 }
 
+export interface ReferralNextMilestone {
+  target_referrals: number;
+  remaining_needed: number;
+  reward_days: number;
+  description: string;
+}
+
+export interface ReferredUserSummary {
+  masked_identifier: string;
+  status: 'VERIFIED' | 'PENDING_VERIFICATION';
+  attributed_at: string;
+  verified_at?: string;
+}
+
+export interface UserReferralStatus {
+  referral_code: string;
+  invite_url: string;
+  verified_count: number;
+  pending_count: number;
+  total_count: number;
+  reward_tier: number;
+  reward_status: 'NONE' | 'ACTIVE' | 'EXPIRED';
+  days_granted: number;
+  days_remaining: number;
+  activated_at?: string;
+  expires_at?: string;
+  has_paid_subscription: boolean;
+  paid_subscription_tier?: string;
+  next_milestone?: ReferralNextMilestone;
+  recent_referrals: ReferredUserSummary[];
+}

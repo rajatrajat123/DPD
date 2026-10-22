@@ -677,3 +677,266 @@ func TestUpdateMyProfile_BirthdateIsImmutable(t *testing.T) {
 }
 
 func strPtr(s string) *string { return &s }
+
+
+func TestIsGoogleAuthoritativeForEmail(t *testing.T) {
+	cases := []struct {
+		email        string
+		hostedDomain string
+		expected     bool
+	}{
+		{"rajat@gmail.com", "", true},
+		{"rajat@googlemail.com", "", true},
+		{"RAJAT@GMAIL.COM", "", true},
+		{"rajat.singh@gmail.com", "", true},
+		{"user@company.com", "company.com", true},
+		{"USER@COMPANY.COM", "company.com", true},
+		{"user@company.com", "COMPANY.COM", true},
+		{"user@company.com", "", false},
+		{"user@yahoo.com", "", false},
+		{"user@outlook.com", "", false},
+		{"user@aura.dating", "", false},
+		{"user@company.com", "othercompany.com", false},
+		{"invalid-email", "", false},
+		{"", "", false},
+		{"@gmail.com", "", false},
+	}
+
+	for _, tc := range cases {
+		actual := IsGoogleAuthoritativeForEmail(tc.email, tc.hostedDomain)
+		if actual != tc.expected {
+			t.Errorf("IsGoogleAuthoritativeForEmail(%q, %q) = %v, expected %v", tc.email, tc.hostedDomain, actual, tc.expected)
+		}
+	}
+}
+
+func TestGoogleAuth_AuthoritativeGmailAutoLinksExistingAccount(t *testing.T) {
+	svc, repo, verifier := setupTestServiceWithGoogle()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	existingUser := &User{
+		ID:           "user-rajat-uuid",
+		Email:        "rajatsingh4211@gmail.com",
+		PasswordHash: "argon2id-existing-password-hash",
+		Status:       StatusActive,
+		Role:         RoleMember,
+		CreatedAt:    now.Add(-24 * time.Hour),
+		UpdatedAt:    now.Add(-24 * time.Hour),
+	}
+	if err := repo.CreateUser(ctx, existingUser); err != nil {
+		t.Fatalf("failed to create existing user: %v", err)
+	}
+
+	verifier.SetToken("rajat-google-token", &GoogleClaims{
+		Subject:       "google-sub-rajat-987",
+		Email:         "rajatsingh4211@gmail.com",
+		EmailVerified: true,
+		Name:          "Rajat Singh",
+	})
+
+	resp, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "rajat-google-token"}, ClientInfo{IPAddress: "192.168.29.15"})
+	if err != nil {
+		t.Fatalf("expected successful auto-link and login, got: %v", err)
+	}
+
+	if resp.User.ID != "user-rajat-uuid" {
+		t.Errorf("expected session for existing user ID user-rajat-uuid, got %s", resp.User.ID)
+	}
+	if resp.AccessToken == "" || resp.RefreshToken == "" {
+		t.Errorf("expected valid tokens in session response")
+	}
+
+	// Verify OAuth identity was persisted in repository
+	ident, err := repo.GetOAuthIdentity(ctx, "google", "google-sub-rajat-987")
+	if err != nil {
+		t.Fatalf("expected oauth identity in repo: %v", err)
+	}
+	if ident.UserID != "user-rajat-uuid" {
+		t.Errorf("expected linked user_id user-rajat-uuid, got %s", ident.UserID)
+	}
+	if ident.Email != "rajatsingh4211@gmail.com" {
+		t.Errorf("expected linked email rajatsingh4211@gmail.com, got %s", ident.Email)
+	}
+
+	// Subsequent Google login authenticates via Step 1 (already linked)
+	subsequentResp, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "rajat-google-token"}, ClientInfo{IPAddress: "192.168.29.15"})
+	if err != nil {
+		t.Fatalf("expected subsequent login to succeed: %v", err)
+	}
+	if subsequentResp.User.ID != "user-rajat-uuid" {
+		t.Errorf("expected subsequent login to return user-rajat-uuid, got %s", subsequentResp.User.ID)
+	}
+
+	// Password hash was NOT overwritten
+	reloadedUser, err := repo.GetUserByID(ctx, "user-rajat-uuid")
+	if err != nil {
+		t.Fatalf("failed to reload user: %v", err)
+	}
+	if reloadedUser.PasswordHash != "argon2id-existing-password-hash" {
+		t.Errorf("password hash was modified: %s", reloadedUser.PasswordHash)
+	}
+}
+
+func TestGoogleAuth_AuthoritativeWorkspaceAutoLinksExistingAccount(t *testing.T) {
+	svc, repo, verifier := setupTestServiceWithGoogle()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	existingUser := &User{
+		ID:           "user-workspace-uuid",
+		Email:        "lead@auradating.com",
+		PasswordHash: "argon2id-hash",
+		Status:       StatusActive,
+		Role:         RoleMember,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := repo.CreateUser(ctx, existingUser); err != nil {
+		t.Fatalf("failed to create existing user: %v", err)
+	}
+
+	verifier.SetToken("workspace-token", &GoogleClaims{
+		Subject:       "google-sub-ws-111",
+		Email:         "lead@auradating.com",
+		EmailVerified: true,
+		HostedDomain:  "auradating.com",
+		Name:          "Workspace Lead",
+	})
+
+	resp, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "workspace-token"}, ClientInfo{IPAddress: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("expected workspace auto-link to succeed, got %v", err)
+	}
+	if resp.User.ID != "user-workspace-uuid" {
+		t.Errorf("expected user-workspace-uuid, got %s", resp.User.ID)
+	}
+}
+
+func TestGoogleAuth_WorkspaceMismatchedDomainRequiresExplicitLinking(t *testing.T) {
+	svc, repo, verifier := setupTestServiceWithGoogle()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	existingUser := &User{
+		ID:           "user-ws-mismatch",
+		Email:        "lead@auradating.com",
+		PasswordHash: "argon2id-hash",
+		Status:       StatusActive,
+		Role:         RoleMember,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := repo.CreateUser(ctx, existingUser); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	// Token claims different hosted domain
+	verifier.SetToken("mismatch-token", &GoogleClaims{
+		Subject:       "google-sub-ws-222",
+		Email:         "lead@auradating.com",
+		EmailVerified: true,
+		HostedDomain:  "otherdomain.com",
+	})
+
+	_, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "mismatch-token"}, ClientInfo{IPAddress: "127.0.0.1"})
+	if !errors.Is(err, ErrGoogleAccountLinkRequired) {
+		t.Fatalf("expected ErrGoogleAccountLinkRequired, got %v", err)
+	}
+}
+
+func TestGoogleAuth_InactiveAccountRejectedOnAutoLink(t *testing.T) {
+	svc, repo, verifier := setupTestServiceWithGoogle()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	existingUser := &User{
+		ID:           "user-suspended-uuid",
+		Email:        "suspended@gmail.com",
+		PasswordHash: "argon2id-hash",
+		Status:       StatusSuspended,
+		Role:         RoleMember,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := repo.CreateUser(ctx, existingUser); err != nil {
+		t.Fatalf("failed to create user: %v", err)
+	}
+
+	verifier.SetToken("suspended-token", &GoogleClaims{
+		Subject:       "google-sub-suspended",
+		Email:         "suspended@gmail.com",
+		EmailVerified: true,
+	})
+
+	_, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "suspended-token"}, ClientInfo{IPAddress: "127.0.0.1"})
+	if !errors.Is(err, ErrAccountNotActive) {
+		t.Fatalf("expected ErrAccountNotActive, got %v", err)
+	}
+}
+
+func TestGoogleAuth_AutoLinkPreservesUserDataAndProfile(t *testing.T) {
+	svc, repo, verifier := setupTestServiceWithGoogle()
+	ctx := context.Background()
+
+	now := time.Now().UTC()
+	existingUser := &User{
+		ID:           "user-preserved-uuid",
+		Email:        "datingqueen@gmail.com",
+		PasswordHash: "secret-hash",
+		Status:       StatusActive,
+		Role:         RoleMember,
+		CreatedAt:    now.Add(-72 * time.Hour),
+		UpdatedAt:    now.Add(-72 * time.Hour),
+	}
+	if err := repo.CreateUser(ctx, existingUser); err != nil {
+		t.Fatalf("failed to seed user: %v", err)
+	}
+
+	// Seed existing profile
+	bdate, _ := time.Parse("2006-01-02", "1998-05-15")
+	if err := repo.UpsertProfile(ctx, &Profile{
+		UserID:             "user-preserved-uuid",
+		DisplayName:        "Alex Queen",
+		Birthdate:          bdate,
+		Bio:                "Living my best authentic life",
+		Pronouns:           []string{"she/her"},
+		GenderIdentities:   []string{"cisgender_woman"},
+		SexualOrientations: []string{"lesbian"},
+		CreatedAt:          now.Add(-70 * time.Hour),
+		UpdatedAt:          now.Add(-70 * time.Hour),
+	}); err != nil {
+		t.Fatalf("failed to seed profile: %v", err)
+	}
+
+	verifier.SetToken("alex-token", &GoogleClaims{
+		Subject:       "google-sub-alex-777",
+		Email:         "datingqueen@gmail.com",
+		EmailVerified: true,
+		Name:          "Alex Q",
+	})
+
+	resp, err := svc.AuthenticateWithGoogle(ctx, GoogleAuthRequest{IDToken: "alex-token"}, ClientInfo{IPAddress: "127.0.0.1"})
+	if err != nil {
+		t.Fatalf("expected successful auto-link: %v", err)
+	}
+
+	if resp.User.ID != "user-preserved-uuid" {
+		t.Fatalf("expected user-preserved-uuid, got %s", resp.User.ID)
+	}
+	if resp.OnboardingRequired {
+		t.Errorf("expected onboarding to NOT be required for user with existing profile")
+	}
+	if resp.Profile == nil || resp.Profile.DisplayName != "Alex Queen" {
+		t.Errorf("expected existing profile to be preserved, got %+v", resp.Profile)
+	}
+
+	// Verify profile in repo is untouched
+	prof, err := repo.GetProfile(ctx, "user-preserved-uuid")
+	if err != nil {
+		t.Fatalf("failed to get profile: %v", err)
+	}
+	if prof.Bio != "Living my best authentic life" || prof.DisplayName != "Alex Queen" {
+		t.Errorf("profile data was corrupted during auto-link: %+v", prof)
+	}
+}

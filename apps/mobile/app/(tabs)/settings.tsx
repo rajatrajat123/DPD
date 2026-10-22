@@ -233,6 +233,24 @@ export default function SettingsScreen() {
           </View>
         </View>
 
+        {/* Referral Program */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionTitle, { color: colors.text }]}>Referrals & Community</Text>
+          <TouchableOpacity
+            style={[styles.infoCard, { backgroundColor: colors.card, borderColor: colors.gold, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: spacing.md }]}
+            onPress={() => router.push('/referrals')}
+            activeOpacity={0.8}
+          >
+            <View style={{ flex: 1, marginRight: spacing.sm }}>
+              <Text style={[styles.settingTitle, { color: colors.gold }]}>🎁 Invite Friends & Earn Rewards</Text>
+              <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
+                Share your invite link to earn 30 to 60 days of free ad-supported access.
+              </Text>
+            </View>
+            <Text style={{ color: colors.gold, fontSize: 18, fontWeight: '700' }}>➔</Text>
+          </TouchableOpacity>
+        </View>
+
         {/* System & Telemetry */}
         <View style={styles.section}>
           <Text style={[styles.sectionTitle, { color: colors.text }]}>Backend Connection</Text>

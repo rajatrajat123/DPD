@@ -23,6 +23,7 @@ var (
 	ErrUnsupportedCryptoAsset   = errors.New("unsupported crypto asset or network combination")
 	ErrCryptoPayoutDisabled     = errors.New("crypto payouts are currently disabled pending provider configuration")
 	ErrInvalidWalletAddress     = errors.New("invalid crypto wallet address format")
+	ErrDuplicateAttribution     = errors.New("user has already been attributed to an affiliate")
 )
 
 const (
@@ -303,4 +304,79 @@ type AdminCommissionRuleRequest struct {
 	RecurringEnabled   bool   `json:"recurring_enabled"`
 	MaxRecurringMonths int    `json:"max_recurring_months"`
 	EscrowHoldDays     int    `json:"escrow_hold_days"`
+}
+
+// In-App User Referral Rewards Constants
+const (
+	EntitlementAdSupportedAccess = "AD_SUPPORTED_ACCESS"
+	SourceReferralReward         = "REFERRAL_REWARD"
+	RewardStatusNone             = "NONE"
+	RewardStatusActive           = "ACTIVE"
+	RewardStatusExpired          = "EXPIRED"
+)
+
+// UserReferralReward stores persisted reward state per user
+type UserReferralReward struct {
+	ID            string     `json:"id"`
+	UserID        string     `json:"user_id"`
+	PartnerCode   string     `json:"partner_code"`
+	VerifiedCount int        `json:"verified_count"`
+	RewardTier    int        `json:"reward_tier"`
+	RewardStatus  string     `json:"reward_status"`
+	ActivatedAt   *time.Time `json:"activated_at,omitempty"`
+	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+}
+
+// UserReferralRewardConfig defines the configurable reward thresholds and durations
+type UserReferralRewardConfig struct {
+	Tier1Threshold  int `json:"tier1_threshold"`  // default: 1 referral
+	Tier1RewardDays int `json:"tier1_reward_days"` // default: 30 days
+	Tier2Threshold  int `json:"tier2_threshold"`  // default: 3 referrals
+	Tier2RewardDays int `json:"tier2_reward_days"` // default: 60 days total
+}
+
+func DefaultUserReferralRewardConfig() UserReferralRewardConfig {
+	return UserReferralRewardConfig{
+		Tier1Threshold:  1,
+		Tier1RewardDays: 30,
+		Tier2Threshold:  3,
+		Tier2RewardDays: 60,
+	}
+}
+
+// ReferralNextMilestone represents the user's next reward target
+type ReferralNextMilestone struct {
+	TargetReferrals int    `json:"target_referrals"`
+	RemainingNeeded int    `json:"remaining_needed"`
+	RewardDays      int    `json:"reward_days"`
+	Description     string `json:"description"`
+}
+
+// ReferredUserSummary summarizes an attributed user for the referral dashboard
+type ReferredUserSummary struct {
+	MaskedIdentifier string     `json:"masked_identifier"`
+	Status           string     `json:"status"` // "VERIFIED" or "PENDING_VERIFICATION"
+	AttributedAt     time.Time  `json:"attributed_at"`
+	VerifiedAt       *time.Time `json:"verified_at,omitempty"`
+}
+
+// UserReferralStatus represents the complete in-app status returned to the mobile client
+type UserReferralStatus struct {
+	ReferralCode         string                 `json:"referral_code"`
+	InviteURL            string                 `json:"invite_url"`
+	VerifiedCount        int                    `json:"verified_count"`
+	PendingCount         int                    `json:"pending_count"`
+	TotalCount           int                    `json:"total_count"`
+	RewardTier           int                    `json:"reward_tier"`           // 0, 1, or 2
+	RewardStatus         string                 `json:"reward_status"`         // "NONE", "ACTIVE", "EXPIRED"
+	DaysGranted          int                    `json:"days_granted"`          // 0, 30, or 60
+	DaysRemaining        int                    `json:"days_remaining"`
+	ActivatedAt          *time.Time             `json:"activated_at,omitempty"`
+	ExpiresAt            *time.Time             `json:"expires_at,omitempty"`
+	HasPaidSubscription  bool                   `json:"has_paid_subscription"`
+	PaidSubscriptionTier string                 `json:"paid_subscription_tier,omitempty"`
+	NextMilestone        *ReferralNextMilestone `json:"next_milestone,omitempty"`
+	RecentReferrals      []ReferredUserSummary  `json:"recent_referrals"`
 }
