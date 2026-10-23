@@ -181,17 +181,17 @@ export default async function HomePage() {
             </span>
             <h3>Aura Plus</h3>
             <p style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--aura-gold)', margin: '0.5rem 0 1rem 0' }}>
-              $24.99 <span style={{ fontSize: '0.9rem', color: 'var(--aura-taupe)', fontWeight: 400 }}>/ month</span>
+              $25 <span style={{ fontSize: '0.9rem', color: 'var(--aura-taupe)', fontWeight: 400 }}>/ month</span>
             </p>
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1.5rem', fontSize: '0.92rem' }}>
               <li>✓ Everything in Member</li>
               <li>✓ Unlimited Sparks &amp; Swipes</li>
               <li>✓ Advanced Lifestyle Dealbreakers</li>
-              <li>✓ Global Passport Mode</li>
+              <li>✓ Global Passport Mode (7-day free trial)</li>
               <li>✓ 5 Super Sparks weekly</li>
             </ul>
             <div style={{ marginTop: 'auto' }}>
-              <Link href={session ? "/membership?plan=AURA_PLUS" : "/pricing"} className="btn-gold" style={{ width: '100%', textAlign: 'center' }}>
+              <Link href={session ? "/membership?plan=AURA_PLUS_MONTHLY" : "/pricing"} className="btn-gold" style={{ width: '100%', textAlign: 'center' }}>
                 Upgrade to Plus
               </Link>
             </div>
@@ -201,20 +201,20 @@ export default async function HomePage() {
             <span className="badge-oxblood" style={{ width: 'fit-content', marginBottom: '0.75rem' }}>
               VIP Discretion
             </span>
-            <h3>Aura Elite</h3>
+            <h3>Aura Extra Premium</h3>
             <p style={{ fontSize: '1.5rem', fontWeight: 600, color: 'var(--aura-ivory)', margin: '0.5rem 0 1rem 0' }}>
-              $49.99 <span style={{ fontSize: '0.9rem', color: 'var(--aura-taupe)', fontWeight: 400 }}>/ month</span>
+              $34.99 <span style={{ fontSize: '0.9rem', color: 'var(--aura-taupe)', fontWeight: 400 }}>/ month</span>
             </p>
             <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1.5rem', fontSize: '0.92rem' }}>
               <li>✓ Everything in Plus</li>
               <li>✓ Complete Incognito Browsing</li>
-              <li>✓ Monthly Spotlight Profile Boost</li>
+              <li>✓ 3 Monthly 5x Profile Boosts</li>
               <li>✓ Priority Concierge Support</li>
               <li>✓ VIP Community Badging</li>
             </ul>
             <div style={{ marginTop: 'auto' }}>
-              <Link href={session ? "/membership?plan=AURA_ELITE" : "/pricing"} className="btn-secondary" style={{ width: '100%', textAlign: 'center' }}>
-                View Elite Perks
+              <Link href={session ? "/membership?plan=AURA_BLACK_MONTHLY" : "/pricing"} className="btn-secondary" style={{ width: '100%', textAlign: 'center' }}>
+                View VIP Perks
               </Link>
             </div>
           </article>

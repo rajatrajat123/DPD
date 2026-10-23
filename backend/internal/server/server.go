@@ -144,8 +144,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	}
 
 	var ageProvider safety.AgeAssuranceProvider
-	if cfg.Environment == config.EnvProduction {
-		ageProvider = safety.NewPersonaAgeAssuranceProvider(cfg.PersonaAPIKey, cfg.PersonaWebhookSecret)
+	if cfg.Environment == config.EnvProduction || cfg.Environment == config.EnvStaging || cfg.PersonaAPIKey != "" {
+		ageProvider = safety.NewPersonaAgeAssuranceProvider(cfg.PersonaAPIKey, cfg.PersonaWebhookSecret, cfg.PersonaTemplateID)
 	} else {
 		ageProvider = safety.NewDevAgeAssuranceProvider(string(cfg.Environment))
 	}
@@ -471,6 +471,9 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	billingSvc := billing.NewService(billingRepo, providerRegistry, logger)
 	billingHandler := billing.NewHandler(billingSvc, logger)
 
+	safetySvc.SetPassportEntitlementChecker(billingSvc)
+	discoSvc.SetSuperLikeCreditManager(billingSvc)
+
 	discoSvc.SetEntitlementChecker(func(ctx context.Context, userID, code string) bool {
 		has, err := billingRepo.HasEntitlement(ctx, userID, code)
 		return err == nil && has
@@ -490,6 +493,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/billing/subscription/cancel", memberMw(http.HandlerFunc(billingHandler.CancelSubscription)))
 	mux.Handle("/api/v1/billing/transactions", memberMw(http.HandlerFunc(billingHandler.Transactions)))
 	mux.Handle("/api/v1/billing/entitlements", memberMw(http.HandlerFunc(billingHandler.Entitlements)))
+	mux.Handle("/api/v1/billing/super-likes", memberMw(http.HandlerFunc(billingHandler.SuperLikes)))
 
 	// Authenticated Profile Boost Endpoints
 	mux.Handle("/api/v1/boosts/status", communityMw(http.HandlerFunc(billingHandler.BoostStatus)))
@@ -554,6 +558,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.HandleFunc("/api/v1/age-assurance/webhook/", safetyHandler.AgeVerificationWebhook)
 	mux.Handle("/api/v1/age-assurance/session", memberMw(http.HandlerFunc(safetyHandler.StartAgeVerificationSession)))
 	mux.Handle("/api/v1/age-assurance/status", memberMw(http.HandlerFunc(safetyHandler.GetAgeVerificationStatus)))
+	mux.Handle("/api/v1/age-assurance/trial", memberMw(http.HandlerFunc(safetyHandler.GetPassportTrialStatus)))
 
 	// Member Safety Reporting & Appeals
 	mux.Handle("/api/v1/reports", memberMw(http.HandlerFunc(safetyHandler.SubmitReport)))

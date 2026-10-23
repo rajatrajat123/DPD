@@ -157,6 +157,8 @@ type UpdatePreferencesRequest struct {
 	MinWeightKg             *int                     `json:"min_weight_kg,omitempty"`
 	MaxWeightKg             *int                     `json:"max_weight_kg,omitempty"`
 	Dealbreakers            *LifestyleDealbreakers   `json:"dealbreakers,omitempty"`
+	StrictMaxDistance       *bool                    `json:"strict_max_distance,omitempty"`
+	AutoExpandRadius        *bool                    `json:"auto_expand_radius,omitempty"`
 	NotificationPreferences *NotificationPreferences `json:"notification_preferences,omitempty"`
 }
 
@@ -620,10 +622,20 @@ func (s *Service) Login(ctx context.Context, req LoginRequest, clientInfo Client
 		return nil, ErrAccountNotActive
 	}
 
+	if user.PasswordHash == "" {
+		if idents, err := s.repo.ListOAuthIdentitiesForUser(ctx, user.ID); err == nil && len(idents) > 0 {
+			return nil, ErrGoogleSignInRequired
+		}
+		return nil, ErrInvalidCredentials
+	}
+
 	valid, err := VerifyPassword(req.Password, user.PasswordHash)
 	if err != nil || !valid {
 		if s.loginTracker != nil {
 			_, _, _ = s.loginTracker.RecordFailedLogin(ctx, req.Email, clientInfo.IPAddress)
+		}
+		if idents, err := s.repo.ListOAuthIdentitiesForUser(ctx, user.ID); err == nil && len(idents) > 0 {
+			return nil, ErrInvalidCredentialsWithGoogleOption
 		}
 		return nil, ErrInvalidCredentials
 	}
@@ -1377,6 +1389,16 @@ func (s *Service) UpdateMyPreferences(ctx context.Context, userID string, req Up
 	}
 	if req.Dealbreakers != nil {
 		pref.Dealbreakers = *req.Dealbreakers
+		if req.Dealbreakers.AutoExpandRadius {
+			pref.AutoExpandRadius = true
+		}
+	}
+	if req.StrictMaxDistance != nil {
+		pref.Dealbreakers.StrictMaxDistance = *req.StrictMaxDistance
+	}
+	if req.AutoExpandRadius != nil {
+		pref.AutoExpandRadius = *req.AutoExpandRadius
+		pref.Dealbreakers.AutoExpandRadius = *req.AutoExpandRadius
 	}
 	if req.PreferredOrientations != nil {
 		pref.PreferredOrientations = req.PreferredOrientations

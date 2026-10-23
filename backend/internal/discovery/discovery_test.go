@@ -1064,5 +1064,289 @@ func TestGetPublicProfile_SanitizedAndSafe(t *testing.T) {
 	}
 }
 
+type mockSuperLikeManager struct {
+	credits map[string]int
+}
+
+func (m *mockSuperLikeManager) GetSuperLikeCredits(ctx context.Context, userID string) (int, error) {
+	return m.credits[userID], nil
+}
+
+func (m *mockSuperLikeManager) ConsumeSuperLikeCredit(ctx context.Context, userID string) (int, error) {
+	if m.credits[userID] <= 0 {
+		return 0, errors.New("insufficient credits")
+	}
+	m.credits[userID]--
+	return m.credits[userID], nil
+}
+
+func TestSuperLikeCreditDeductionAndBoostRadius(t *testing.T) {
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	discoSvc := discovery.NewService(discoRepo, identRepo, nil, nil, discovery.WithEnvironment("local"))
+
+	mgr := &mockSuperLikeManager{credits: make(map[string]int)}
+	discoSvc.SetSuperLikeCreditManager(mgr)
+
+	ctx := context.Background()
+	now := time.Now().UTC()
+	actorID := "actor_super_like"
+	targetID := "target_super_like"
+
+	createTestUser(t, identRepo, actorID, "actor_sl@test.com", "Actor SL", now.AddDate(-25, 0, 0), []string{"non_binary"}, []string{"queer"}, 37.7749, -122.4194, 100)
+	createTestUser(t, identRepo, targetID, "target_sl@test.com", "Target SL", now.AddDate(-25, 0, 0), []string{"cisgender_woman"}, []string{"queer"}, 37.7750, -122.4190, 100)
+
+	// 1. With 0 credits, regular LIKE succeeds
+	_, err := discoSvc.Swipe(ctx, actorID, discovery.SwipeRequest{
+		TargetUserID: targetID,
+		Direction:    "LIKE",
+	}, "corr_like_1")
+	if err != nil {
+		t.Fatalf("regular LIKE must succeed with 0 super like credits, got err: %v", err)
+	}
+
+	// 2. With 0 credits, SUPER_SPARK must fail with ErrInsufficientSuperLikes
+	target2ID := "target_sl_2"
+	createTestUser(t, identRepo, target2ID, "target2_sl@test.com", "Target 2 SL", now.AddDate(-25, 0, 0), []string{"cisgender_woman"}, []string{"queer"}, 37.7750, -122.4190, 100)
+
+	_, err = discoSvc.Swipe(ctx, actorID, discovery.SwipeRequest{
+		TargetUserID: target2ID,
+		Direction:    "SUPER_SPARK",
+	}, "corr_super_1")
+	if !errors.Is(err, discovery.ErrInsufficientSuperLikes) {
+		t.Fatalf("expected ErrInsufficientSuperLikes when user has 0 credits, got: %v", err)
+	}
+
+	// 3. Grant 2 credits. SUPER_SPARK must now succeed and deduct 1 credit atomically
+	mgr.credits[actorID] = 2
+	resp, err := discoSvc.Swipe(ctx, actorID, discovery.SwipeRequest{
+		TargetUserID: target2ID,
+		Direction:    "SUPER_SPARK",
+	}, "corr_super_2")
+	if err != nil {
+		t.Fatalf("SUPER_SPARK must succeed when credits are available, got: %v", err)
+	}
+	if resp == nil {
+		t.Errorf("expected non-nil response")
+	}
+	if mgr.credits[actorID] != 1 {
+		t.Errorf("expected 1 remaining credit after consumption, got %d", mgr.credits[actorID])
+	}
+
+	// 4. Test Boost 160-mile radius calculation:
+	candNear := "cand_near_1"
+	createTestUser(t, identRepo, candNear, "cand_near@test.com", "Cand Near", now.AddDate(-25, 0, 0), []string{"non_binary"}, []string{"queer"}, 37.7750, -122.4190, 500)
+	discoRepo.SetUserBoost(candNear, 5.0)
+
+	cands, _, _, err := discoRepo.GetCandidates(ctx, actorID, "", 20)
+	if err != nil {
+		t.Fatalf("failed to get candidates: %v", err)
+	}
+	if len(cands) == 0 {
+		t.Fatalf("expected at least 1 candidate")
+	}
+	if cands[0].UserID != candNear {
+		t.Errorf("expected boosted candidate %s first, got %s", candNear, cands[0].UserID)
+	}
+}
+
+func TestDiscovery_AutomaticDistanceExpansion(t *testing.T) {
+	identRepo := identity.NewMemoryRepository()
+	discoRepo := discovery.NewMemoryRepository(identRepo)
+	discoSvc := discovery.NewService(discoRepo, identRepo, nil, nil, discovery.WithEnvironment("local"))
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Base location: Berlin (52.5200, 13.4050)
+	actorID := "actor_expand_user"
+	createTestUser(t, identRepo, actorID, "actor_expand@test.com", "Actor Expand", now.AddDate(-25, 0, 0), []string{"non-binary"}, []string{"queer"}, 52.5200, 13.4050, 50)
+
+	// Set actor preference with AutoExpandRadius: true
+	actorPref, err := identRepo.GetPreferences(ctx, actorID)
+	if err != nil {
+		t.Fatalf("failed to get actor pref: %v", err)
+	}
+	actorPref.AutoExpandRadius = true
+	actorPref.Dealbreakers.AutoExpandRadius = true
+	if err := identRepo.UpsertPreferences(ctx, actorPref); err != nil {
+		t.Fatalf("failed to update actor pref: %v", err)
+	}
+
+	// Candidate 1: ~10 km away (Potsdam area: 52.3906, 13.0645) -> Stage 0 (<= 50km)
+	cand1 := "cand_stage0"
+	createTestUser(t, identRepo, cand1, "cand1@test.com", "Cand Stage0", now.AddDate(-26, 0, 0), []string{"non-binary"}, []string{"queer"}, 52.3906, 13.0645, 50)
+
+	// Candidate 2: ~80 km away (Brandenburg/Rathenow: 52.6000, 12.3300) -> Stage 1 (<= 100km)
+	cand2 := "cand_stage1"
+	createTestUser(t, identRepo, cand2, "cand2@test.com", "Cand Stage1", now.AddDate(-24, 0, 0), []string{"non-binary"}, []string{"queer"}, 52.6000, 12.3300, 100)
+
+	// Candidate 3: ~180 km away (Leipzig: 51.3397, 12.3731) -> Stage 2 (<= 250km)
+	cand3 := "cand_stage2"
+	createTestUser(t, identRepo, cand3, "cand3@test.com", "Cand Stage2", now.AddDate(-27, 0, 0), []string{"non-binary"}, []string{"queer"}, 51.3397, 12.3731, 200)
+
+	// Candidate 4: ~350 km away (Prague, CZ: 50.0755, 14.4378) -> Stage 3 (<= 500km)
+	cand4 := "cand_stage3"
+	createTestUser(t, identRepo, cand4, "cand4@test.com", "Cand Stage3", now.AddDate(-28, 0, 0), []string{"non-binary"}, []string{"queer"}, 50.0755, 14.4378, 400)
+
+	// Candidate 5: ~670 km away (Zurich: 47.3769, 8.5417) -> Stage 4 (<= 804.7km / 500 miles)
+	cand5 := "cand_stage4"
+	createTestUser(t, identRepo, cand5, "cand5@test.com", "Cand Stage4", now.AddDate(-25, 0, 0), []string{"non-binary"}, []string{"queer"}, 47.3769, 8.5417, 800)
+
+	// Candidate 6: ~1050 km away (Rome: 41.9028, 12.4964) -> Beyond 500 miles (> 804.7km), MUST be excluded
+	cand6 := "cand_beyond_500mi"
+	createTestUser(t, identRepo, cand6, "cand6@test.com", "Cand Beyond", now.AddDate(-26, 0, 0), []string{"non-binary"}, []string{"queer"}, 41.9028, 12.4964, 1200)
+
+	t.Run("Progressive expansion returns nearest candidates first and caps at 500 miles", func(t *testing.T) {
+		feed, err := discoSvc.GetDiscoveryFeed(ctx, actorID, "", 10)
+		if err != nil {
+			t.Fatalf("GetDiscoveryFeed failed: %v", err)
+		}
+
+		// cand6 (> 804.7 km) must NOT be present
+		for _, c := range feed.Candidates {
+			if c.UserID == cand6 {
+				t.Fatalf("candidate %s beyond 500 miles (804.7km) should NOT be returned", cand6)
+			}
+		}
+
+		// Expected 5 candidates returned in order of stages (nearest first)
+		if feed.Count != 5 {
+			t.Fatalf("expected 5 candidates within 500 miles, got %d", feed.Count)
+		}
+
+		expectedOrder := []string{cand1, cand2, cand3, cand4, cand5}
+		for i, expectedID := range expectedOrder {
+			if feed.Candidates[i].UserID != expectedID {
+				t.Errorf("at index %d: expected candidate %s, got %s", i, expectedID, feed.Candidates[i].UserID)
+			}
+		}
+
+		// Verify stage tags and expanded flags
+		if feed.Candidates[0].ExpansionStage != 0 || feed.Candidates[0].IsExpanded {
+			t.Errorf("cand1 should be stage 0 and not expanded")
+		}
+		if feed.Candidates[1].ExpansionStage != 1 || !feed.Candidates[1].IsExpanded {
+			t.Errorf("cand2 should be stage 1 and expanded")
+		}
+		if feed.Candidates[2].ExpansionStage != 2 || !feed.Candidates[2].IsExpanded {
+			t.Errorf("cand3 should be stage 2 and expanded")
+		}
+		if feed.Candidates[3].ExpansionStage != 3 || !feed.Candidates[3].IsExpanded {
+			t.Errorf("cand4 should be stage 3 and expanded")
+		}
+		if feed.Candidates[4].ExpansionStage != 4 || !feed.Candidates[4].IsExpanded {
+			t.Errorf("cand5 should be stage 4 and expanded")
+		}
+	})
+
+	t.Run("Nearby profiles satisfy limit without returning expanded profiles on page 1", func(t *testing.T) {
+		// Limit = 1: Should only return cand1 (Stage 0)
+		feed, err := discoSvc.GetDiscoveryFeed(ctx, actorID, "", 1)
+		if err != nil {
+			t.Fatalf("GetDiscoveryFeed failed: %v", err)
+		}
+		if feed.Count != 1 {
+			t.Fatalf("expected 1 candidate, got %d", feed.Count)
+		}
+		if feed.Candidates[0].UserID != cand1 {
+			t.Errorf("expected nearest candidate %s, got %s", cand1, feed.Candidates[0].UserID)
+		}
+		if feed.Candidates[0].IsExpanded {
+			t.Errorf("candidate %s should not be marked as expanded", cand1)
+		}
+	})
+
+	t.Run("Strict maximum distance dealbreaker is never overridden", func(t *testing.T) {
+		strictActorID := "strict_actor"
+		createTestUser(t, identRepo, strictActorID, "strict@test.com", "Strict User", now.AddDate(-25, 0, 0), []string{"non-binary"}, []string{"queer"}, 52.5200, 13.4050, 50)
+		sPref, _ := identRepo.GetPreferences(ctx, strictActorID)
+		sPref.MaxDistanceKm = 50
+		sPref.Dealbreakers.StrictMaxDistance = true
+		sPref.AutoExpandRadius = true // Even if auto_expand is requested, strict dealbreaker wins!
+		_ = identRepo.UpsertPreferences(ctx, sPref)
+
+		// With auto_expand context requested as well
+		strictCtx := discovery.WithAutoExpand(ctx, true)
+		feed, err := discoSvc.GetDiscoveryFeed(strictCtx, strictActorID, "", 10)
+		if err != nil {
+			t.Fatalf("GetDiscoveryFeed failed: %v", err)
+		}
+
+		if feed.Count == 0 {
+			t.Fatalf("expected at least 1 candidate within 50km, got 0")
+		}
+		for _, c := range feed.Candidates {
+			if c.UserID == cand2 || c.UserID == cand3 || c.UserID == cand4 || c.UserID == cand5 || c.UserID == cand6 {
+				t.Fatalf("candidate %s beyond 50km appeared for strict actor", c.UserID)
+			}
+			if c.ApproximateDistanceKm > 50 {
+				t.Errorf("candidate %s distance %dkm exceeds strict 50km limit", c.UserID, c.ApproximateDistanceKm)
+			}
+			if c.IsExpanded {
+				t.Errorf("candidate %s should not be marked expanded for strict actor", c.UserID)
+			}
+		}
+	})
+
+	t.Run("Boost multiplier applies within 160 miles (257.5km) but not to farther candidates", func(t *testing.T) {
+		// cand3 is ~180 km away (within 160 miles / 257.5 km)
+		discoRepo.SetUserBoost(cand3, 5.0)
+		// cand4 is ~280 km away (beyond 160 miles / 257.5 km)
+		discoRepo.SetUserBoost(cand4, 5.0)
+
+		cands, _, _, err := discoRepo.GetCandidates(ctx, actorID, "", 10)
+		if err != nil {
+			t.Fatalf("GetCandidates failed: %v", err)
+		}
+
+		var c3, c4 *discovery.DiscoveryCandidate
+		for i := range cands {
+			if cands[i].UserID == cand3 {
+				c3 = &cands[i]
+			}
+			if cands[i].UserID == cand4 {
+				c4 = &cands[i]
+			}
+		}
+
+		if c3 == nil || c4 == nil {
+			t.Fatalf("candidates c3 and c4 must be present")
+		}
+
+		// cand3 is within 257.5 km, so its score is boosted: 37.5 * 5.0 = 187.5
+		if c3.CompatibilityScore < 100.0 {
+			t.Errorf("expected c3 score to reflect 5x boost (> 100.0), got %.2f", c3.CompatibilityScore)
+		}
+		// cand4 is > 257.5 km, so boost multiplier is ignored: stays at base 37.5
+		if c4.CompatibilityScore > 50.0 {
+			t.Errorf("expected c4 score NOT to receive boost multiplier (<= 50.0), got %.2f", c4.CompatibilityScore)
+		}
+	})
+
+	t.Run("Graceful empty response when no candidates in range", func(t *testing.T) {
+		isolatedActorID := "isolated_actor"
+		// North Pole coordinates: 89.9, 0.0
+		createTestUser(t, identRepo, isolatedActorID, "isolated@test.com", "Isolated User", now.AddDate(-25, 0, 0), []string{"non-binary"}, []string{"queer"}, 89.9, 0.0, 50)
+		isoPref, _ := identRepo.GetPreferences(ctx, isolatedActorID)
+		isoPref.AutoExpandRadius = true
+		_ = identRepo.UpsertPreferences(ctx, isoPref)
+
+		feed, err := discoSvc.GetDiscoveryFeed(ctx, isolatedActorID, "", 10)
+		if err != nil {
+			t.Fatalf("GetDiscoveryFeed failed: %v", err)
+		}
+		if feed.Count != 0 {
+			t.Fatalf("expected 0 candidates, got %d", feed.Count)
+		}
+		if len(feed.Candidates) != 0 {
+			t.Fatalf("expected empty candidates slice, got %d", len(feed.Candidates))
+		}
+		if feed.EmptyStateReason == "" {
+			t.Errorf("expected non-empty EmptyStateReason")
+		}
+	})
+}
+
+
 
 

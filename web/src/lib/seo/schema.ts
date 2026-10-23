@@ -135,7 +135,7 @@ export function getProductSchema() {
     },
     offers: {
       '@type': 'Offer',
-      price: '19.99',
+      price: '25.00',
       priceCurrency: 'USD',
       availability: 'https://schema.org/InStock',
       url: `${SITE_CONFIG.baseUrl}/pricing`,

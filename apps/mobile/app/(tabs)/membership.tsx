@@ -74,48 +74,19 @@ export default function MembershipScreen() {
   };
 
   const handlePurchasePlan = async (plan: BillingPlan) => {
-    try {
-      const policy = await storeBilling.getStorefrontPolicy();
-
-      if (policy.requires_choice_screen && policy.external_checkout_permitted && policy.external_checkout_url) {
-        Alert.alert(
-          `Subscribe to ${plan.name}`,
-          `${policy.disclosure_notice}\n\nPrice: ${plan.currency} ${(plan.price_cents / 100).toFixed(2)} / ${plan.billing_period.toLowerCase()}`,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Direct Web Checkout',
-              onPress: async () => {
-                const checkoutUrl = policy.external_checkout_url + '&plan=' + plan.plan_code;
-                await Linking.openURL(checkoutUrl);
-              },
-            },
-            {
-              text: 'In-App Store Purchase',
-              onPress: async () => {
-                await executeNativeStorePurchase(plan);
-              },
-            },
-          ]
-        );
-      } else {
-        Alert.alert(
-          `Upgrade to ${plan.name}`,
-          `${policy.disclosure_notice}\n\nPrice: ${plan.currency} ${(plan.price_cents / 100).toFixed(2)} / ${plan.billing_period.toLowerCase()}`,
-          [
-            { text: 'Cancel', style: 'cancel' },
-            {
-              text: 'Confirm In-App Purchase',
-              onPress: async () => {
-                await executeNativeStorePurchase(plan);
-              },
-            },
-          ]
-        );
-      }
-    } catch {
-      await executeNativeStorePurchase(plan);
-    }
+    Alert.alert(
+      `Upgrade to ${plan.name}`,
+      `Price: ${plan.currency} ${(plan.price_cents / 100).toFixed(2)} / ${plan.billing_period.toLowerCase()}\n\nConfirm purchase via your device App Store account.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Confirm In-App Purchase',
+          onPress: async () => {
+            await executeNativeStorePurchase(plan);
+          },
+        },
+      ]
+    );
   };
 
   const handleActivateBoost = async () => {
@@ -126,9 +97,9 @@ export default function MembershipScreen() {
 
     setIsBoosting(true);
     try {
-      const res = await storeBilling.activateBoost(30);
+      const res = await storeBilling.activateBoost(60);
       if (res.success) {
-        Alert.alert('Profile Boosted!', 'Your profile is boosted with a 3x discovery multiplier for the next 30 minutes.');
+        Alert.alert('Profile Boosted!', 'Your profile is boosted with a 5x discovery multiplier for the next 60 minutes up to 160 miles (257.5 km).');
         await loadBillingData();
       }
     } catch {
@@ -246,7 +217,7 @@ export default function MembershipScreen() {
               <View>
                 <Text style={styles.statusLabel}>CURRENT STATUS</Text>
                 <Text style={[styles.tierName, { color: colors.text }]}>
-                  {activeTier === 'BLACK' ? 'Aura Black VIP' : activeTier === 'PLUS' ? 'Aura Plus' : 'Aura Member'}
+                  {activeTier === 'BLACK' || activeTier === 'EXTRA_PREMIUM' ? 'Aura Extra Premium' : activeTier === 'PLUS' ? 'Aura Plus' : 'Aura Member'}
                 </Text>
               </View>
               <View style={[styles.tierBadge, { backgroundColor: colors.goldMuted, borderColor: colors.gold }]}>
@@ -301,7 +272,7 @@ export default function MembershipScreen() {
                 disabled={isBoosting || !entitlements || entitlements.boost_credits_remaining <= 0}
                 activeOpacity={0.8}
               >
-                <Text style={[styles.boostBtnText, { color: colors.textInverse }]}>Boost 30m</Text>
+                <Text style={[styles.boostBtnText, { color: colors.textInverse }]}>Boost 60m</Text>
               </TouchableOpacity>
             </View>
           </View>

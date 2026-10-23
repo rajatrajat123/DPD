@@ -1,6 +1,12 @@
 import { Platform } from 'react-native';
 import Constants from 'expo-constants';
 
+const isTunnelHost = (host: string): boolean =>
+  host.endsWith('.exp.direct') ||
+  host.endsWith('.expo.direct') ||
+  host.includes('ngrok') ||
+  host.includes('exp.direct');
+
 const getHostFromConstants = (): string | null => {
   const hostCandidate =
     Constants.expoConfig?.hostUri ||
@@ -10,7 +16,7 @@ const getHostFromConstants = (): string | null => {
 
   if (typeof hostCandidate === 'string' && hostCandidate.length > 0) {
     const host = hostCandidate.split(':')[0];
-    if (host && host !== 'localhost' && host !== '127.0.0.1') {
+    if (host && host !== 'localhost' && host !== '127.0.0.1' && !isTunnelHost(host)) {
       return host;
     }
   }
@@ -18,7 +24,7 @@ const getHostFromConstants = (): string | null => {
   if (Constants.linkingUri) {
     try {
       const match = Constants.linkingUri.match(/^[a-zA-Z]+:\/\/([^:/]+)/);
-      if (match && match[1] && match[1] !== 'localhost' && match[1] !== '127.0.0.1') {
+      if (match && match[1] && match[1] !== 'localhost' && match[1] !== '127.0.0.1' && !isTunnelHost(match[1])) {
         return match[1];
       }
     } catch {

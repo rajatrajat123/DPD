@@ -6,10 +6,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -41,15 +44,135 @@ func (m *mockHub) WasDisconnected(userID string) bool {
 	return false
 }
 
-func setupTestSafety(t *testing.T) (*safety.Service, *safety.MemoryRepository, *identity.MemoryRepository, *mockHub, *safety.PersonaAgeAssuranceProvider) {
+func createTestPersonaSignature(secret string, timestamp int64, payload []byte) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(strconv.FormatInt(timestamp, 10)))
+	mac.Write([]byte("."))
+	mac.Write(payload)
+	sigHex := hex.EncodeToString(mac.Sum(nil))
+	return fmt.Sprintf("t=%d,v1=%s", timestamp, sigHex)
+}
+
+func newMockPersonaServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// POST /api/v1/inquiries
+		if strings.HasPrefix(r.URL.Path, "/api/v1/inquiries") && r.Method == http.MethodPost {
+			auth := r.Header.Get("Authorization")
+			if !strings.HasPrefix(auth, "Bearer ") {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{{"title": "Unauthorized"}},
+				})
+				return
+			}
+
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+
+			data, _ := body["data"].(map[string]any)
+			attrs, _ := data["attributes"].(map[string]any)
+			templateID, _ := attrs["inquiry-template-id"].(string)
+			refID, _ := attrs["reference-id"].(string)
+
+			if templateID == "itmpl_invalid_trigger_422" {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{
+						{
+							"title":  "Unprocessable Entity",
+							"detail": "The inquiry template requires passport configuration",
+						},
+					},
+				})
+				return
+			}
+
+			if refID == "" {
+				refID = "user_default"
+			}
+			inquiryID := "inq_" + refID
+
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"id":   inquiryID,
+					"type": "inquiry",
+					"attributes": map[string]any{
+						"status":       "pending",
+						"reference-id": refID,
+						"hosted-url":   "https://withpersona.com/verify?inquiry-id=" + inquiryID,
+						"expires-at":   time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+					},
+				},
+			})
+			return
+		}
+
+		// GET /api/v1/inquiry-templates/<id>
+		if strings.HasPrefix(r.URL.Path, "/api/v1/inquiry-templates/") && r.Method == http.MethodGet {
+			templateID := strings.TrimPrefix(r.URL.Path, "/api/v1/inquiry-templates/")
+			if templateID == "itmpl_sandbox_forbidden" {
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{{"title": "Sandbox key restricted"}},
+				})
+				return
+			}
+			if templateID == "itmpl_not_found" {
+				w.WriteHeader(http.StatusNotFound)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"errors": []map[string]any{{"title": "Template not found"}},
+				})
+				return
+			}
+
+			w.WriteHeader(http.StatusOK)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": map[string]any{
+					"id":   templateID,
+					"type": "inquiry-template",
+					"attributes": map[string]any{
+						"name":   "Passport Verification Template",
+						"status": "active",
+					},
+				},
+			})
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+func setupTestSafetyWithServer(t *testing.T) (*safety.Service, *safety.MemoryRepository, *identity.MemoryRepository, *mockHub, *safety.PersonaAgeAssuranceProvider, *httptest.Server) {
 	t.Helper()
 	repo := safety.NewMemoryRepository()
 	idRepo := identity.NewMemoryRepository()
 	hub := &mockHub{}
-	provider := safety.NewPersonaAgeAssuranceProvider("test_persona_api_key", "test_webhook_secret_xyz")
+	mockServer := newMockPersonaServer(t)
+
+	provider := safety.NewPersonaAgeAssuranceProvider(
+		"test_persona_api_key",
+		"test_webhook_secret_xyz",
+		"itmpl_passport_test_123",
+		safety.WithPersonaBaseURL(mockServer.URL),
+	)
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 
 	svc := safety.NewService(repo, idRepo, provider, hub, logger)
+	return svc, repo, idRepo, hub, provider, mockServer
+}
+
+func setupTestSafety(t *testing.T) (*safety.Service, *safety.MemoryRepository, *identity.MemoryRepository, *mockHub, *safety.PersonaAgeAssuranceProvider) {
+	svc, repo, idRepo, hub, provider, _ := setupTestSafetyWithServer(t)
 	return svc, repo, idRepo, hub, provider
 }
 
@@ -257,54 +380,222 @@ func TestFraudManager_BruteForceLockout(t *testing.T) {
 
 func TestPersonaAgeAssuranceProvider(t *testing.T) {
 	secret := "super_secret_webhook_key"
-	provider := safety.NewPersonaAgeAssuranceProvider("persona_key_123", secret)
+	mockServer := newMockPersonaServer(t)
 	ctx := context.Background()
 
-	// 1. Session creation
-	sess, err := provider.CreateSession(ctx, "usr_100", "user@example.com")
-	if err != nil {
-		t.Fatalf("failed to create session: %v", err)
-	}
-	if !strings.HasPrefix(sess.SessionID, "inq_usr_100") {
-		t.Errorf("expected session prefix inq_usr_100, got %s", sess.SessionID)
-	}
-	if !strings.Contains(sess.VendorURL, sess.SessionID) {
-		t.Errorf("expected vendor URL to contain session ID")
-	}
+	t.Run("CreateSession_Success", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_key_123",
+			secret,
+			"itmpl_passport_test_123",
+			safety.WithPersonaBaseURL(mockServer.URL),
+			safety.WithPersonaRedirectURI("aura://auth/verify-age"),
+		)
 
-	// 2. Webhook verification with valid signature
-	payload := []byte(`{
-		"event_id": "evt_abc123",
-		"data": {
-			"id": "` + sess.SessionID + `",
-			"attributes": {
-				"status": "passed",
-				"reference_id": "usr_100",
-				"risk_score": 10
+		sess, err := provider.CreateSession(ctx, "usr_100", "user@example.com")
+		if err != nil {
+			t.Fatalf("failed to create session: %v", err)
+		}
+		if !strings.HasPrefix(sess.SessionID, "inq_usr_100") {
+			t.Errorf("expected session prefix inq_usr_100, got %s", sess.SessionID)
+		}
+		if !strings.Contains(sess.VendorURL, sess.SessionID) {
+			t.Errorf("expected vendor URL to contain session ID: %s", sess.VendorURL)
+		}
+		if sess.ExpiresAt.IsZero() {
+			t.Errorf("expected non-zero expiration time")
+		}
+	})
+
+	t.Run("CreateSession_MissingConfig", func(t *testing.T) {
+		noKey := safety.NewPersonaAgeAssuranceProvider("", secret, "itmpl_123")
+		if _, err := noKey.CreateSession(ctx, "usr_1", ""); err == nil {
+			t.Errorf("expected error when API key missing")
+		}
+
+		noTemplate := safety.NewPersonaAgeAssuranceProvider("key", secret)
+		if _, err := noTemplate.CreateSession(ctx, "usr_1", ""); err == nil {
+			t.Errorf("expected error when template ID missing")
+		}
+	})
+
+	t.Run("CreateSession_VendorError", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_key_123",
+			secret,
+			"itmpl_invalid_trigger_422",
+			safety.WithPersonaBaseURL(mockServer.URL),
+		)
+		_, err := provider.CreateSession(ctx, "usr_err", "err@aura.dating")
+		if err == nil {
+			t.Fatalf("expected error from 422 vendor response")
+		}
+		if !strings.Contains(err.Error(), "422") {
+			t.Errorf("expected error to mention 422, got %v", err)
+		}
+	})
+
+	t.Run("CheckTemplatePassportSupport", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_key_123",
+			secret,
+			"itmpl_passport_test_123",
+			safety.WithPersonaBaseURL(mockServer.URL),
+		)
+
+		info, err := provider.CheckTemplatePassportSupport(ctx)
+		if err != nil {
+			t.Fatalf("unexpected error checking template: %v", err)
+		}
+		if info.Status != "active" {
+			t.Errorf("expected active status, got %s", info.Status)
+		}
+
+		// Sandbox forbidden graceful note
+		sandboxProvider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_sandbox_key",
+			secret,
+			"itmpl_sandbox_forbidden",
+			safety.WithPersonaBaseURL(mockServer.URL),
+		)
+		sInfo, err := sandboxProvider.CheckTemplatePassportSupport(ctx)
+		if err != nil {
+			t.Fatalf("expected sandbox 403 to be handled gracefully, got err: %v", err)
+		}
+		if !sInfo.IsSandbox {
+			t.Errorf("expected IsSandbox to be true")
+		}
+
+		// Non-existent template
+		notFoundProvider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_key_123",
+			secret,
+			"itmpl_not_found",
+			safety.WithPersonaBaseURL(mockServer.URL),
+		)
+		_, err = notFoundProvider.CheckTemplatePassportSupport(ctx)
+		if err == nil {
+			t.Fatalf("expected 404 template error")
+		}
+	})
+
+	t.Run("VerifyWebhook_OfficialPersonaSignature", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider("persona_key_123", secret)
+		payload := []byte(`{
+			"data": {
+				"id": "inq_usr_100",
+				"type": "inquiry",
+				"attributes": {
+					"status": "approved",
+					"reference-id": "usr_100",
+					"fields": {
+						"birthdate": {"value": "1998-05-15"}
+					}
+				}
+			}
+		}`)
+
+		now := time.Now().UTC().Unix()
+		sigHeader := createTestPersonaSignature(secret, now, payload)
+
+		res, err := provider.VerifyWebhook(ctx, payload, sigHeader)
+		if err != nil {
+			t.Fatalf("expected webhook verification to succeed: %v", err)
+		}
+		if res.Status != safety.AgeVerified {
+			t.Errorf("expected AgeVerified, got %s", res.Status)
+		}
+		if res.SessionID != "inq_usr_100" {
+			t.Errorf("expected inq_usr_100, got %s", res.SessionID)
+		}
+		if res.UserID != "usr_100" {
+			t.Errorf("expected usr_100, got %s", res.UserID)
+		}
+	})
+
+	t.Run("VerifyWebhook_ReplayProtectionExpired", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider(
+			"persona_key_123",
+			secret,
+			safety.WithPersonaTolerance(5*time.Minute),
+		)
+		payload := []byte(`{"data":{"id":"inq_123","attributes":{"status":"approved"}}}`)
+
+		// 10 minutes in the past
+		past := time.Now().UTC().Add(-10 * time.Minute).Unix()
+		sigHeader := createTestPersonaSignature(secret, past, payload)
+
+		_, err := provider.VerifyWebhook(ctx, payload, sigHeader)
+		if !errors.Is(err, safety.ErrExpiredWebhookSignature) {
+			t.Errorf("expected ErrExpiredWebhookSignature for 10-minute old webhook, got %v", err)
+		}
+	})
+
+	t.Run("VerifyWebhook_InvalidSignature", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider("persona_key_123", secret)
+		payload := []byte(`{"data":{"id":"inq_123","attributes":{"status":"approved"}}}`)
+
+		// Wrong secret
+		sigHeader := createTestPersonaSignature("wrong_secret", time.Now().UTC().Unix(), payload)
+		_, err := provider.VerifyWebhook(ctx, payload, sigHeader)
+		if !errors.Is(err, safety.ErrInvalidWebhookSignature) {
+			t.Errorf("expected ErrInvalidWebhookSignature, got %v", err)
+		}
+
+		// Tampered payload
+		tamperedSig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), []byte(`tampered`))
+		_, err = provider.VerifyWebhook(ctx, payload, tamperedSig)
+		if !errors.Is(err, safety.ErrInvalidWebhookSignature) {
+			t.Errorf("expected ErrInvalidWebhookSignature for tampered payload, got %v", err)
+		}
+	})
+
+	t.Run("VerifyWebhook_LegacyFallback", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider("persona_key_123", secret)
+		payload := []byte(`{"data":{"id":"inq_legacy","attributes":{"status":"passed","reference-id":"usr_legacy"}}}`)
+
+		mac := hmac.New(sha256.New, []byte(secret))
+		mac.Write(payload)
+		legacySig := hex.EncodeToString(mac.Sum(nil))
+
+		res, err := provider.VerifyWebhook(ctx, payload, legacySig)
+		if err != nil {
+			t.Fatalf("expected legacy hex signature to succeed: %v", err)
+		}
+		if res.Status != safety.AgeVerified {
+			t.Errorf("expected AgeVerified, got %s", res.Status)
+		}
+	})
+
+	t.Run("VerifyWebhook_OutcomeStatusMapping", func(t *testing.T) {
+		provider := safety.NewPersonaAgeAssuranceProvider("persona_key_123", secret)
+
+		testCases := []struct {
+			providerStatus string
+			expected       safety.AgeAssuranceStatus
+		}{
+			{"approved", safety.AgeVerified},
+			{"passed", safety.AgeVerified},
+			{"declined", safety.AgeRejected},
+			{"failed", safety.AgeRejected},
+			{"needs_review", safety.AgeManualReview},
+			{"marked_for_review", safety.AgeManualReview},
+			{"completed", safety.AgePending},
+			{"expired", safety.AgeExpired},
+		}
+
+		for _, tc := range testCases {
+			payload := []byte(fmt.Sprintf(`{"data":{"id":"inq_status","attributes":{"status":"%s"}}}`, tc.providerStatus))
+			sig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), payload)
+			res, err := provider.VerifyWebhook(ctx, payload, sig)
+			if err != nil {
+				t.Fatalf("status %s verification failed: %v", tc.providerStatus, err)
+			}
+			if res.Status != tc.expected {
+				t.Errorf("status %s: expected %s, got %s", tc.providerStatus, tc.expected, res.Status)
 			}
 		}
-	}`)
-
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write(payload)
-	validSig := hex.EncodeToString(mac.Sum(nil))
-
-	res, err := provider.VerifyWebhook(ctx, payload, validSig)
-	if err != nil {
-		t.Fatalf("expected successful webhook verification, got %v", err)
-	}
-	if res.Status != safety.AgeVerified {
-		t.Errorf("expected AgeVerified status, got %s", res.Status)
-	}
-	if res.RiskScore != 10 {
-		t.Errorf("expected risk score 10, got %d", res.RiskScore)
-	}
-
-	// 3. Webhook with invalid signature
-	_, err = provider.VerifyWebhook(ctx, payload, "invalid_signature")
-	if err != safety.ErrInvalidWebhookSignature {
-		t.Errorf("expected ErrInvalidWebhookSignature, got %v", err)
-	}
+	})
 }
 
 func TestDevAgeAssuranceProvider_ProductionGuard(t *testing.T) {
@@ -994,5 +1285,344 @@ func TestStepUpAuthEndpoint(t *testing.T) {
 	// Token verifies cleanly against verifier
 	if err := verifier.VerifyStepUpToken(resp.StepUpToken, adminID); err != nil {
 		t.Errorf("issued step-up token must verify successfully, got: %v", err)
+	}
+}
+
+// -----------------------------------------------------------------------------
+// 10. Persona Age Assurance Security, Idempotency & Webhook Handler Tests
+// -----------------------------------------------------------------------------
+
+func TestSafetyService_AgeAssurance_Security(t *testing.T) {
+	svc, _, _, _, _ := setupTestSafety(t)
+	ctx := context.Background()
+	secret := "test_webhook_secret_xyz"
+
+	// 1. User mismatch rejection: session created for user_A, but webhook has reference-id user_B
+	sess, err := svc.CreateAgeVerificationSession(ctx, "usr_alice", "alice@aura.dating", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	mismatchPayload := []byte(`{
+		"event_id": "evt_mismatch_1",
+		"data": {
+			"id": "` + sess.SessionID + `",
+			"attributes": {
+				"status": "passed",
+				"reference_id": "usr_bob_impersonator"
+			}
+		}
+	}`)
+	sig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), mismatchPayload)
+	_, err = svc.ProcessAgeVerificationWebhook(ctx, mismatchPayload, sig)
+	if !errors.Is(err, safety.ErrUserMismatch) {
+		t.Fatalf("expected ErrUserMismatch when reference-id doesn't match session owner, got %v", err)
+	}
+
+	// 2. Duplicate event idempotency
+	validPayload := []byte(`{
+		"event_id": "evt_idempotent_1",
+		"data": {
+			"id": "` + sess.SessionID + `",
+			"attributes": {
+				"status": "passed",
+				"reference_id": "usr_alice"
+			}
+		}
+	}`)
+	sig = createTestPersonaSignature(secret, time.Now().UTC().Unix(), validPayload)
+
+	// First delivery: succeeds and marks user VERIFIED
+	res1, err := svc.ProcessAgeVerificationWebhook(ctx, validPayload, sig)
+	if err != nil {
+		t.Fatalf("first delivery failed: %v", err)
+	}
+	if res1.Status != safety.AgeVerified {
+		t.Errorf("expected AgeVerified, got %s", res1.Status)
+	}
+
+	// Second delivery (duplicate): succeeds idempotently
+	res2, err := svc.ProcessAgeVerificationWebhook(ctx, validPayload, sig)
+	if err != nil {
+		t.Fatalf("duplicate event must succeed idempotently, got %v", err)
+	}
+	if res2.Status != safety.AgeVerified {
+		t.Errorf("expected AgeVerified on duplicate, got %s", res2.Status)
+	}
+
+	// 3. Monotonicity: verified status cannot be downgraded by delayed PENDING event
+	pendingPayload := []byte(`{
+		"event_id": "evt_delayed_pending_1",
+		"data": {
+			"id": "` + sess.SessionID + `",
+			"attributes": {
+				"status": "completed",
+				"reference_id": "usr_alice"
+			}
+		}
+	}`)
+	pendingSig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), pendingPayload)
+	_, err = svc.ProcessAgeVerificationWebhook(ctx, pendingPayload, pendingSig)
+	if err != nil {
+		t.Fatalf("delayed pending event should be handled without error: %v", err)
+	}
+
+	status, err := svc.GetAgeAssuranceStatus(ctx, "usr_alice")
+	if err != nil {
+		t.Fatalf("failed to get status: %v", err)
+	}
+	if status.Status != safety.AgeVerified {
+		t.Errorf("user status must remain VERIFIED and not be downgraded by delayed pending event, got %s", status.Status)
+	}
+}
+
+func TestSafetyHandler_AgeVerificationWebhook(t *testing.T) {
+	svc, _, _, _, _ := setupTestSafety(t)
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	h := safety.NewHandler(svc, logger)
+	ctx := context.Background()
+	secret := "test_webhook_secret_xyz"
+
+	sess, err := svc.CreateAgeVerificationSession(ctx, "usr_webhook_test", "webhook@aura.dating", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("failed to create session: %v", err)
+	}
+
+	payload := []byte(`{
+		"event_id": "evt_h_1",
+		"data": {
+			"id": "` + sess.SessionID + `",
+			"attributes": {
+				"status": "passed",
+				"reference_id": "usr_webhook_test"
+			}
+		}
+	}`)
+
+	t.Run("MissingSignatureHeader", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/webhook", strings.NewReader(string(payload)))
+		rec := httptest.NewRecorder()
+		h.AgeVerificationWebhook(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized for missing signature, got %d", rec.Code)
+		}
+	})
+
+	t.Run("ExpiredSignatureHeader", func(t *testing.T) {
+		past := time.Now().UTC().Add(-10 * time.Minute).Unix()
+		sig := createTestPersonaSignature(secret, past, payload)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/webhook", strings.NewReader(string(payload)))
+		req.Header.Set("Persona-Signature", sig)
+		rec := httptest.NewRecorder()
+		h.AgeVerificationWebhook(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("expected 401 Unauthorized for expired signature, got %d", rec.Code)
+		}
+	})
+
+	t.Run("UserMismatchReturns403", func(t *testing.T) {
+		mismatchPayload := []byte(`{
+			"event_id": "evt_h_mismatch",
+			"data": {
+				"id": "` + sess.SessionID + `",
+				"attributes": {
+					"status": "passed",
+					"reference_id": "usr_attacker"
+				}
+			}
+		}`)
+		sig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), mismatchPayload)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/webhook", strings.NewReader(string(mismatchPayload)))
+		req.Header.Set("Persona-Signature", sig)
+		rec := httptest.NewRecorder()
+		h.AgeVerificationWebhook(rec, req)
+
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("expected 403 Forbidden for user mismatch, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("ValidSignatureReturns200", func(t *testing.T) {
+		sig := createTestPersonaSignature(secret, time.Now().UTC().Unix(), payload)
+
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/webhook", strings.NewReader(string(payload)))
+		req.Header.Set("Persona-Signature", sig)
+		rec := httptest.NewRecorder()
+		h.AgeVerificationWebhook(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected 200 OK for valid webhook, got %d: %s", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+type mockPassportEntitlementChecker struct {
+	entitledUsers map[string]bool
+}
+
+func (m *mockPassportEntitlementChecker) HasPassportEntitlement(ctx context.Context, userID string) (bool, error) {
+	return m.entitledUsers[userID], nil
+}
+
+func TestPassportVerificationTrialLifecycle(t *testing.T) {
+	repo := safety.NewMemoryRepository()
+	identRepo := identity.NewMemoryRepository()
+	devProvider := safety.NewDevAgeAssuranceProvider("local")
+	svc := safety.NewService(repo, identRepo, devProvider, nil, nil)
+	mockChecker := &mockPassportEntitlementChecker{entitledUsers: make(map[string]bool)}
+	svc.SetPassportEntitlementChecker(mockChecker)
+
+	ctx := context.Background()
+	userID := "usr_trial_tester_1"
+
+	// 1. Initial trial status before first activation
+	initialStatus, err := svc.GetPassportTrialStatus(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to get initial status: %v", err)
+	}
+	if initialStatus.HasStarted {
+		t.Errorf("expected HasStarted=false before activation")
+	}
+	if initialStatus.RequiresUpgrade {
+		t.Errorf("expected RequiresUpgrade=false before activation")
+	}
+	if !initialStatus.IsEntitled {
+		t.Errorf("expected IsEntitled=true for eligible free user with unused 7-day trial")
+	}
+
+	// 2. First activation initiates 7-day trial
+	sess, err := svc.CreateAgeVerificationSession(ctx, userID, "user@test.com", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("first verification session should succeed: %v", err)
+	}
+	if sess.SessionID == "" {
+		t.Errorf("expected non-empty session ID")
+	}
+
+	// Check status immediately after activation
+	statusAfterStart, err := svc.GetPassportTrialStatus(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to get status after start: %v", err)
+	}
+	if !statusAfterStart.HasStarted || !statusAfterStart.IsActive {
+		t.Errorf("expected active started trial, got: %+v", statusAfterStart)
+	}
+	if statusAfterStart.DaysRemaining < 6 || statusAfterStart.DaysRemaining > 7 {
+		t.Errorf("expected 6-7 days remaining, got %d", statusAfterStart.DaysRemaining)
+	}
+	originalEndsAt := *statusAfterStart.EndsAt
+
+	// 3. Subsequent session within trial period succeeds and does not extend ends_at
+	_, err = svc.CreateAgeVerificationSession(ctx, userID, "user@test.com", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("repeat session within trial should succeed: %v", err)
+	}
+	statusRepeat, _ := svc.GetPassportTrialStatus(ctx, userID)
+	if !statusRepeat.EndsAt.Equal(originalEndsAt) {
+		t.Errorf("repeat call must not extend trial duration, expected %v, got %v", originalEndsAt, statusRepeat.EndsAt)
+	}
+
+	// 4. Simulate trial expiration: set trial ends_at in the past
+	expiredTrial := &safety.PassportVerificationTrial{
+		UserID:    userID,
+		StartedAt: time.Now().UTC().Add(-8 * 24 * time.Hour),
+		EndsAt:    time.Now().UTC().Add(-1 * 24 * time.Hour),
+		TrialUsed: true,
+		CreatedAt: time.Now().UTC().Add(-8 * 24 * time.Hour),
+		UpdatedAt: time.Now().UTC(),
+	}
+	_ = repo.SavePassportTrial(ctx, expiredTrial)
+
+	// Status must reflect expired trial requiring upgrade
+	expiredStatus, err := svc.GetPassportTrialStatus(ctx, userID)
+	if err != nil {
+		t.Fatalf("failed to get expired status: %v", err)
+	}
+	if expiredStatus.IsActive {
+		t.Errorf("expired trial must not be active")
+	}
+	if !expiredStatus.RequiresUpgrade {
+		t.Errorf("expired unentitled user must require upgrade")
+	}
+
+	// Attempting to create new verification session without entitlement must fail with ErrPassportTrialExpired
+	_, err = svc.CreateAgeVerificationSession(ctx, userID, "user@test.com", "127.0.0.1")
+	if !errors.Is(err, safety.ErrPassportTrialExpired) {
+		t.Fatalf("expected ErrPassportTrialExpired for expired unentitled trial, got: %v", err)
+	}
+
+	// Mandatory basic age verification (e.g. selfie) must remain free even if passport trial has expired
+	basicSess, err := svc.CreateAgeVerificationSession(ctx, userID, "user@test.com", "127.0.0.1", "selfie_asset_123")
+	if err != nil {
+		t.Fatalf("mandatory basic age verification must remain free even when passport trial expired: %v", err)
+	}
+	if basicSess.SessionID == "" {
+		t.Errorf("expected valid session for mandatory basic age verification")
+	}
+
+	// 5. Test HTTP Handler mapping to 403 PASSPORT_TRIAL_EXPIRED
+	handler := safety.NewHandler(svc, nil)
+	authUser := &identity.AuthUser{ID: userID, Email: "user@test.com", Role: identity.RoleMember}
+	authCtx := identity.ContextWithAuthUser(context.Background(), authUser)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/age-assurance/session", nil).WithContext(authCtx)
+	rec := httptest.NewRecorder()
+	handler.StartAgeVerificationSession(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden on expired trial, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "PASSPORT_TRIAL_EXPIRED") {
+		t.Errorf("expected PASSPORT_TRIAL_EXPIRED in error code, got: %s", rec.Body.String())
+	}
+
+	// Test GET /api/v1/age-assurance/trial HTTP handler
+	trialReq := httptest.NewRequest(http.MethodGet, "/api/v1/age-assurance/trial", nil).WithContext(authCtx)
+	trialRec := httptest.NewRecorder()
+	handler.GetPassportTrialStatus(trialRec, trialReq)
+
+	if trialRec.Code != http.StatusOK {
+		t.Errorf("expected 200 OK for trial status endpoint, got %d: %s", trialRec.Code, trialRec.Body.String())
+	}
+	if !strings.Contains(trialRec.Body.String(), "requires_upgrade") {
+		t.Errorf("expected requires_upgrade in response, got: %s", trialRec.Body.String())
+	}
+
+	// 6. User upgrades to paid tier (Aura Plus / Aura Extra Premium)
+	mockChecker.entitledUsers[userID] = true
+
+	entitledStatus, _ := svc.GetPassportTrialStatus(ctx, userID)
+	if !entitledStatus.IsEntitled {
+		t.Errorf("expected IsEntitled=true after subscription upgrade")
+	}
+	if entitledStatus.RequiresUpgrade {
+		t.Errorf("expected RequiresUpgrade=false after subscription upgrade")
+	}
+
+	// Session creation now succeeds
+	entitledSess, err := svc.CreateAgeVerificationSession(ctx, userID, "user@test.com", "127.0.0.1")
+	if err != nil {
+		t.Fatalf("entitled subscriber should be able to create verification session even after trial expired: %v", err)
+	}
+	if entitledSess.SessionID == "" {
+		t.Errorf("expected valid session for entitled user")
+	}
+
+	// 7. Verify that completed verification is preserved even if user is not currently in active trial
+	now := time.Now().UTC()
+	_ = repo.UpsertAgeAssurance(ctx, &safety.AgeAssurance{
+		UserID:     userID,
+		Provider:   "PERSONA",
+		Status:     safety.AgeVerified,
+		VerifiedAt: &now,
+	})
+
+	statusPreserved, _ := svc.GetPassportTrialStatus(ctx, userID)
+	if statusPreserved.VerifiedStatus != safety.AgeVerified {
+		t.Errorf("verified status must be preserved, expected VERIFIED, got: %s", statusPreserved.VerifiedStatus)
 	}
 }

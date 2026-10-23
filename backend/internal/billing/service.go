@@ -197,6 +197,12 @@ func (s *Service) VerifyPurchase(
 		if product.BoostCredits > 0 {
 			_, _ = s.repo.AddBoostCredits(ctx, userID, product.BoostCredits)
 		}
+		// Grant consumable Super Like credits
+		if product.SuperLikeCredits > 0 {
+			_, _ = s.repo.AddSuperLikeCredits(ctx, userID, product.SuperLikeCredits)
+		} else if product.PlanCode == PlanSuperSpark5Pack || product.PlanCode == PlanSuperLikes5Pack {
+			_, _ = s.repo.AddSuperLikeCredits(ctx, userID, 5)
+		}
 		// Grant consumable entitlements (e.g. SUPER_SPARK)
 		if len(product.Entitlements) > 0 {
 			expires := time.Now().UTC().Add(365 * 24 * time.Hour)
@@ -504,15 +510,17 @@ func (s *Service) GetSubscriptionStatus(ctx context.Context, userID string) (*Su
 	}
 
 	credits, _ := s.repo.GetBoostCredits(ctx, userID)
+	superLikeCredits, _ := s.repo.GetSuperLikeCredits(ctx, userID)
 	activeBoost, _ := s.repo.GetActiveProfileBoost(ctx, userID)
 
 	return &SubscriptionStatusResponse{
-		HasActiveSubscription: activeSub != nil,
-		Tier:                  tier,
-		Subscription:          activeSub,
-		Entitlements:          entCodes,
-		BoostCreditsRemaining: credits,
-		ActiveBoost:           activeBoost,
+		HasActiveSubscription:     activeSub != nil,
+		Tier:                      tier,
+		Subscription:              activeSub,
+		Entitlements:              entCodes,
+		BoostCreditsRemaining:     credits,
+		SuperLikeCreditsRemaining: superLikeCredits,
+		ActiveBoost:               activeBoost,
 	}, nil
 }
 
@@ -540,7 +548,7 @@ func (s *Service) ActivateBoost(ctx context.Context, userID string, durationMinu
 	}
 
 	if durationMinutes <= 0 {
-		durationMinutes = 30
+		durationMinutes = DefaultBoostDurationMinutes
 	}
 
 	// Atomically consume one credit
@@ -553,7 +561,9 @@ func (s *Service) ActivateBoost(ctx context.Context, userID string, durationMinu
 	boost := &ProfileBoost{
 		UserID:          userID,
 		DurationMinutes: durationMinutes,
-		Multiplier:      2.5,
+		Multiplier:      DefaultBoostMultiplier,
+		RadiusMiles:     MaxBoostRadiusMiles,
+		MaxRadiusKm:     MaxBoostRadiusKm,
 		ActivatedAt:     now,
 		ExpiresAt:       now.Add(time.Duration(durationMinutes) * time.Minute),
 		Status:          BoostStatusActive,
@@ -613,4 +623,27 @@ func (s *Service) AdminRefund(ctx context.Context, actorID string, txID string, 
 	}
 
 	return tx, nil
+}
+
+func (s *Service) GetSuperLikeCredits(ctx context.Context, userID string) (int, error) {
+	return s.repo.GetSuperLikeCredits(ctx, userID)
+}
+
+func (s *Service) ConsumeSuperLikeCredit(ctx context.Context, userID string) (int, error) {
+	return s.repo.ConsumeSuperLikeCredit(ctx, userID)
+}
+
+func (s *Service) HasPassportEntitlement(ctx context.Context, userID string) (bool, error) {
+	sub, err := s.repo.GetActiveSubscriptionByUserID(ctx, userID)
+	if err != nil && !errors.Is(err, ErrSubscriptionNotFound) {
+		return false, err
+	}
+	if sub != nil && sub.IsActive() {
+		return true, nil
+	}
+	hasEnt, err := s.repo.HasEntitlement(ctx, userID, "TRAVEL_MODE")
+	if err == nil && hasEnt {
+		return true, nil
+	}
+	return false, nil
 }

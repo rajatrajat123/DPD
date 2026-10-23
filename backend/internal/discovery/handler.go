@@ -42,7 +42,12 @@ func (h *Handler) Feed(w http.ResponseWriter, r *http.Request) {
 	}
 	cursor := r.URL.Query().Get("cursor")
 
-	feed, err := h.svc.GetDiscoveryFeed(r.Context(), authUser.ID, cursor, limit)
+	ctx := r.Context()
+	if autoExpand := r.URL.Query().Get("auto_expand"); autoExpand == "true" || autoExpand == "1" {
+		ctx = WithAutoExpand(ctx, true)
+	}
+
+	feed, err := h.svc.GetDiscoveryFeed(ctx, authUser.ID, cursor, limit)
 	if err != nil {
 		h.handleServiceError(w, reqID, err)
 		return
@@ -293,6 +298,8 @@ func (h *Handler) handleServiceError(w http.ResponseWriter, reqID string, err er
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeBusinessRuleViolation, "Daily free swipe limit reached; match reward or subscription boost required"))
 	case errors.Is(err, ErrBonusLikesVerifiedOnly):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "BONUS_LIKES_VERIFIED_ONLY", err.Error()))
+	case errors.Is(err, ErrInsufficientSuperLikes):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "INSUFFICIENT_SUPER_LIKES", "Insufficient Super Like credits remaining"))
 	case errors.Is(err, ErrBirthdateRequired), errors.Is(err, ErrAgeVerificationRequired):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "AGE_ASSURANCE_REQUIRED", err.Error()))
 	case errors.Is(err, ErrUnderageProhibited):

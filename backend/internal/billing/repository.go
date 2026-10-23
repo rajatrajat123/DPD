@@ -45,6 +45,10 @@ type Repository interface {
 	AddBoostCredits(ctx context.Context, userID string, credits int) (int, error)
 	ConsumeBoostCredit(ctx context.Context, userID string) (remaining int, err error)
 
+	GetSuperLikeCredits(ctx context.Context, userID string) (int, error)
+	AddSuperLikeCredits(ctx context.Context, userID string, credits int) (int, error)
+	ConsumeSuperLikeCredit(ctx context.Context, userID string) (remaining int, err error)
+
 	CreateProfileBoost(ctx context.Context, boost *ProfileBoost) error
 	GetActiveProfileBoost(ctx context.Context, userID string) (*ProfileBoost, error)
 
@@ -56,18 +60,19 @@ type Repository interface {
 
 // MemoryRepository provides thread-safe in-memory billing repository for testing and standalone dev.
 type MemoryRepository struct {
-	mu            sync.RWMutex
-	products      map[string]*Product
-	subscriptions map[string]*Subscription       // key: id
-	subByExternal map[string]string              // key: provider:externalID -> subID
-	transactions  map[string]*PaymentTransaction // key: id
-	txByExternal  map[string]string              // key: provider:chargeID -> txID
-	webhooks      map[string]struct{}            // key: provider:eventID
-	entitlements  map[string][]UserEntitlement   // key: userID
-	boostCredits  map[string]int                 // key: userID
-	boosts        map[string][]ProfileBoost      // key: userID
-	consents      map[string]*SubscriptionConsentRecord // key: userID:planCode
-	outboxEvents  []events.Envelope
+	mu               sync.RWMutex
+	products         map[string]*Product
+	subscriptions    map[string]*Subscription       // key: id
+	subByExternal    map[string]string              // key: provider:externalID -> subID
+	transactions     map[string]*PaymentTransaction // key: id
+	txByExternal     map[string]string              // key: provider:chargeID -> txID
+	webhooks         map[string]struct{}            // key: provider:eventID
+	entitlements     map[string][]UserEntitlement   // key: userID
+	boostCredits     map[string]int                 // key: userID
+	superLikeCredits map[string]int                 // key: userID
+	boosts           map[string][]ProfileBoost      // key: userID
+	consents         map[string]*SubscriptionConsentRecord // key: userID:planCode
+	outboxEvents     []events.Envelope
 }
 
 func NewMemoryRepository() *MemoryRepository {
@@ -77,70 +82,95 @@ func NewMemoryRepository() *MemoryRepository {
 		subByExternal: make(map[string]string),
 		transactions:  make(map[string]*PaymentTransaction),
 		txByExternal:  make(map[string]string),
-		webhooks:      make(map[string]struct{}),
-		entitlements:  make(map[string][]UserEntitlement),
-		boostCredits:  make(map[string]int),
-		boosts:        make(map[string][]ProfileBoost),
-		consents:      make(map[string]*SubscriptionConsentRecord),
+		webhooks:         make(map[string]struct{}),
+		entitlements:     make(map[string][]UserEntitlement),
+		boostCredits:     make(map[string]int),
+		superLikeCredits: make(map[string]int),
+		boosts:           make(map[string][]ProfileBoost),
+		consents:         make(map[string]*SubscriptionConsentRecord),
 	}
 
 	// Seed canonical products
 	now := time.Now().UTC()
 	defaults := []Product{
 		{
-			ID: "prod_plus_monthly", PlanCode: PlanAuraPlusMonthly, Name: "Aura Plus (Monthly)",
-			Description: "Unlimited swipes, see who liked you, rewind, and travel passport.",
+			ID: "prod_plus_monthly_legacy", PlanCode: PlanAuraPlusMonthlyLegacy, Name: "Aura Plus (Legacy Monthly)",
+			Description: "Historical Aura Plus monthly plan (grandfathered).",
 			ProductType: ProductTypeSubscription, Tier: TierPlus, BillingPeriod: BillingPeriodMonthly,
 			PriceCents: 1999, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode},
-			BoostCredits: 1, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			BoostCredits: 1, SuperLikeCredits: 0, IsActive: false, CreatedAt: now, UpdatedAt: now,
+		},
+		{
+			ID: "prod_plus_monthly", PlanCode: PlanAuraPlusMonthly, Name: "Aura Plus (Monthly)",
+			Description: "Unlimited swipes, see who liked you, rewind, and travel passport mode.",
+			ProductType: ProductTypeSubscription, Tier: TierPlus, BillingPeriod: BillingPeriodMonthly,
+			PriceCents: 2500, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode},
+			BoostCredits: 1, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "prod_plus_annual", PlanCode: PlanAuraPlusAnnual, Name: "Aura Plus (Annual)",
-			Description: "Save 50% with annual Aura Plus billing. Includes 1 free boost per month.",
+			Description: "Save on annual Aura Plus billing ($200/year). Includes 1 free boost per month.",
 			ProductType: ProductTypeSubscription, Tier: TierPlus, BillingPeriod: BillingPeriodAnnual,
-			PriceCents: 11988, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode},
-			BoostCredits: 12, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			PriceCents: 20000, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode},
+			BoostCredits: 12, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
-			ID: "prod_black_monthly", PlanCode: PlanAuraBlackMonthly, Name: "Aura Black (Monthly)",
+			ID: "prod_black_monthly", PlanCode: PlanAuraBlackMonthly, Name: "Aura Extra Premium (Monthly)",
 			Description: "VIP features: read receipts, incognito browsing, priority likes, and all Plus benefits.",
 			ProductType: ProductTypeSubscription, Tier: TierBlack, BillingPeriod: BillingPeriodMonthly,
 			PriceCents: 3499, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode, EntitlementReadReceipts, EntitlementPriorityLikes, EntitlementIncognitoBrowsing},
-			BoostCredits: 3, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			BoostCredits: 3, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
-			ID: "prod_black_annual", PlanCode: PlanAuraBlackAnnual, Name: "Aura Black (Annual)",
-			Description: "VIP annual membership with 36 boost credits and priority ranking in discovery.",
+			ID: "prod_black_annual", PlanCode: PlanAuraBlackAnnual, Name: "Aura Extra Premium (Annual)",
+			Description: "VIP annual membership ($300/year) with 36 boost credits and priority ranking in discovery.",
 			ProductType: ProductTypeSubscription, Tier: TierBlack, BillingPeriod: BillingPeriodAnnual,
-			PriceCents: 20988, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode, EntitlementReadReceipts, EntitlementPriorityLikes, EntitlementIncognitoBrowsing},
-			BoostCredits: 36, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			PriceCents: 30000, Currency: "USD", Entitlements: []string{EntitlementUnlimitedSwipes, EntitlementSeeWhoLikedYou, EntitlementRewind, EntitlementTravelMode, EntitlementReadReceipts, EntitlementPriorityLikes, EntitlementIncognitoBrowsing},
+			BoostCredits: 36, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "prod_boost_single", PlanCode: PlanBoostSingle, Name: "Single Profile Boost",
-			Description: "30-minute 2.5x profile visibility boost in local discovery.",
+			Description: "60-minute 5x profile visibility boost in local discovery up to 160 miles (257.5 km).",
 			ProductType: ProductTypeConsumable, Tier: TierConsumable, BillingPeriod: BillingPeriodNone,
-			PriceCents: 499, Currency: "USD", Entitlements: []string{},
-			BoostCredits: 1, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			PriceCents: 799, Currency: "USD", Entitlements: []string{},
+			BoostCredits: 1, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
 			ID: "prod_boost_5pack", PlanCode: PlanBoost5Pack, Name: "5-Pack Profile Boosts",
-			Description: "Bundle of five 30-minute profile visibility boosts.",
+			Description: "Bundle of five 60-minute 5x profile visibility boosts.",
 			ProductType: ProductTypeConsumable, Tier: TierConsumable, BillingPeriod: BillingPeriodNone,
-			PriceCents: 1799, Currency: "USD", Entitlements: []string{},
-			BoostCredits: 5, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			PriceCents: 2999, Currency: "USD", Entitlements: []string{},
+			BoostCredits: 5, SuperLikeCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 		{
-			ID: "prod_superspark_5pack", PlanCode: PlanSuperSpark5Pack, Name: "5-Pack Super Sparks",
-			Description: "Send 5 high-intent sparks with instant personalized direct messaging.",
+			ID: "prod_superspark_5pack", PlanCode: PlanSuperSpark5Pack, Name: "5-Pack Super Likes",
+			Description: "Pack of 5 priority Super Likes with instant profile highlighting and mutual match priority.",
 			ProductType: ProductTypeConsumable, Tier: TierConsumable, BillingPeriod: BillingPeriodNone,
-			PriceCents: 999, Currency: "USD", Entitlements: []string{EntitlementSuperSpark},
-			BoostCredits: 0, IsActive: true, CreatedAt: now, UpdatedAt: now,
+			PriceCents: 499, Currency: "USD", Entitlements: []string{EntitlementSuperSpark},
+			BoostCredits: 0, SuperLikeCredits: 5, IsActive: true, CreatedAt: now, UpdatedAt: now,
 		},
 	}
 
 	for _, p := range defaults {
 		cp := p
 		m.products[p.PlanCode] = &cp
+	}
+
+	// Register aliases
+	if blackM, ok := m.products[PlanAuraBlackMonthly]; ok {
+		cp := *blackM
+		cp.PlanCode = PlanAuraExtraPremiumMonthly
+		m.products[PlanAuraExtraPremiumMonthly] = &cp
+	}
+	if blackA, ok := m.products[PlanAuraBlackAnnual]; ok {
+		cp := *blackA
+		cp.PlanCode = PlanAuraExtraPremiumAnnual
+		m.products[PlanAuraExtraPremiumAnnual] = &cp
+	}
+	if spark, ok := m.products[PlanSuperSpark5Pack]; ok {
+		cp := *spark
+		cp.PlanCode = PlanSuperLikes5Pack
+		m.products[PlanSuperLikes5Pack] = &cp
 	}
 
 	return m
@@ -497,6 +527,32 @@ func (m *MemoryRepository) ConsumeBoostCredit(ctx context.Context, userID string
 	}
 	m.boostCredits[userID] = current - 1
 	return m.boostCredits[userID], nil
+}
+
+func (m *MemoryRepository) GetSuperLikeCredits(ctx context.Context, userID string) (int, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.superLikeCredits[userID], nil
+}
+
+func (m *MemoryRepository) AddSuperLikeCredits(ctx context.Context, userID string, credits int) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.superLikeCredits[userID] += credits
+	return m.superLikeCredits[userID], nil
+}
+
+func (m *MemoryRepository) ConsumeSuperLikeCredit(ctx context.Context, userID string) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	current := m.superLikeCredits[userID]
+	if current < 1 {
+		return current, ErrInsufficientSuperLikeCredits
+	}
+	m.superLikeCredits[userID] = current - 1
+	return m.superLikeCredits[userID], nil
 }
 
 func (m *MemoryRepository) CreateProfileBoost(ctx context.Context, boost *ProfileBoost) error {
@@ -983,21 +1039,95 @@ func (p *PostgresRepository) ConsumeBoostCredit(ctx context.Context, userID stri
 	return remaining, nil
 }
 
-func (p *PostgresRepository) CreateProfileBoost(ctx context.Context, boost *ProfileBoost) error {
+func (p *PostgresRepository) GetSuperLikeCredits(ctx context.Context, userID string) (int, error) {
+	query := `SELECT credits_remaining FROM user_super_like_credits WHERE user_id = $1`
+	var credits int
+	err := p.pool.QueryRow(ctx, query, userID).Scan(&credits)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return credits, nil
+}
+
+func (p *PostgresRepository) AddSuperLikeCredits(ctx context.Context, userID string, credits int) (int, error) {
 	query := `
-		INSERT INTO profile_boosts (user_id, duration_minutes, multiplier, activated_at, expires_at, status)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO user_super_like_credits (user_id, credits_remaining, updated_at)
+		VALUES ($1, $2, NOW())
+		ON CONFLICT (user_id)
+		DO UPDATE SET credits_remaining = user_super_like_credits.credits_remaining + EXCLUDED.credits_remaining, updated_at = NOW()
+		RETURNING credits_remaining
+	`
+	var total int
+	err := p.pool.QueryRow(ctx, query, userID, credits).Scan(&total)
+	return total, err
+}
+
+func (p *PostgresRepository) ConsumeSuperLikeCredit(ctx context.Context, userID string) (int, error) {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	var current int
+	err = tx.QueryRow(ctx, `SELECT credits_remaining FROM user_super_like_credits WHERE user_id = $1 FOR UPDATE`, userID).Scan(&current)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, ErrInsufficientSuperLikeCredits
+		}
+		return 0, err
+	}
+
+	if current < 1 {
+		return current, ErrInsufficientSuperLikeCredits
+	}
+
+	var remaining int
+	err = tx.QueryRow(
+		ctx,
+		`UPDATE user_super_like_credits SET credits_remaining = credits_remaining - 1, updated_at = NOW() WHERE user_id = $1 RETURNING credits_remaining`,
+		userID,
+	).Scan(&remaining)
+	if err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return remaining, nil
+}
+
+func (p *PostgresRepository) CreateProfileBoost(ctx context.Context, boost *ProfileBoost) error {
+	if boost.RadiusMiles <= 0 {
+		boost.RadiusMiles = MaxBoostRadiusMiles
+	}
+	if boost.MaxRadiusKm <= 0 {
+		boost.MaxRadiusKm = MaxBoostRadiusKm
+	}
+	if boost.DurationMinutes <= 0 {
+		boost.DurationMinutes = DefaultBoostDurationMinutes
+	}
+	if boost.Multiplier <= 0 {
+		boost.Multiplier = DefaultBoostMultiplier
+	}
+	query := `
+		INSERT INTO profile_boosts (user_id, duration_minutes, multiplier, radius_miles, max_radius_km, activated_at, expires_at, status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id
 	`
 	return p.pool.QueryRow(
 		ctx, query,
-		boost.UserID, boost.DurationMinutes, boost.Multiplier, boost.ActivatedAt, boost.ExpiresAt, boost.Status,
+		boost.UserID, boost.DurationMinutes, boost.Multiplier, boost.RadiusMiles, boost.MaxRadiusKm, boost.ActivatedAt, boost.ExpiresAt, boost.Status,
 	).Scan(&boost.ID)
 }
 
 func (p *PostgresRepository) GetActiveProfileBoost(ctx context.Context, userID string) (*ProfileBoost, error) {
 	query := `
-		SELECT id, user_id, duration_minutes, multiplier, activated_at, expires_at, status
+		SELECT id, user_id, duration_minutes, multiplier, COALESCE(radius_miles, 160.0), COALESCE(max_radius_km, 257.5), activated_at, expires_at, status
 		FROM profile_boosts
 		WHERE user_id = $1 AND status = 'ACTIVE' AND expires_at > NOW()
 		ORDER BY expires_at DESC
@@ -1005,7 +1135,7 @@ func (p *PostgresRepository) GetActiveProfileBoost(ctx context.Context, userID s
 	`
 	var b ProfileBoost
 	err := p.pool.QueryRow(ctx, query, userID).Scan(
-		&b.ID, &b.UserID, &b.DurationMinutes, &b.Multiplier, &b.ActivatedAt, &b.ExpiresAt, &b.Status,
+		&b.ID, &b.UserID, &b.DurationMinutes, &b.Multiplier, &b.RadiusMiles, &b.MaxRadiusKm, &b.ActivatedAt, &b.ExpiresAt, &b.Status,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

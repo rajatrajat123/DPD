@@ -87,7 +87,7 @@ export const discoveryService = {
   /**
    * Fetches discovery feed adhering strictly to server-side dealbreakers
    */
-  async getFeed(limit = 20, cursor?: string): Promise<FeedResponse> {
+  async getFeed(limit = 20, cursor?: string, autoExpand = true): Promise<FeedResponse> {
     const res = await api.get<{
       candidates?: any[];
       next_cursor?: string;
@@ -96,6 +96,7 @@ export const discoveryService = {
     }>('/api/v1/discovery/feed', {
       limit,
       cursor,
+      auto_expand: autoExpand,
     });
 
     const candidates: DiscoveryCandidate[] = (res.candidates || []).map(normalizeCandidate);

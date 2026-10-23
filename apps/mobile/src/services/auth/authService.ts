@@ -58,6 +58,17 @@ export interface AgeAssuranceSession {
   status?: string;
 }
 
+export interface PassportTrialStatus {
+  has_started: boolean;
+  is_active: boolean;
+  started_at?: string;
+  ends_at?: string;
+  days_remaining: number;
+  requires_upgrade: boolean;
+  is_entitled: boolean;
+  verified_status: string;
+}
+
 export interface AgeAssuranceStatus {
   id?: string;
   user_id?: string;
@@ -387,6 +398,13 @@ export const authService = {
    */
   async getAgeAssuranceStatus(): Promise<AgeAssuranceStatus> {
     return api.get<AgeAssuranceStatus>('/api/v1/age-assurance/status');
+  },
+
+  /**
+   * Fetches 7-day passport verification free trial status from backend
+   */
+  async getPassportTrialStatus(): Promise<PassportTrialStatus> {
+    return api.get<PassportTrialStatus>('/api/v1/age-assurance/trial');
   },
 
   /**

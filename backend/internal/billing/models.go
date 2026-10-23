@@ -22,17 +22,29 @@ var (
 	ErrReceiptValidationFailed   = errors.New("store receipt validation failed")
 	ErrIndiaMandateNotCompliant  = errors.New("India recurring e-mandate requires verified pre-debit notification sink (BLOCKED)")
 	ErrDuplicateTransaction      = errors.New("duplicate payment transaction already processed or claimed by another user")
-	ErrPurchaseUserMismatch      = errors.New("store purchase is bound to a different user account")
+	ErrPurchaseUserMismatch         = errors.New("store purchase is bound to a different user account")
+	ErrInsufficientSuperLikeCredits = errors.New("insufficient super like credits remaining")
 )
 
 const (
-	PlanAuraPlusMonthly   = "AURA_PLUS_MONTHLY"
-	PlanAuraPlusAnnual    = "AURA_PLUS_ANNUAL"
-	PlanAuraBlackMonthly  = "AURA_BLACK_MONTHLY"
-	PlanAuraBlackAnnual   = "AURA_BLACK_ANNUAL"
-	PlanBoostSingle       = "BOOST_SINGLE"
-	PlanBoost5Pack        = "BOOST_5PACK"
-	PlanSuperSpark5Pack   = "SUPERSPARK_5PACK"
+	PlanAuraPlusMonthlyLegacy   = "AURA_PLUS_MONTHLY_LEGACY"
+	PlanAuraPlusMonthly         = "AURA_PLUS_MONTHLY"
+	PlanAuraPlusAnnual          = "AURA_PLUS_ANNUAL"
+	PlanAuraBlackMonthly        = "AURA_BLACK_MONTHLY"
+	PlanAuraBlackAnnual         = "AURA_BLACK_ANNUAL"
+	PlanAuraExtraPremiumMonthly = "AURA_EXTRA_PREMIUM_MONTHLY"
+	PlanAuraExtraPremiumAnnual  = "AURA_EXTRA_PREMIUM_ANNUAL"
+	PlanBoostSingle             = "BOOST_SINGLE"
+	PlanBoost5Pack              = "BOOST_5PACK"
+	PlanSuperSpark5Pack         = "SUPERSPARK_5PACK"
+	PlanSuperLikes5Pack         = "SUPER_LIKES_5PACK"
+)
+
+const (
+	MaxBoostRadiusMiles         = 160.0
+	MaxBoostRadiusKm            = 257.5
+	DefaultBoostDurationMinutes = 60
+	DefaultBoostMultiplier      = 5.0
 )
 
 const (
@@ -47,10 +59,11 @@ const (
 )
 
 const (
-	TierFree       = "FREE"
-	TierPlus       = "PLUS"
-	TierBlack      = "BLACK"
-	TierConsumable = "CONSUMABLE"
+	TierFree         = "FREE"
+	TierPlus         = "PLUS"
+	TierBlack        = "BLACK"
+	TierExtraPremium = "EXTRA_PREMIUM"
+	TierConsumable   = "CONSUMABLE"
 )
 
 const (
@@ -96,20 +109,21 @@ const (
 )
 
 type Product struct {
-	ID            string    `json:"id"`
-	PlanCode      string    `json:"plan_code"`
-	Name          string    `json:"name"`
-	Description   string    `json:"description"`
-	ProductType   string    `json:"product_type"`
-	Tier          string    `json:"tier"`
-	BillingPeriod string    `json:"billing_period"`
-	PriceCents    int64     `json:"price_cents"`
-	Currency      string    `json:"currency"`
-	Entitlements  []string  `json:"entitlements"`
-	BoostCredits  int       `json:"boost_credits"`
-	IsActive      bool      `json:"is_active"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID               string    `json:"id"`
+	PlanCode         string    `json:"plan_code"`
+	Name             string    `json:"name"`
+	Description      string    `json:"description"`
+	ProductType      string    `json:"product_type"`
+	Tier             string    `json:"tier"`
+	BillingPeriod    string    `json:"billing_period"`
+	PriceCents       int64     `json:"price_cents"`
+	Currency         string    `json:"currency"`
+	Entitlements     []string  `json:"entitlements"`
+	BoostCredits     int       `json:"boost_credits"`
+	SuperLikeCredits int       `json:"super_like_credits"`
+	IsActive         bool      `json:"is_active"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type Subscription struct {
@@ -167,11 +181,19 @@ type UserBoostCredits struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+type UserSuperLikeCredits struct {
+	UserID           string    `json:"user_id"`
+	CreditsRemaining int       `json:"credits_remaining"`
+	UpdatedAt        time.Time `json:"updated_at"`
+}
+
 type ProfileBoost struct {
 	ID              string    `json:"id"`
 	UserID          string    `json:"user_id"`
 	DurationMinutes int       `json:"duration_minutes"`
 	Multiplier      float64   `json:"multiplier"`
+	RadiusMiles     float64   `json:"radius_miles,omitempty"`
+	MaxRadiusKm     float64   `json:"max_radius_km,omitempty"`
 	ActivatedAt     time.Time `json:"activated_at"`
 	ExpiresAt       time.Time `json:"expires_at"`
 	Status          string    `json:"status"`
@@ -255,12 +277,13 @@ type VerifyPurchaseRequest struct {
 }
 
 type SubscriptionStatusResponse struct {
-	HasActiveSubscription bool          `json:"has_active_subscription"`
-	Tier                  string        `json:"tier"`
-	Subscription          *Subscription `json:"subscription,omitempty"`
-	Entitlements          []string      `json:"entitlements"`
-	BoostCreditsRemaining int           `json:"boost_credits_remaining"`
-	ActiveBoost           *ProfileBoost `json:"active_boost,omitempty"`
+	HasActiveSubscription      bool          `json:"has_active_subscription"`
+	Tier                       string        `json:"tier"`
+	Subscription               *Subscription `json:"subscription,omitempty"`
+	Entitlements               []string      `json:"entitlements"`
+	BoostCreditsRemaining      int           `json:"boost_credits_remaining"`
+	SuperLikeCreditsRemaining  int           `json:"super_like_credits_remaining"`
+	ActiveBoost                *ProfileBoost `json:"active_boost,omitempty"`
 }
 
 type ActivateBoostRequest struct {
@@ -275,4 +298,8 @@ type ActivateBoostResponse struct {
 type BoostStatusResponse struct {
 	CreditsRemaining int           `json:"credits_remaining"`
 	ActiveBoost      *ProfileBoost `json:"active_boost,omitempty"`
+}
+
+type SuperLikeStatusResponse struct {
+	CreditsRemaining int `json:"credits_remaining"`
 }

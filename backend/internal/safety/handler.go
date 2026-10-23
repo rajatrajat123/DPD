@@ -93,6 +93,28 @@ func (h *Handler) GetAgeVerificationStatus(w http.ResponseWriter, r *http.Reques
 	apperror.WriteJSON(w, http.StatusOK, status)
 }
 
+func (h *Handler) GetPassportTrialStatus(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	status, err := h.svc.GetPassportTrialStatus(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, status)
+}
+
 func (h *Handler) AgeVerificationWebhook(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
 	if r.Method != http.MethodPost {
@@ -113,11 +135,22 @@ func (h *Handler) AgeVerificationWebhook(w http.ResponseWriter, r *http.Request)
 	if signature == "" {
 		signature = r.Header.Get("Aura-Age-Signature")
 	}
+	if strings.TrimSpace(signature) == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Missing webhook signature header"))
+		return
+	}
 
 	res, err := h.svc.ProcessAgeVerificationWebhook(r.Context(), payload, signature)
 	if err != nil {
-		if errors.Is(err, ErrInvalidWebhookSignature) {
+		switch {
+		case errors.Is(err, ErrInvalidWebhookSignature):
 			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Invalid webhook signature"))
+			return
+		case errors.Is(err, ErrExpiredWebhookSignature):
+			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Webhook signature timestamp expired"))
+			return
+		case errors.Is(err, ErrUserMismatch):
+			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Inquiry user ownership mismatch"))
 			return
 		}
 		h.handleError(w, reqID, err)
@@ -483,6 +516,8 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Appeal not found"))
 	case errors.Is(err, ErrProviderDisabledInProd):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusServiceUnavailable, apperror.CodeDependencyUnavailable, "Test age assurance provider is disabled in production"))
+	case errors.Is(err, ErrPassportTrialExpired):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "PASSPORT_TRIAL_EXPIRED", "Passport verification 7-day free trial has expired. Aura Plus subscription required to continue."))
 	default:
 		h.logger.Error("safety_handler_error", slog.String("error", err.Error()), slog.String("req_id", reqID))
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, "Internal safety service error"))

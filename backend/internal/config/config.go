@@ -64,6 +64,7 @@ type Config struct {
 
 	PersonaAPIKey        string
 	PersonaWebhookSecret string
+	PersonaTemplateID    string
 
 	VisionAPIKey         string
 	SightengineAPIUser   string
@@ -195,6 +196,7 @@ func Load(getenv func(string) string) (*Config, error) {
 
 		PersonaAPIKey:        getString(getenv, "PERSONA_API_KEY", ""),
 		PersonaWebhookSecret: getString(getenv, "PERSONA_WEBHOOK_SECRET", ""),
+		PersonaTemplateID:    getString(getenv, "PERSONA_TEMPLATE_ID", ""),
 
 		VisionAPIKey:         getString(getenv, "VISION_API_KEY", ""),
 		SightengineAPIUser:   getString(getenv, "SIGHTENGINE_API_USER", ""),

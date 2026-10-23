@@ -57,6 +57,8 @@ type DiscoveryCandidate struct {
 	Languages             []string    `json:"languages,omitempty"`
 	Interests             []string    `json:"interests,omitempty"`
 	ApproximateDistanceKm int         `json:"approximate_distance_km"` // Privacy-preserving integer km, never exact GPS
+	ExpansionStage        int         `json:"expansion_stage,omitempty"`
+	IsExpanded            bool        `json:"is_expanded,omitempty"`
 	IsPhotoVerified       bool        `json:"is_photo_verified"`
 	CompatibilityScore    float64     `json:"compatibility_score"`
 	Photos                []PhotoCard `json:"photos"`

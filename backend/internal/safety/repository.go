@@ -20,6 +20,10 @@ type Repository interface {
 	GetAgeAssuranceByUserID(ctx context.Context, userID string) (*AgeAssurance, error)
 	GetAgeAssuranceBySessionID(ctx context.Context, provider, sessionID string) (*AgeAssurance, error)
 
+	// Passport Trial
+	GetPassportTrial(ctx context.Context, userID string) (*PassportVerificationTrial, error)
+	SavePassportTrial(ctx context.Context, trial *PassportVerificationTrial) error
+
 	// Reports & Moderation Cases
 	CreateReport(ctx context.Context, report *ModerationReport) error
 	GetReportByID(ctx context.Context, id string) (*ModerationReport, error)
@@ -51,27 +55,29 @@ type Repository interface {
 
 // MemoryRepository provides a thread-safe in-memory storage for unit and router testing.
 type MemoryRepository struct {
-	mu            sync.RWMutex
-	seq           uint64
-	ageAssurances map[string]*AgeAssurance     // userID -> aa
-	aaBySession   map[string]string            // provider:sessionID -> userID
-	reports       map[string]*ModerationReport // id -> report
-	cases         map[string]*ModerationCase   // id -> case
-	actions       map[string]*ModerationAction // id -> action
-	appeals       map[string]*ModerationAppeal // id -> appeal
-	auditLogs     []SecurityAuditLog
-	loginAttempts map[string]*LoginAttempt // email:ip -> attempt
+	mu             sync.RWMutex
+	seq            uint64
+	ageAssurances  map[string]*AgeAssurance // userID -> aa
+	aaBySession    map[string]string        // provider:sessionID -> userID
+	passportTrials map[string]*PassportVerificationTrial
+	reports        map[string]*ModerationReport // id -> report
+	cases          map[string]*ModerationCase   // id -> case
+	actions        map[string]*ModerationAction // id -> action
+	appeals        map[string]*ModerationAppeal // id -> appeal
+	auditLogs      []SecurityAuditLog
+	loginAttempts  map[string]*LoginAttempt // email:ip -> attempt
 }
 
 func NewMemoryRepository() *MemoryRepository {
 	return &MemoryRepository{
-		ageAssurances: make(map[string]*AgeAssurance),
-		aaBySession:   make(map[string]string),
-		reports:       make(map[string]*ModerationReport),
-		cases:         make(map[string]*ModerationCase),
-		actions:       make(map[string]*ModerationAction),
-		appeals:       make(map[string]*ModerationAppeal),
-		loginAttempts: make(map[string]*LoginAttempt),
+		ageAssurances:  make(map[string]*AgeAssurance),
+		aaBySession:    make(map[string]string),
+		passportTrials: make(map[string]*PassportVerificationTrial),
+		reports:        make(map[string]*ModerationReport),
+		cases:          make(map[string]*ModerationCase),
+		actions:        make(map[string]*ModerationAction),
+		appeals:        make(map[string]*ModerationAppeal),
+		loginAttempts:  make(map[string]*LoginAttempt),
 	}
 }
 
@@ -121,6 +127,27 @@ func (m *MemoryRepository) GetAgeAssuranceBySessionID(ctx context.Context, provi
 	}
 	cp := *aa
 	return &cp, nil
+}
+
+func (m *MemoryRepository) GetPassportTrial(ctx context.Context, userID string) (*PassportVerificationTrial, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	trial, ok := m.passportTrials[userID]
+	if !ok {
+		return nil, nil
+	}
+	cp := *trial
+	return &cp, nil
+}
+
+func (m *MemoryRepository) SavePassportTrial(ctx context.Context, trial *PassportVerificationTrial) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	cp := *trial
+	m.passportTrials[trial.UserID] = &cp
+	return nil
 }
 
 func (m *MemoryRepository) CreateReport(ctx context.Context, report *ModerationReport) error {
@@ -550,6 +577,40 @@ func (p *PostgresRepository) GetAgeAssuranceBySessionID(ctx context.Context, pro
 		_ = json.Unmarshal(metaBytes, &aa.Metadata)
 	}
 	return &aa, nil
+}
+
+func (p *PostgresRepository) GetPassportTrial(ctx context.Context, userID string) (*PassportVerificationTrial, error) {
+	query := `
+		SELECT user_id, started_at, ends_at, trial_used, created_at, updated_at
+		FROM passport_verification_trials
+		WHERE user_id = $1;
+	`
+	var t PassportVerificationTrial
+	err := p.pool.QueryRow(ctx, query, userID).Scan(
+		&t.UserID, &t.StartedAt, &t.EndsAt, &t.TrialUsed, &t.CreatedAt, &t.UpdatedAt,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (p *PostgresRepository) SavePassportTrial(ctx context.Context, trial *PassportVerificationTrial) error {
+	query := `
+		INSERT INTO passport_verification_trials (user_id, started_at, ends_at, trial_used, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (user_id) DO UPDATE SET
+			ends_at = EXCLUDED.ends_at,
+			trial_used = EXCLUDED.trial_used,
+			updated_at = NOW();
+	`
+	_, err := p.pool.Exec(ctx, query,
+		trial.UserID, trial.StartedAt, trial.EndsAt, trial.TrialUsed, trial.CreatedAt, trial.UpdatedAt,
+	)
+	return err
 }
 
 func (p *PostgresRepository) CreateReport(ctx context.Context, report *ModerationReport) error {

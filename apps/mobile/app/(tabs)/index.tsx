@@ -336,6 +336,7 @@ export default function DiscoveryScreen() {
       }
     } catch {
       // Background prefetch error should not interrupt browsing
+      hasMoreRef.current = false;
     } finally {
       isLoadingMoreRef.current = false;
       setIsLoadingMore(false);
@@ -378,12 +379,15 @@ export default function DiscoveryScreen() {
     } catch (err: any) {
       const msg = err instanceof Error ? err.message : (err?.message || 'Could not load discovery feed.');
       setFeedError(msg);
+      hasMoreRef.current = false;
+      setCandidates([]);
       if (err?.code === 'AGE_VERIFICATION_REQUIRED' || err?.status === 403) {
         setEmptyStateReason('AGE_VERIFICATION_REQUIRED');
         await refreshProfile();
       }
     } finally {
       setIsLoading(false);
+      setIsLoadingMore(false);
     }
   }, [refreshProfile]);
 
@@ -1025,7 +1029,7 @@ export default function DiscoveryScreen() {
           style={[styles.content, isKeyboardOpen && styles.contentKeyboard]}
           onLayout={handleContainerLayout}
         >
-          {isLoading || (currentIndex >= candidates.length && (hasMoreRef.current || isLoadingMore)) ? (
+          {!feedError && (isLoading || (isLoadingMore && candidates.length === 0)) ? (
             <View style={styles.loadingContainer}>
               <ActivityIndicator color={colors.gold} size="large" />
               <Text style={styles.loadingText}>Curating your exclusive deck...</Text>

@@ -21,15 +21,20 @@ type ModerationCaseDetails struct {
 	Actions []ModerationAction `json:"actions"`
 }
 
+type PassportEntitlementChecker interface {
+	HasPassportEntitlement(ctx context.Context, userID string) (bool, error)
+}
+
 type Service struct {
-	repo           Repository
-	identityRepo   identity.Repository
-	provider       AgeAssuranceProvider
-	audit          *ServiceAuditLogger
-	fraud          *FraudManager
-	stepUpVerifier StepUpVerifier
-	hub            HubDisconnecter
-	logger         *slog.Logger
+	repo            Repository
+	identityRepo    identity.Repository
+	provider        AgeAssuranceProvider
+	audit           *ServiceAuditLogger
+	fraud           *FraudManager
+	stepUpVerifier  StepUpVerifier
+	passportChecker PassportEntitlementChecker
+	hub             HubDisconnecter
+	logger          *slog.Logger
 }
 
 func NewService(
@@ -59,6 +64,10 @@ func (s *Service) SetStepUpVerifier(v StepUpVerifier) {
 	s.stepUpVerifier = v
 }
 
+func (s *Service) SetPassportEntitlementChecker(c PassportEntitlementChecker) {
+	s.passportChecker = c
+}
+
 // -----------------------------------------------------------------------------
 // Age Assurance Workflows
 // -----------------------------------------------------------------------------
@@ -66,6 +75,47 @@ func (s *Service) SetStepUpVerifier(v StepUpVerifier) {
 func (s *Service) CreateAgeVerificationSession(ctx context.Context, userID, email, clientIP string, mediaID ...string) (*AgeAssuranceSessionResult, error) {
 	if s.provider == nil {
 		return nil, errors.New("age assurance provider not configured")
+	}
+
+	isBasicVerification := len(mediaID) > 0 && strings.TrimSpace(mediaID[0]) != ""
+
+	// 7-day free trial check:
+	// A user gets a 1-time 7-day trial starting upon first activation of passport age verification.
+	// After 7 days, passport verification requires an active Aura Plus ($25/mo) or higher paid subscription.
+	// Mandatory basic age verification must remain free for all users.
+	if !isBasicVerification {
+		now := time.Now().UTC()
+		trial, err := s.repo.GetPassportTrial(ctx, userID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to retrieve passport trial: %w", err)
+		}
+
+		if trial == nil {
+			// First activation: start 1-time 7-day free trial
+			trial = &PassportVerificationTrial{
+				UserID:    userID,
+				StartedAt: now,
+				EndsAt:    now.Add(7 * 24 * time.Hour),
+				TrialUsed: true,
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			if err := s.repo.SavePassportTrial(ctx, trial); err != nil {
+				return nil, fmt.Errorf("failed to initialize passport trial: %w", err)
+			}
+		} else if now.After(trial.EndsAt) {
+			// Trial expired. Verify paid subscription entitlement.
+			entitled := false
+			if s.passportChecker != nil {
+				isEnt, err := s.passportChecker.HasPassportEntitlement(ctx, userID)
+				if err == nil && isEnt {
+					entitled = true
+				}
+			}
+			if !entitled {
+				return nil, ErrPassportTrialExpired
+			}
+		}
 	}
 
 	result, err := s.provider.CreateSession(ctx, userID, email)
@@ -112,11 +162,17 @@ func (s *Service) ProcessAgeVerificationWebhook(ctx context.Context, payload []b
 		return nil, err
 	}
 
-	// Lookup current record
+	// Lookup current record by session ID
 	aa, err := s.repo.GetAgeAssuranceBySessionID(ctx, s.provider.Name(), result.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to lookup age assurance: %w", err)
 	}
+
+	// Verify user ownership if session already exists
+	if aa != nil && result.UserID != "" && aa.UserID != "" && aa.UserID != result.UserID {
+		return nil, fmt.Errorf("%w: session %s belongs to %s, but webhook references %s", ErrUserMismatch, result.SessionID, aa.UserID, result.UserID)
+	}
+
 	if aa == nil {
 		// Session not found by ID, attempt lookup by UserID
 		if result.UserID != "" {
@@ -129,14 +185,61 @@ func (s *Service) ProcessAgeVerificationWebhook(ctx context.Context, payload []b
 			UserID:            result.UserID,
 			Provider:          s.provider.Name(),
 			ProviderSessionID: result.SessionID,
+			Metadata:          make(map[string]any),
 		}
 	}
 
-	aa.Status = result.Status
+	if aa.Metadata == nil {
+		aa.Metadata = make(map[string]any)
+	}
+
+	// Duplicate event idempotency check
+	if result.EventID != "" {
+		if rawEvents, ok := aa.Metadata["processed_event_ids"].([]any); ok {
+			for _, item := range rawEvents {
+				if idStr, ok := item.(string); ok && idStr == result.EventID {
+					s.logger.Info("persona_webhook_duplicate_event_ignored",
+						slog.String("event_id", result.EventID),
+						slog.String("session_id", result.SessionID),
+						slog.String("user_id", aa.UserID),
+					)
+					return result, nil
+				}
+			}
+		}
+		rawEvents, _ := aa.Metadata["processed_event_ids"].([]any)
+		if rawEvents == nil {
+			rawEvents = make([]any, 0, 4)
+		}
+		rawEvents = append(rawEvents, result.EventID)
+		aa.Metadata["processed_event_ids"] = rawEvents
+		aa.Metadata["last_event_id"] = result.EventID
+	}
+	if result.EventName != "" {
+		aa.Metadata["last_event_name"] = result.EventName
+	}
+
+	// Safe status transitions
+	if result.Status == AgePending && aa.Status == AgeVerified {
+		// Do not downgrade an already verified user if a late/intermediate pending event arrives
+		s.logger.Info("persona_webhook_ignoring_pending_downgrade_for_verified_user",
+			slog.String("user_id", aa.UserID),
+			slog.String("session_id", result.SessionID),
+		)
+	} else {
+		aa.Status = result.Status
+	}
+
 	aa.RiskScore = result.RiskScore
-	aa.VerifiedAt = result.VerifiedAt
-	if result.Status == AgeVerified {
-		exp := time.Now().UTC().Add(365 * 24 * time.Hour) // 1-year verification validity
+	if result.VerifiedAt != nil {
+		aa.VerifiedAt = result.VerifiedAt
+	}
+	if aa.Status == AgeVerified {
+		now := time.Now().UTC()
+		if aa.VerifiedAt == nil {
+			aa.VerifiedAt = &now
+		}
+		exp := now.Add(365 * 24 * time.Hour) // 1-year verification validity
 		aa.ExpiresAt = &exp
 	}
 
@@ -145,7 +248,7 @@ func (s *Service) ProcessAgeVerificationWebhook(ctx context.Context, payload []b
 	}
 
 	// If rejected or suspected underage, restrict account immediately
-	if result.Status == AgeRejected {
+	if aa.Status == AgeRejected {
 		_ = s.handleSuspectedUnderage(ctx, aa.UserID, "Provider verification returned REJECTED")
 	}
 
@@ -156,7 +259,7 @@ func (s *Service) ProcessAgeVerificationWebhook(ctx context.Context, payload []b
 		TargetType: "USER",
 		TargetID:   aa.UserID,
 		Outcome:    AuditSuccess,
-		Reason:     fmt.Sprintf("status=%s risk_score=%d", aa.Status, aa.RiskScore),
+		Reason:     fmt.Sprintf("status=%s risk_score=%d event_id=%s", aa.Status, aa.RiskScore, result.EventID),
 	})
 
 	return result, nil
@@ -164,6 +267,61 @@ func (s *Service) ProcessAgeVerificationWebhook(ctx context.Context, payload []b
 
 func (s *Service) GetAgeAssuranceStatus(ctx context.Context, userID string) (*AgeAssurance, error) {
 	return s.repo.GetAgeAssuranceByUserID(ctx, userID)
+}
+
+func (s *Service) GetPassportTrialStatus(ctx context.Context, userID string) (*PassportTrialStatus, error) {
+	now := time.Now().UTC()
+	trial, err := s.repo.GetPassportTrial(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	aa, _ := s.repo.GetAgeAssuranceByUserID(ctx, userID)
+	verStatus := AgeUnverified
+	if aa != nil {
+		verStatus = aa.Status
+	}
+
+	entitled := false
+	if s.passportChecker != nil {
+		isEnt, err := s.passportChecker.HasPassportEntitlement(ctx, userID)
+		if err == nil && isEnt {
+			entitled = true
+		}
+	}
+
+	if trial == nil {
+		return &PassportTrialStatus{
+			HasStarted:      false,
+			IsActive:        false,
+			DaysRemaining:   7,
+			RequiresUpgrade: false,
+			IsEntitled:      true, // Eligible free-tier user is entitled to their 1-time 7-day trial
+			VerifiedStatus:  verStatus,
+		}, nil
+	}
+
+	isActive := now.Before(trial.EndsAt)
+	daysRemaining := int(trial.EndsAt.Sub(now).Hours() / 24)
+	if daysRemaining < 0 {
+		daysRemaining = 0
+	} else if isActive && daysRemaining == 0 {
+		daysRemaining = 1
+	}
+
+	requiresUpgrade := !isActive && !entitled
+	isEntitled := entitled || isActive
+
+	return &PassportTrialStatus{
+		HasStarted:      true,
+		IsActive:         isActive,
+		StartedAt:        &trial.StartedAt,
+		EndsAt:           &trial.EndsAt,
+		DaysRemaining:    daysRemaining,
+		RequiresUpgrade:  requiresUpgrade,
+		IsEntitled:       isEntitled,
+		VerifiedStatus:   verStatus,
+	}, nil
 }
 
 func (s *Service) IsAgeVerified(ctx context.Context, userID string) (bool, error) {

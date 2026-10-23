@@ -15,14 +15,20 @@ import (
 	"github.com/auradating/platform/backend/internal/media"
 )
 
+type SuperLikeCreditManager interface {
+	GetSuperLikeCredits(ctx context.Context, userID string) (int, error)
+	ConsumeSuperLikeCredit(ctx context.Context, userID string) (int, error)
+}
+
 type Service struct {
-	repo               Repository
-	identRepo          identity.Repository
-	mediaSvc           *media.Service
-	verifier           *SSVVerifier
-	entitlementChecker EntitlementChecker
-	ageChecker         AgeChecker
-	logger             *slog.Logger
+	repo                   Repository
+	identRepo              identity.Repository
+	mediaSvc               *media.Service
+	verifier               *SSVVerifier
+	entitlementChecker     EntitlementChecker
+	ageChecker             AgeChecker
+	superLikeCreditManager SuperLikeCreditManager
+	logger                 *slog.Logger
 }
 
 // AgeChecker verifies whether an actor has approved age verification.
@@ -80,6 +86,10 @@ func (s *Service) SetSSVVerifier(v *SSVVerifier) {
 
 func (s *Service) SetEntitlementChecker(checker EntitlementChecker) {
 	s.entitlementChecker = checker
+}
+
+func (s *Service) SetSuperLikeCreditManager(mgr SuperLikeCreditManager) {
+	s.superLikeCreditManager = mgr
 }
 
 func (s *Service) SetAgeChecker(checker AgeChecker) {
@@ -503,6 +513,15 @@ func (s *Service) Swipe(ctx context.Context, actorID string, req SwipeRequest, c
 	}
 
 	if direction != SwipePass {
+		// Consumable Super Like credit deduction
+		if direction == SwipeSuperSpark {
+			if s.superLikeCreditManager != nil {
+				if _, err := s.superLikeCreditManager.ConsumeSuperLikeCredit(ctx, actorID); err != nil {
+					return nil, ErrInsufficientSuperLikes
+				}
+			}
+		}
+
 		// Actor must have at least 3 approved profile gallery photos to like
 		if s.mediaSvc != nil {
 			gallery, err := s.mediaSvc.ListUserGallery(ctx, actorID)

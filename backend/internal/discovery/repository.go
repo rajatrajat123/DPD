@@ -20,15 +20,16 @@ import (
 )
 
 var (
-	ErrSelfSwipe         = errors.New("cannot swipe on yourself")
-	ErrCandidateBlocked  = errors.New("interaction blocked between users")
-	ErrCandidateInvalid  = errors.New("candidate account is inactive or not found")
-	ErrMatchNotFound     = errors.New("match not found or access denied")
+	ErrSelfSwipe                 = errors.New("cannot swipe on yourself")
+	ErrCandidateBlocked          = errors.New("interaction blocked between users")
+	ErrCandidateInvalid          = errors.New("candidate account is inactive or not found")
+	ErrMatchNotFound             = errors.New("match not found or access denied")
 	ErrSwipeLimitReached         = errors.New("daily swipe limit reached; match reward or boost required")
 	ErrRewindNotEntitled         = errors.New("rewind requires active Aura Plus or Aura Black membership")
 	ErrNoSwipeToRewind           = errors.New("no eligible previous pass found to rewind")
 	ErrSwipePhotoMinimumRequired = errors.New("cannot swipe: minimum 3 approved profile photos required")
 	ErrBonusLikesVerifiedOnly    = errors.New("free like quota exhausted; bonus likes from rewarded ads can only be used on photo-verified profiles")
+	ErrInsufficientSuperLikes    = errors.New("insufficient super like credits remaining")
 	ErrAgeVerificationRequired   = errors.New("mandatory 18+ age verification required")
 	ErrBirthdateRequired         = errors.New("birthdate is required to verify adult status")
 	ErrUnderageProhibited        = errors.New("underage access prohibited: must be at least 18 years old")
@@ -434,6 +435,54 @@ func violatesDealbreakers(actorProf *identity.Profile, actorPref *identity.Datin
 	return false
 }
 
+type contextKey string
+
+const (
+	contextKeyAutoExpand contextKey = "aura:discovery:auto_expand"
+
+	MaxAutomaticExpansionRadiusMiles = 500.0
+	MilesToKilometers                 = 1.609344
+	MaxAutomaticExpansionRadiusKm    = 804.7
+	ProfileBoostMaxDistanceMiles     = 160.0
+	ProfileBoostMaxDistanceKm        = 257.5
+)
+
+// WithAutoExpand injects the automatic distance expansion flag into the context.
+func WithAutoExpand(ctx context.Context, enabled bool) context.Context {
+	return context.WithValue(ctx, contextKeyAutoExpand, enabled)
+}
+
+// HasAutoExpand checks if automatic distance expansion was explicitly requested in the context.
+func HasAutoExpand(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	v, ok := ctx.Value(contextKeyAutoExpand).(bool)
+	return ok && v
+}
+
+// getCandidateStage partitions candidates into progressive expansion stages:
+// Stage 0: Within actor's initial configured radius (e.g. 50 km)
+// Stage 1: Up to 100 km
+// Stage 2: Up to 250 km
+// Stage 3: Up to 500 km
+// Stage 4: Up to 804.7 km (~500 miles)
+func getCandidateStage(distanceKm, initialRadiusKm float64, canExpand bool) int {
+	if !canExpand || distanceKm <= initialRadiusKm {
+		return 0
+	}
+	if distanceKm <= 100.0 {
+		return 1
+	}
+	if distanceKm <= 250.0 {
+		return 2
+	}
+	if distanceKm <= 500.0 {
+		return 3
+	}
+	return 4
+}
+
 func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cursor string, limit int) ([]DiscoveryCandidate, string, string, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -463,6 +512,16 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 	actorLoc, _ := m.identRepo.GetLocation(ctx, actorID)
 
 	actorAge := calculateAge(actorProf.Birthdate, time.Now().UTC())
+
+	initialRadiusKm := float64(actorPref.MaxDistanceKm)
+	if initialRadiusKm <= 0 {
+		initialRadiusKm = 50.0
+	}
+	canExpand := (actorPref.AutoExpandRadius || actorPref.Dealbreakers.AutoExpandRadius || HasAutoExpand(ctx)) && !actorPref.Dealbreakers.StrictMaxDistance
+	maxAllowedRadiusKm := initialRadiusKm
+	if canExpand {
+		maxAllowedRadiusKm = MaxAutomaticExpansionRadiusKm
+	}
 
 	memIdent, ok := m.identRepo.(*identity.MemoryRepository)
 	if !ok {
@@ -566,7 +625,7 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 			targetLoc, _ := m.identRepo.GetLocation(ctx, targetID)
 			if targetLoc != nil {
 				distanceKm = haversineDistance(actorLoc.Latitude, actorLoc.Longitude, targetLoc.Latitude, targetLoc.Longitude)
-				if distanceKm > float64(actorPref.MaxDistanceKm) {
+				if distanceKm > maxAllowedRadiusKm {
 					distanceCount++
 					continue
 				}
@@ -579,9 +638,15 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 			displayDist = 1
 		}
 
+		stage := getCandidateStage(distanceKm, initialRadiusKm, canExpand)
+		isExpanded := stage > 0
+
 		relevance := CalculateRelevanceScore(actorProf, actorPref, targetProf, distanceKm)
 		if mult, ok := m.boosts[targetID]; ok && mult > 1.0 {
-			relevance = CalculateBoostedScore(relevance, mult)
+			// Profile Boost applies 5x ranking multiplier only to candidates within 160 miles (257.5 km)
+			if distanceKm <= ProfileBoostMaxDistanceKm {
+				relevance = CalculateBoostedScore(relevance, mult)
+			}
 		}
 
 		// Filter sensitive fields by visibility
@@ -621,14 +686,19 @@ func (m *MemoryRepository) GetCandidates(ctx context.Context, actorID string, cu
 			HeightCm:              candHeight,
 			WeightKg:              candWeight,
 			ApproximateDistanceKm: displayDist,
+			ExpansionStage:        stage,
+			IsExpanded:            isExpanded,
 			IsPhotoVerified:       targetProf.IsPhotoVerified,
 			CompatibilityScore:    relevance,
 			Photos:                []PhotoCard{},
 		})
 	}
 
-	// Sort by relevance score descending with UserID as stable tie-breaker
+	// Sort by expansion stage ascending (nearest first), then relevance score descending with UserID as stable tie-breaker
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].ExpansionStage != candidates[j].ExpansionStage {
+			return candidates[i].ExpansionStage < candidates[j].ExpansionStage
+		}
 		if candidates[i].CompatibilityScore != candidates[j].CompatibilityScore {
 			return candidates[i].CompatibilityScore > candidates[j].CompatibilityScore
 		}
@@ -2386,13 +2456,14 @@ func (p *PostgresRepository) GetSwipeAllowanceDetail(ctx context.Context, userID
 }
 
 type candidateCursor struct {
+	stage     int
 	mult      float64
 	createdAt time.Time
 	id        string
 }
 
-func encodeCandidateCursor(mult float64, createdAt time.Time, id string) string {
-	raw := fmt.Sprintf("%.6f|%d|%s", mult, createdAt.UnixNano(), id)
+func encodeCandidateCursor(stage int, mult float64, createdAt time.Time, id string) string {
+	raw := fmt.Sprintf("%d|%.6f|%d|%s", stage, mult, createdAt.UnixNano(), id)
 	return base64.URLEncoding.EncodeToString([]byte(raw))
 }
 
@@ -2418,26 +2489,44 @@ func decodeCandidateCursor(cursor string) (*candidateCursor, int, error) {
 		}
 	}
 
-	parts := strings.SplitN(string(decoded), "|", 3)
-	if len(parts) != 3 {
-		return nil, 0, fmt.Errorf("invalid cursor format")
+	parts := strings.Split(string(decoded), "|")
+	if len(parts) == 4 {
+		stage, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, 0, err
+		}
+		mult, err := strconv.ParseFloat(parts[1], 64)
+		if err != nil {
+			return nil, 0, err
+		}
+		nano, err := strconv.ParseInt(parts[2], 10, 64)
+		if err != nil {
+			return nil, 0, err
+		}
+		return &candidateCursor{
+			stage:     stage,
+			mult:      mult,
+			createdAt: time.Unix(0, nano).UTC(),
+			id:        parts[3],
+		}, 0, nil
+	} else if len(parts) == 3 {
+		mult, err := strconv.ParseFloat(parts[0], 64)
+		if err != nil {
+			return nil, 0, err
+		}
+		nano, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			return nil, 0, err
+		}
+		return &candidateCursor{
+			stage:     0,
+			mult:      mult,
+			createdAt: time.Unix(0, nano).UTC(),
+			id:        parts[2],
+		}, 0, nil
 	}
 
-	mult, err := strconv.ParseFloat(parts[0], 64)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	nano, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	return &candidateCursor{
-		mult:      mult,
-		createdAt: time.Unix(0, nano).UTC(),
-		id:        parts[2],
-	}, 0, nil
+	return nil, 0, fmt.Errorf("invalid cursor format")
 }
 
 func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, cursor string, limit int) ([]DiscoveryCandidate, string, string, error) {
@@ -2480,6 +2569,8 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 				COALESCE((dp.dealbreakers->>'non_smoker_only')::boolean, false) AS non_smoker_only,
 				COALESCE((dp.dealbreakers->>'require_verified')::boolean, false) AS require_verified,
 				COALESCE((dp.dealbreakers->>'require_monogamous')::boolean, false) AS require_monogamous,
+				COALESCE((dp.dealbreakers->>'strict_max_distance')::boolean, false) AS strict_max_distance,
+				(COALESCE((dp.dealbreakers->>'auto_expand_radius')::boolean, false) OR $2::boolean) AS auto_expand_radius,
 				pl.coordinates AS actor_coords
 			FROM profiles p
 			LEFT JOIN dating_preferences dp ON dp.user_id = p.user_id
@@ -2506,14 +2597,22 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 				CEIL(ST_Distance(a.actor_coords, pl.coordinates) / 1000.0)::INT,
 				1
 			) AS distance_km,
+			CASE
+				WHEN a.actor_coords IS NULL OR pl.coordinates IS NULL THEN 0
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0) THEN 0
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 100000.0) THEN 1
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 250000.0) THEN 2
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 500000.0) THEN 3
+				ELSE 4
+			END AS expansion_stage,
 			COALESCE(pb.multiplier, 1.0)::float8 AS boost_multiplier,
 			u.created_at AS user_created_at
 		FROM users u
 		JOIN profiles p ON p.user_id = u.id
+		CROSS JOIN actor_info a
 		LEFT JOIN dating_preferences dp ON dp.user_id = u.id
 		LEFT JOIN profile_locations pl ON pl.user_id = u.id
-		LEFT JOIN profile_boosts pb ON pb.user_id = u.id AND pb.status = 'ACTIVE' AND pb.expires_at > NOW()
-		CROSS JOIN actor_info a
+		LEFT JOIN profile_boosts pb ON pb.user_id = u.id AND pb.status = 'ACTIVE' AND pb.expires_at > NOW() AND (a.actor_coords IS NULL OR pl.coordinates IS NULL OR ST_DWithin(a.actor_coords, pl.coordinates, 257500.0))
 		WHERE u.id <> a.user_id
 		  AND u.status = 'ACTIVE'
 		  AND p.incognito_enabled = FALSE
@@ -2531,7 +2630,19 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		  AND EXTRACT(YEAR FROM age(CURRENT_DATE, p.birthdate)) BETWEEN a.min_age AND a.max_age
 		  AND a.age BETWEEN COALESCE(dp.min_age, 18) AND COALESCE(dp.max_age, 100)
 		  -- PostGIS Distance radius (if coordinates available)
-		  AND (a.actor_coords IS NULL OR pl.coordinates IS NULL OR ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0))
+		  AND (
+			  a.actor_coords IS NULL 
+			  OR pl.coordinates IS NULL 
+			  OR ST_DWithin(
+				  a.actor_coords, 
+				  pl.coordinates, 
+				  CASE 
+					  WHEN a.strict_max_distance OR NOT a.auto_expand_radius 
+					  THEN a.max_distance_km * 1000.0 
+					  ELSE 804700.0 
+				  END
+			  )
+		  )
 		  -- Height filter
 		  AND (a.pref_min_height_cm IS NULL OR p.height_cm IS NULL OR p.height_cm >= a.pref_min_height_cm)
 		  AND (a.pref_max_height_cm IS NULL OR p.height_cm IS NULL OR p.height_cm <= a.pref_max_height_cm)
@@ -2574,24 +2685,46 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 			  (COALESCE((dp.dealbreakers->>'require_monogamous')::boolean, false) = FALSE OR a.relationship_structure = 'MONOGAMOUS' OR a.relationship_structure = '')
 		  )`
 
+	ctxAutoExpand := HasAutoExpand(ctx)
+
 	var query string
 	var args []any
 	if curData != nil {
 		query = baseQuery + `
-		  AND (COALESCE(pb.multiplier, 1.0)::float8, u.created_at, u.id) < ($3::float8, $4::timestamptz, $5::uuid)
-		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
-		LIMIT $2;`
-		args = []any{actorID, fetchLimit, curData.mult, curData.createdAt, curData.id}
+		  AND (
+			  (CASE
+				WHEN a.actor_coords IS NULL OR pl.coordinates IS NULL THEN 0
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0) THEN 0
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 100000.0) THEN 1
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 250000.0) THEN 2
+				WHEN ST_DWithin(a.actor_coords, pl.coordinates, 500000.0) THEN 3
+				ELSE 4
+			  END) > $4::int
+			  OR (
+				  (CASE
+					WHEN a.actor_coords IS NULL OR pl.coordinates IS NULL THEN 0
+					WHEN ST_DWithin(a.actor_coords, pl.coordinates, a.max_distance_km * 1000.0) THEN 0
+					WHEN ST_DWithin(a.actor_coords, pl.coordinates, 100000.0) THEN 1
+					WHEN ST_DWithin(a.actor_coords, pl.coordinates, 250000.0) THEN 2
+					WHEN ST_DWithin(a.actor_coords, pl.coordinates, 500000.0) THEN 3
+					ELSE 4
+				  END) = $4::int
+				  AND (COALESCE(pb.multiplier, 1.0)::float8, u.created_at, u.id) < ($5::float8, $6::timestamptz, $7::uuid)
+			  )
+		  )
+		ORDER BY expansion_stage ASC, COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $3;`
+		args = []any{actorID, ctxAutoExpand, fetchLimit, curData.stage, curData.mult, curData.createdAt, curData.id}
 	} else if offset > 0 {
 		query = baseQuery + `
-		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
-		LIMIT $2 OFFSET $3;`
-		args = []any{actorID, fetchLimit, offset}
+		ORDER BY expansion_stage ASC, COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $3 OFFSET $4;`
+		args = []any{actorID, ctxAutoExpand, fetchLimit, offset}
 	} else {
 		query = baseQuery + `
-		ORDER BY COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
-		LIMIT $2;`
-		args = []any{actorID, fetchLimit}
+		ORDER BY expansion_stage ASC, COALESCE(pb.multiplier, 1.0) DESC, u.created_at DESC, u.id DESC
+		LIMIT $3;`
+		args = []any{actorID, ctxAutoExpand, fetchLimit}
 	}
 
 	rows, err := p.pool.Query(ctx, query, args...)
@@ -2602,6 +2735,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 
 	type scannedCandidate struct {
 		cand      DiscoveryCandidate
+		stage     int
 		boostMult float64
 		createdAt time.Time
 	}
@@ -2614,13 +2748,14 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		var smoking, drinking string
 		var heightCm, weightKg *int
 		var dist int
+		var candStage int
 		var boostMult float64
 		var uCreatedAt time.Time
 
 		if err := rows.Scan(
 			&c.UserID, &c.DisplayName, &c.Age, &c.Bio, &c.Pronouns, &c.GenderIdentities,
 			&c.SexualOrientations, &c.RelationshipIntents, &structure, &visJSON,
-			&c.IsPhotoVerified, &smoking, &drinking, &heightCm, &weightKg, &dist, &boostMult, &uCreatedAt,
+			&c.IsPhotoVerified, &smoking, &drinking, &heightCm, &weightKg, &dist, &candStage, &boostMult, &uCreatedAt,
 		); err != nil {
 			return nil, "", "", err
 		}
@@ -2634,6 +2769,8 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 			dist = 1
 		}
 		c.ApproximateDistanceKm = dist
+		c.ExpansionStage = candStage
+		c.IsExpanded = candStage > 0
 
 		var vs identity.VisibilitySettings
 		_ = json.Unmarshal(visJSON, &vs)
@@ -2656,6 +2793,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 		c.Photos = []PhotoCard{}
 		scanned = append(scanned, scannedCandidate{
 			cand:      c,
+			stage:     candStage,
 			boostMult: boostMult,
 			createdAt: uCreatedAt,
 		})
@@ -2665,7 +2803,7 @@ func (p *PostgresRepository) GetCandidates(ctx context.Context, actorID string, 
 	var nextCursor string
 	if len(scanned) > limit {
 		last := scanned[limit-1]
-		nextCursor = encodeCandidateCursor(last.boostMult, last.createdAt, last.cand.UserID)
+		nextCursor = encodeCandidateCursor(last.stage, last.boostMult, last.createdAt, last.cand.UserID)
 		for i := 0; i < limit; i++ {
 			candidates = append(candidates, scanned[i].cand)
 		}

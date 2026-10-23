@@ -316,6 +316,31 @@ func (h *Handler) ActivateBoost(w http.ResponseWriter, r *http.Request) {
 	apperror.WriteJSON(w, http.StatusOK, res)
 }
 
+// SuperLikes handles GET /api/v1/billing/super-likes.
+func (h *Handler) SuperLikes(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Only GET is allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
+		return
+	}
+
+	credits, err := h.svc.GetSuperLikeCredits(r.Context(), authUser.ID)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"credits_remaining": credits,
+	})
+}
+
 // Webhook handles POST /api/v1/billing/webhooks/{provider}.
 func (h *Handler) Webhook(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
@@ -372,6 +397,8 @@ func (h *Handler) handleError(w http.ResponseWriter, reqID string, err error) {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "No active subscription found"))
 	case errors.Is(err, ErrInsufficientBoostCredits):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusPaymentRequired, apperror.CodeBusinessRuleViolation, "Insufficient boost credits"))
+	case errors.Is(err, ErrInsufficientSuperLikeCredits):
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "INSUFFICIENT_SUPER_LIKES", "Insufficient super like credits remaining"))
 	case errors.Is(err, ErrActiveBoostRunning):
 		apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "A profile boost is already active"))
 	case errors.Is(err, ErrInvalidProvider):

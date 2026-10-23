@@ -21,7 +21,10 @@ var (
 	ErrCaseNotFound            = errors.New("moderation case not found")
 	ErrAppealNotFound          = errors.New("appeal not found")
 	ErrInvalidWebhookSignature = errors.New("invalid webhook signature")
+	ErrExpiredWebhookSignature = errors.New("webhook signature timestamp expired (replay attack protection)")
+	ErrUserMismatch            = errors.New("inquiry user ownership mismatch")
 	ErrProviderDisabledInProd  = errors.New("development mock age assurance provider cannot be used in production")
+	ErrPassportTrialExpired    = errors.New("passport verification 7-day trial has expired; Aura Plus subscription required")
 )
 
 // Permission represents granular admin permissions
@@ -101,6 +104,7 @@ func ValidateNonSelfAction(actorID, targetID string) error {
 type AgeAssuranceStatus string
 
 const (
+	AgeUnverified   AgeAssuranceStatus = "UNVERIFIED"
 	AgePending      AgeAssuranceStatus = "PENDING"
 	AgeVerified     AgeAssuranceStatus = "VERIFIED"
 	AgeRejected     AgeAssuranceStatus = "REJECTED"
@@ -120,6 +124,30 @@ type AgeAssurance struct {
 	Metadata          map[string]any     `json:"metadata,omitempty"`
 	CreatedAt         time.Time          `json:"created_at"`
 	UpdatedAt         time.Time          `json:"updated_at"`
+}
+
+type PassportVerificationTrial struct {
+	UserID    string    `json:"user_id"`
+	StartedAt time.Time `json:"started_at"`
+	EndsAt    time.Time `json:"ends_at"`
+	TrialUsed bool      `json:"trial_used"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+func (t *PassportVerificationTrial) IsActive() bool {
+	return time.Now().UTC().Before(t.EndsAt)
+}
+
+type PassportTrialStatus struct {
+	HasStarted      bool               `json:"has_started"`
+	IsActive        bool               `json:"is_active"`
+	StartedAt       *time.Time         `json:"started_at,omitempty"`
+	EndsAt          *time.Time         `json:"ends_at,omitempty"`
+	DaysRemaining   int                `json:"days_remaining"`
+	RequiresUpgrade bool               `json:"requires_upgrade"`
+	IsEntitled      bool               `json:"is_entitled"`
+	VerifiedStatus  AgeAssuranceStatus `json:"verified_status"`
 }
 
 // Moderation Report Target & Category

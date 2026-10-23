@@ -155,6 +155,14 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 			apperror.WriteError(w, reqID, apperror.New(http.StatusTooManyRequests, "ACCOUNT_LOCKED", err.Error()))
 			return
 		}
+		if errorsIs(err, ErrGoogleSignInRequired) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, "GOOGLE_SIGNIN_REQUIRED", "This account was created with Google Sign-In. Please tap 'Continue with Google' to sign in."))
+			return
+		}
+		if errorsIs(err, ErrInvalidCredentialsWithGoogleOption) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Invalid password. If you normally sign in with Google, please tap 'Continue with Google', or use 'Forgot password?'."))
+			return
+		}
 		if errorsIs(err, ErrInvalidCredentials) {
 			apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Invalid email or password"))
 			return

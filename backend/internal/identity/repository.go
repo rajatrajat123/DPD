@@ -476,6 +476,11 @@ func (m *MemoryRepository) UpsertPreferences(_ context.Context, pref *DatingPref
 	defer m.mu.Unlock()
 
 	cloned := *pref
+	if cloned.AutoExpandRadius {
+		cloned.Dealbreakers.AutoExpandRadius = true
+	} else if cloned.Dealbreakers.AutoExpandRadius {
+		cloned.AutoExpandRadius = true
+	}
 	cloned.UpdatedAt = time.Now().UTC()
 	m.preferences[cloned.UserID] = &cloned
 	return nil
@@ -1073,6 +1078,9 @@ func (p *PostgresRepository) GetLocation(ctx context.Context, userID string) (*P
 }
 
 func (p *PostgresRepository) UpsertPreferences(ctx context.Context, pref *DatingPreferences) error {
+	if pref.AutoExpandRadius {
+		pref.Dealbreakers.AutoExpandRadius = true
+	}
 	dealbreakersJSON, err := json.Marshal(pref.Dealbreakers)
 	if err != nil {
 		dealbreakersJSON = []byte("{}")
@@ -1159,6 +1167,9 @@ func (p *PostgresRepository) GetPreferences(ctx context.Context, userID string) 
 	}
 	if len(dealbreakersBytes) > 0 {
 		_ = json.Unmarshal(dealbreakersBytes, &pref.Dealbreakers)
+		if pref.Dealbreakers.AutoExpandRadius {
+			pref.AutoExpandRadius = true
+		}
 	}
 	if len(notifBytes) > 0 {
 		_ = json.Unmarshal(notifBytes, &pref.NotificationPreferences)

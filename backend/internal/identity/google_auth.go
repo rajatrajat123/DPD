@@ -17,8 +17,10 @@ var (
 	ErrInvalidOAuthToken         = errors.New("invalid or expired google token")
 	ErrGoogleAuthNotConfigured   = errors.New("google sign-in is not configured on this server")
 	ErrGoogleAccountLinkRequired = errors.New("an account already exists for this email; sign in with your password to link Google")
-	ErrGoogleIdentityConflict    = errors.New("this google account or email is already linked to a different Aura account")
-	ErrGoogleEmailMismatch       = errors.New("google account email does not match your Aura account email")
+	ErrGoogleIdentityConflict             = errors.New("this google account or email is already linked to a different Aura account")
+	ErrGoogleEmailMismatch                = errors.New("google account email does not match your Aura account email")
+	ErrGoogleSignInRequired               = errors.New("this account was created with Google Sign-In; please sign in with Google")
+	ErrInvalidCredentialsWithGoogleOption = errors.New("invalid email or password. If you normally sign in with Google, tap 'Continue with Google'")
 )
 
 const (

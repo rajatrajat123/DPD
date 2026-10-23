@@ -177,6 +177,8 @@ type LifestyleDealbreakers struct {
 	NonSmokerOnly     bool `json:"non_smoker_only"`
 	RequireVerified   bool `json:"require_verified"`
 	RequireMonogamous bool `json:"require_monogamous"`
+	StrictMaxDistance bool `json:"strict_max_distance,omitempty"`
+	AutoExpandRadius  bool `json:"auto_expand_radius,omitempty"`
 }
 
 // NotificationPreferences configures per-category push/in-app notification delivery and quiet hours.
@@ -220,6 +222,7 @@ type DatingPreferences struct {
 	MinWeightKg             *int                    `json:"min_weight_kg,omitempty"`
 	MaxWeightKg             *int                    `json:"max_weight_kg,omitempty"`
 	Dealbreakers            LifestyleDealbreakers   `json:"dealbreakers"`
+	AutoExpandRadius        bool                    `json:"auto_expand_radius,omitempty"`
 	NotificationPreferences NotificationPreferences `json:"notification_preferences"`
 	UpdatedAt               time.Time               `json:"updated_at"`
 }

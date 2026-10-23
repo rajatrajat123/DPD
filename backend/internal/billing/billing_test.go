@@ -76,8 +76,8 @@ func TestProductCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get aura plus: %v", err)
 	}
-	if plus.PriceCents != 1999 {
-		t.Errorf("expected price 1999 cents, got %d", plus.PriceCents)
+	if plus.PriceCents != 2500 {
+		t.Errorf("expected price 2500 cents ($25.00), got %d", plus.PriceCents)
 	}
 	if plus.Tier != billing.TierPlus {
 		t.Errorf("expected tier PLUS, got %s", plus.Tier)
@@ -102,8 +102,8 @@ func TestCheckoutSessionCreation(t *testing.T) {
 	if session.SessionID == "" {
 		t.Errorf("expected non-empty session ID")
 	}
-	if session.AmountCents != 1999 {
-		t.Errorf("expected 1999 cents, got %d", session.AmountCents)
+	if session.AmountCents != 2500 {
+		t.Errorf("expected 2500 cents ($25.00), got %d", session.AmountCents)
 	}
 }
 
@@ -112,7 +112,7 @@ func TestPurchaseVerificationAndSubscriptionLifecycle(t *testing.T) {
 	ctx := context.Background()
 	userID := "usr_subscriber_1"
 
-	// 1. Initial purchase of Aura Plus Annual
+	// 1. Initial purchase of Aura Plus Annual ($200.00 / 20000 cents)
 	verified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
 		Provider:              billing.ProviderStripe,
 		PlanCode:              billing.PlanAuraPlusAnnual,
@@ -121,8 +121,8 @@ func TestPurchaseVerificationAndSubscriptionLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("verify purchase failed: %v", err)
 	}
-	if verified.GrossAmountCents != 11988 {
-		t.Errorf("expected 11988 cents, got %d", verified.GrossAmountCents)
+	if verified.GrossAmountCents != 20000 {
+		t.Errorf("expected 20000 cents ($200.00), got %d", verified.GrossAmountCents)
 	}
 
 	// 2. Check subscription status & entitlements
@@ -195,8 +195,8 @@ func TestConsumableBoostPurchaseAndConsumption(t *testing.T) {
 	if res.CreditsRemaining != 4 {
 		t.Errorf("expected 4 remaining credits, got %d", res.CreditsRemaining)
 	}
-	if res.Boost.Multiplier != 2.5 {
-		t.Errorf("expected 2.5x multiplier, got %f", res.Boost.Multiplier)
+	if res.Boost.Multiplier != 5.0 {
+		t.Errorf("expected 5.0x multiplier, got %f", res.Boost.Multiplier)
 	}
 	if !res.Boost.IsActive() {
 		t.Errorf("expected boost to be active")
@@ -249,6 +249,134 @@ func TestConcurrentBoostDoubleSpendPrevention(t *testing.T) {
 	rem, _ := repo.GetBoostCredits(ctx, userID)
 	if rem != 0 {
 		t.Errorf("expected 0 remaining credits, got %d", rem)
+	}
+}
+
+func TestPricingUpdatesAndSuperLikes(t *testing.T) {
+	svc, repo := setupTestBillingService(t)
+	ctx := context.Background()
+	userID := "usr_super_likes_tester"
+
+	// 1. Verify updated product catalog prices
+	plusMonthly, err := svc.GetProductByPlanCode(ctx, billing.PlanAuraPlusMonthly)
+	if err != nil || plusMonthly.PriceCents != 2500 {
+		t.Errorf("expected Plus Monthly at 2500 cents ($25), got %+v", plusMonthly)
+	}
+
+	plusAnnual, err := svc.GetProductByPlanCode(ctx, billing.PlanAuraPlusAnnual)
+	if err != nil || plusAnnual.PriceCents != 20000 {
+		t.Errorf("expected Plus Annual at 20000 cents ($200), got %+v", plusAnnual)
+	}
+
+	extraPremiumMonthly, err := svc.GetProductByPlanCode(ctx, billing.PlanAuraBlackMonthly)
+	if err != nil || extraPremiumMonthly.PriceCents != 3499 {
+		t.Errorf("expected Extra Premium Monthly at 3499 cents ($34.99), got %+v", extraPremiumMonthly)
+	}
+
+	extraPremiumAnnual, err := svc.GetProductByPlanCode(ctx, billing.PlanAuraBlackAnnual)
+	if err != nil || extraPremiumAnnual.PriceCents != 30000 {
+		t.Errorf("expected Extra Premium Annual at 30000 cents ($300), got %+v", extraPremiumAnnual)
+	}
+
+	boostSingle, err := svc.GetProductByPlanCode(ctx, billing.PlanBoostSingle)
+	if err != nil || boostSingle.PriceCents != 799 {
+		t.Errorf("expected Boost Single at 799 cents ($7.99), got %+v", boostSingle)
+	}
+
+	superLikes5, err := svc.GetProductByPlanCode(ctx, billing.PlanSuperSpark5Pack)
+	if err != nil || superLikes5.PriceCents != 499 {
+		t.Errorf("expected Super Likes 5Pack at 499 cents ($4.99), got %+v", superLikes5)
+	}
+
+	// 2. Initial Super Likes balance must be 0
+	initialCredits, err := svc.GetSuperLikeCredits(ctx, userID)
+	if err != nil || initialCredits != 0 {
+		t.Fatalf("expected 0 initial super like credits, got %d (err: %v)", initialCredits, err)
+	}
+
+	// Consuming with 0 credits must fail with ErrInsufficientSuperLikeCredits
+	_, err = svc.ConsumeSuperLikeCredit(ctx, userID)
+	if !errors.Is(err, billing.ErrInsufficientSuperLikeCredits) {
+		t.Fatalf("expected ErrInsufficientSuperLikeCredits, got: %v", err)
+	}
+
+	// 3. Purchase 5-pack of Super Likes ($4.99)
+	verified, err := svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderStripe,
+		PlanCode:              billing.PlanSuperSpark5Pack,
+		ExternalTransactionID: "ch_super_likes_1",
+	}, "corr_sl_1")
+	if err != nil {
+		t.Fatalf("purchase of super likes failed: %v", err)
+	}
+	if verified.GrossAmountCents != 499 {
+		t.Errorf("expected 499 cents, got %d", verified.GrossAmountCents)
+	}
+
+	// Balance must now be 5
+	creditsAfterPurchase, err := svc.GetSuperLikeCredits(ctx, userID)
+	if err != nil || creditsAfterPurchase != 5 {
+		t.Fatalf("expected 5 super like credits after purchase, got %d", creditsAfterPurchase)
+	}
+
+	// Subscription status must reflect remaining credits
+	subStatus, err := svc.GetSubscriptionStatus(ctx, userID)
+	if err != nil || subStatus.SuperLikeCreditsRemaining != 5 {
+		t.Fatalf("expected status SuperLikeCreditsRemaining=5, got: %+v", subStatus)
+	}
+
+	// 4. Replay of same transaction must not grant double credits
+	_, err = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderStripe,
+		PlanCode:              billing.PlanSuperSpark5Pack,
+		ExternalTransactionID: "ch_super_likes_1",
+	}, "corr_sl_replay")
+	if err != nil {
+		t.Fatalf("idempotent replay failed: %v", err)
+	}
+	creditsAfterReplay, _ := svc.GetSuperLikeCredits(ctx, userID)
+	if creditsAfterReplay != 5 {
+		t.Fatalf("replay must not grant duplicate credits, expected 5, got %d", creditsAfterReplay)
+	}
+
+	// 5. Consume 1 Super Like credit
+	remCredits, err := svc.ConsumeSuperLikeCredit(ctx, userID)
+	if err != nil || remCredits != 4 {
+		t.Fatalf("expected 4 remaining credits after 1 consumption, got %d", remCredits)
+	}
+
+	// 6. Test Profile Boost default parameters: 60 mins, 5.0x multiplier, 160 miles radius
+	_, _ = repo.AddBoostCredits(ctx, userID, 1)
+	boostRes, err := svc.ActivateBoost(ctx, userID, 0) // duration <= 0 uses default
+	if err != nil {
+		t.Fatalf("boost activation failed: %v", err)
+	}
+	if boostRes.Boost.DurationMinutes != 60 {
+		t.Errorf("expected 60 minutes default duration, got %d", boostRes.Boost.DurationMinutes)
+	}
+	if boostRes.Boost.Multiplier != 5.0 {
+		t.Errorf("expected 5.0 multiplier, got %f", boostRes.Boost.Multiplier)
+	}
+	if boostRes.Boost.RadiusMiles != 160.0 || boostRes.Boost.MaxRadiusKm != 257.5 {
+		t.Errorf("expected 160 miles / 257.5 km radius, got miles=%f km=%f", boostRes.Boost.RadiusMiles, boostRes.Boost.MaxRadiusKm)
+	}
+
+	// 7. Passport entitlement test
+	hasEnt, err := svc.HasPassportEntitlement(ctx, userID)
+	if err != nil || hasEnt {
+		t.Errorf("user without subscription should not have passport entitlement, got: %v", hasEnt)
+	}
+
+	// Grant Aura Plus subscription
+	_, _ = svc.VerifyPurchase(ctx, userID, billing.VerifyPurchaseRequest{
+		Provider:              billing.ProviderStripe,
+		PlanCode:              billing.PlanAuraPlusMonthly,
+		ExternalTransactionID: "ch_plus_passport_ent",
+	}, "corr_plus_ent")
+
+	hasEntAfterSub, err := svc.HasPassportEntitlement(ctx, userID)
+	if err != nil || !hasEntAfterSub {
+		t.Errorf("user with active Aura Plus subscription MUST have passport entitlement, got: %v", hasEntAfterSub)
 	}
 }
 
