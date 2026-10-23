@@ -60,6 +60,7 @@ type Config struct {
 	GooglePlayCredentialsJSON string
 	GooglePlayPackageName     string
 	GoogleOAuthAudiences      []string
+	AdMobSSVCallbackURL       string
 
 	PersonaAPIKey        string
 	PersonaWebhookSecret string
@@ -135,6 +136,7 @@ func Load(getenv func(string) string) (*Config, error) {
 	appEnv := Environment(getString(getenv, "APP_ENV", string(EnvLocal)))
 	defaultBundleID := "com.aura.dating"
 	defaultPackageName := "com.aura.dating"
+	defaultAdMobSSVURL := "http://localhost:8080/api/v1/ads/admob/ssv"
 	defaultResetURL := "http://192.168.29.15:8080/auth/reset-password"
 	defaultExpoURL := "exp://192.168.29.15:8081/--/reset-password"
 	if appEnv == EnvStaging || appEnv == EnvProduction {
@@ -142,6 +144,11 @@ func Load(getenv func(string) string) (*Config, error) {
 		defaultPackageName = ""
 		defaultResetURL = "https://auradating.com/auth/reset-password"
 		defaultExpoURL = "aura://reset-password"
+		if appEnv == EnvStaging {
+			defaultAdMobSSVURL = "https://api.staging.auradating.com/api/v1/ads/admob/ssv"
+		} else {
+			defaultAdMobSSVURL = "https://api.auradating.com/api/v1/ads/admob/ssv"
+		}
 	}
 
 	cfg := &Config{
@@ -184,6 +191,7 @@ func Load(getenv func(string) string) (*Config, error) {
 		GooglePlayCredentialsJSON: getString(getenv, "GOOGLE_PLAY_CREDENTIALS_JSON", ""),
 		GooglePlayPackageName:     getString(getenv, "GOOGLE_PLAY_PACKAGE_NAME", defaultPackageName),
 		GoogleOAuthAudiences:      parseStringSlice(getString(getenv, "GOOGLE_OAUTH_AUDIENCES", getString(getenv, "GOOGLE_CLIENT_ID", getString(getenv, "GOOGLE_OAUTH_CLIENT_ID", "")))),
+		AdMobSSVCallbackURL:       getString(getenv, "ADMOB_SSV_CALLBACK_URL", defaultAdMobSSVURL),
 
 		PersonaAPIKey:        getString(getenv, "PERSONA_API_KEY", ""),
 		PersonaWebhookSecret: getString(getenv, "PERSONA_WEBHOOK_SECRET", ""),

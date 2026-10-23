@@ -29,6 +29,17 @@ export function isGoogleMobileAdsAvailable(): boolean {
 /**
  * AdMob Test Ad Unit IDs provided by Google for development/testing
  */
+/**
+ * AdMob Server-Side Verification (SSV) Configuration
+ * Configure this callback URL in AdMob Console for Rewarded Ad Units:
+ * AdMob Console -> Apps -> Ad units -> [Your Rewarded Unit] -> Advanced settings -> Server-side verification
+ */
+export const ADMOB_SSV_CONFIG = {
+  PRODUCTION_CALLBACK_URL: 'https://api.auradating.com/api/v1/ads/admob/ssv',
+  STAGING_CALLBACK_URL: 'https://api.staging.auradating.com/api/v1/ads/admob/ssv',
+  REWARD_AMOUNT_BONUS_LIKES: 5,
+};
+
 export const AD_UNIT_IDS = {
   BANNER: Platform.select({
     ios: 'ca-app-pub-3940256099942544/2934735716',
@@ -135,6 +146,35 @@ class AdMobService {
       this.initialized = true;
     } finally {
       this.isInitializing = false;
+    }
+  }
+
+  /**
+   * Opens Google Mobile Ads Ad Inspector.
+   * Enables inspecting mediated ad networks (AppLovin Waterfall/Bidding),
+   * adapter initialization states, and running single ad source tests on test devices.
+   * Strictly gated to development/internal diagnostic environments.
+   */
+  async openAdInspector(): Promise<void> {
+    if (!__DEV__) {
+      if (__DEV__) console.warn('[AdMob] Ad Inspector is only available in development/internal builds.');
+      return;
+    }
+    if (!isGoogleMobileAdsAvailable()) {
+      throw new Error(
+        'Google Mobile Ads native SDK is unavailable in Expo Go. An Android development build is required to open Ad Inspector.'
+      );
+    }
+    await this.initialize();
+    try {
+      const mobileAds = require('react-native-google-mobile-ads');
+      if (mobileAds && mobileAds.default) {
+        await mobileAds.default().openAdInspector();
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Failed to launch Ad Inspector';
+      if (__DEV__) console.warn('[AdMob] openAdInspector failed:', msg);
+      throw new Error(msg);
     }
   }
 
@@ -268,7 +308,13 @@ class AdMobService {
           unsubscribeLoaded = rewardedAd.addAdEventListener(
             RewardedAdEventType.LOADED,
             () => {
+              if (__DEV__) {
+                console.log('[AdMob] Rewarded ad LOADED successfully. Presenting...');
+              }
               rewardedAd.show().catch((err: unknown) => {
+                if (__DEV__) {
+                  console.warn('[AdMob] rewardedAd.show() threw error:', err);
+                }
                 finish({
                   rewarded: false,
                   rewardAmount: 0,
@@ -281,6 +327,9 @@ class AdMobService {
           unsubscribeEarned = rewardedAd.addAdEventListener(
             RewardedAdEventType.EARNED_REWARD,
             (reward: { amount?: number }) => {
+              if (__DEV__) {
+                console.log('[AdMob] Rewarded ad EARNED_REWARD received:', reward);
+              }
               hasRewarded = true;
               if (reward && typeof reward.amount === 'number' && reward.amount > 0) {
                 earnedAmount = reward.amount;
@@ -294,9 +343,15 @@ class AdMobService {
           unsubscribeClosed = rewardedAd.addAdEventListener(
             AdEventType.CLOSED,
             () => {
+              if (__DEV__) {
+                console.log(`[AdMob] Rewarded ad CLOSED (hasRewarded = ${hasRewarded})`);
+              }
               if (hasRewarded) {
-                // Ad was watched to completion. In test mode, provide transaction ID for verification.
-                const txId = `test-admob-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+                // In non-production development environments, provide a test transaction ID for offline mock verification.
+                // In production, Google's servers deliver signed cryptographic SSV callbacks directly to the backend.
+                const txId = (typeof __DEV__ !== 'undefined' && __DEV__)
+                  ? `test-admob-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`
+                  : undefined;
                 finish({ rewarded: true, rewardAmount: earnedAmount, transactionId: txId });
               } else {
                 finish({ rewarded: false, rewardAmount: 0, error: 'Video was closed before completing' });
@@ -307,6 +362,9 @@ class AdMobService {
           unsubscribeError = rewardedAd.addAdEventListener(
             AdEventType.ERROR,
             (error: unknown) => {
+              if (__DEV__) {
+                console.warn('[AdMob] Rewarded ad ERROR event:', error);
+              }
               finish({
                 rewarded: false,
                 rewardAmount: 0,
@@ -440,9 +498,20 @@ export class AdBreakManager {
   private firstAdCompleted = false;
   private viewedProfileIds = new Set<string>();
   private isHydrated = false;
+  private hydrationPromise: Promise<void> | null = null;
+  private lastSwipedProfileId: string | null = null;
 
   constructor() {
-    this.hydrate();
+    this.hydrationPromise = this.hydrate();
+  }
+
+  async ensureHydrated(): Promise<void> {
+    if (this.isHydrated) return;
+    if (this.hydrationPromise) {
+      await this.hydrationPromise;
+    } else {
+      await this.hydrate();
+    }
   }
 
   private async hydrate(): Promise<void> {
@@ -467,6 +536,9 @@ export class AdBreakManager {
       }
     } catch {}
     this.isHydrated = true;
+    if (__DEV__) {
+      console.log(`[AdMob] AdBreakManager hydrated: count=${this.swipeCount}, firstAdCompleted=${this.firstAdCompleted}, viewedProfiles=${this.viewedProfileIds.size}`);
+    }
   }
 
   private async persist(): Promise<void> {
@@ -479,18 +551,45 @@ export class AdBreakManager {
 
   /**
    * Records a viewed/swiped profile by ID.
-   * Prevents counting the same profile multiple times (due to rerenders, retries, or pagination).
+   * Prevents counting the same profile multiple times (due to rerenders, retries, or duplicate callbacks).
+   * Does not allow deduplication to deadlock when candidate pool has fewer unique profiles than threshold (15).
    * Returns true if the required ad threshold has been reached.
    */
   recordProfileView(profileId?: string, isIntroductory: boolean = false): boolean {
     if (profileId) {
-      if (this.viewedProfileIds.has(profileId)) {
+      // 1. Prevent duplicate counting from immediate rerenders or retries on the same active card
+      if (this.lastSwipedProfileId === profileId) {
+        if (__DEV__) {
+          console.log(`[AdMob] Swipe deduplicated (retry/rerender on same profile): ${profileId.slice(-4)}`);
+        }
         return this.shouldShowRequiredAd(isIntroductory);
       }
+
+      // 2. Profile-ID deduplication:
+      // If profile was already counted in the current cycle, only count if cycling past other cards
+      // to avoid deadlock when candidate pool has fewer unique profiles than threshold (15)
+      if (this.viewedProfileIds.has(profileId)) {
+        if (this.swipeCount < 15 && this.viewedProfileIds.size < 15) {
+          this.lastSwipedProfileId = profileId;
+          this.swipeCount += 1;
+          this.persist();
+          if (__DEV__) {
+            console.log(`[AdMob] Swipe counted (cycled deck): count = ${this.swipeCount}/15`);
+          }
+          return this.shouldShowRequiredAd(isIntroductory);
+        }
+        return this.shouldShowRequiredAd(isIntroductory);
+      }
+
       this.viewedProfileIds.add(profileId);
+      this.lastSwipedProfileId = profileId;
     }
+
     this.swipeCount += 1;
     this.persist();
+    if (__DEV__) {
+      console.log(`[AdMob] Swipe counted: count = ${this.swipeCount}/15 (unique in cycle: ${this.viewedProfileIds.size})`);
+    }
     return this.shouldShowRequiredAd(isIntroductory);
   }
 
@@ -503,12 +602,8 @@ export class AdBreakManager {
 
   /**
    * Checks whether the current swipe count meets the threshold for a required ad.
-   * Free users view an interstitial ad at natural transitions after every 15 unique browsed profiles.
    */
   shouldShowRequiredAd(isIntroductory: boolean = false): boolean {
-    if (!isGoogleMobileAdsAvailable()) {
-      return false;
-    }
     const threshold = 15;
     return this.swipeCount >= threshold;
   }
@@ -520,14 +615,20 @@ export class AdBreakManager {
     this.swipeCount = 0;
     this.firstAdCompleted = true;
     this.viewedProfileIds.clear();
+    this.lastSwipedProfileId = null;
     await this.persist();
+    if (__DEV__) {
+      console.log('[AdMob] AdBreakManager: Ad completed, swipe counter reset to 0');
+    }
   }
 
   /**
    * Called when an ad fails, is skipped, or is incomplete. Counter is NOT reset.
    */
   onAdFailed(): void {
-    // Preserves counter so next view will re-prompt for required ad completion
+    if (__DEV__) {
+      console.log(`[AdMob] AdBreakManager: Ad skipped/failed, counter preserved at ${this.swipeCount}`);
+    }
   }
 
   getSwipeCount(): number {
@@ -546,6 +647,7 @@ export class AdBreakManager {
     this.swipeCount = 0;
     this.firstAdCompleted = false;
     this.viewedProfileIds.clear();
+    this.lastSwipedProfileId = null;
     this.persist();
   }
 }

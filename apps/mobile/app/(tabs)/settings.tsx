@@ -18,6 +18,7 @@ import { useAuth } from '../../src/context/AuthContext';
 import { privacyManager, BiometricStatus } from '../../src/services/security/privacyManager';
 import { notificationManager } from '../../src/services/notifications/notificationManager';
 import { config } from '../../src/config/env';
+import { admobService } from '../../src/services/ads/admobService';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -303,6 +304,44 @@ export default function SettingsScreen() {
             </View>
           </View>
         </View>
+
+        {/* Developer Diagnostics: Ad Inspector (Gated to __DEV__ builds) */}
+        {__DEV__ && (
+          <View style={styles.section} testID="dev-diagnostics-section">
+            <Text style={[styles.sectionTitle, { color: colors.gold }]}>Developer Diagnostics</Text>
+            <TouchableOpacity
+              style={[
+                styles.infoCard,
+                {
+                  backgroundColor: colors.card,
+                  borderColor: colors.gold,
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  padding: spacing.md,
+                },
+              ]}
+              onPress={async () => {
+                try {
+                  await admobService.openAdInspector();
+                } catch (err: unknown) {
+                  const msg = err instanceof Error ? err.message : 'Failed to launch Ad Inspector';
+                  Alert.alert('Ad Inspector Notice', msg);
+                }
+              }}
+              activeOpacity={0.8}
+              testID="open-ad-inspector-btn"
+            >
+              <View style={{ flex: 1, marginRight: spacing.sm }}>
+                <Text style={[styles.settingTitle, { color: colors.text }]}>🔍 Open Ad Inspector</Text>
+                <Text style={[styles.settingDesc, { color: colors.textMuted }]}>
+                  Inspect Google Mobile Ads & AppLovin mediation waterfall, adapter status, and test single ad sources.
+                </Text>
+              </View>
+              <Text style={{ color: colors.gold, fontSize: 18, fontWeight: '700' }}>➔</Text>
+            </TouchableOpacity>
+          </View>
+        )}
 
         {/* Account Actions */}
         <View style={styles.section}>

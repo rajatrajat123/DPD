@@ -8,6 +8,7 @@ import (
 	"encoding/asn1"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +28,7 @@ var (
 	ErrExpiredSSVCallback  = errors.New("admob ssv: callback timestamp expired or in future")
 	ErrDuplicateSSVReward  = errors.New("admob ssv: transaction ID already processed (replay blocked)")
 	ErrMissingSSVParam     = errors.New("admob ssv: required callback parameter missing")
+	ErrPendingSSVReward    = errors.New("admob ssv: callback pending verification")
 )
 
 type AdMobSSVReward struct {
@@ -46,6 +48,7 @@ type GoogleKeySet struct {
 	Keys []struct {
 		KeyID  int64  `json:"keyId"`
 		Base64 string `json:"base64"`
+		Pem    string `json:"pem"`
 	} `json:"keys"`
 }
 
@@ -135,8 +138,21 @@ func (v *SSVVerifier) FetchGoogleKeys(ctx context.Context) error {
 	defer v.mu.Unlock()
 
 	for _, k := range keySet.Keys {
-		der, err := base64.StdEncoding.DecodeString(k.Base64)
-		if err != nil {
+		var der []byte
+		if k.Base64 != "" {
+			var err error
+			der, err = base64.StdEncoding.DecodeString(k.Base64)
+			if err != nil {
+				der = nil
+			}
+		}
+		if len(der) == 0 && k.Pem != "" {
+			block, _ := pem.Decode([]byte(k.Pem))
+			if block != nil {
+				der = block.Bytes
+			}
+		}
+		if len(der) == 0 {
 			continue
 		}
 		pubInterface, err := x509.ParsePKIXPublicKey(der)
@@ -250,9 +266,16 @@ func (v *SSVVerifier) VerifyCallback(rawQuery string) (*AdMobSSVReward, error) {
 	}
 
 	// Decode signature (ASN.1 DER sequence of r and s, or raw r||s)
+	// AdMob signatures are URL-transmitted and may use RawURLEncoding, URLEncoding, StdEncoding, or RawStdEncoding
 	sigBytes, err := base64.RawURLEncoding.DecodeString(sig)
 	if err != nil {
+		sigBytes, err = base64.URLEncoding.DecodeString(sig)
+	}
+	if err != nil {
 		sigBytes, err = base64.StdEncoding.DecodeString(sig)
+	}
+	if err != nil {
+		sigBytes, err = base64.RawStdEncoding.DecodeString(sig)
 	}
 	if err != nil {
 		return nil, ErrInvalidSSVSignature

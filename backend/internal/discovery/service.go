@@ -154,8 +154,9 @@ func (s *Service) VerifyAndGrantAdReward(ctx context.Context, rawQuery string) (
 	}
 
 	// 3. Swipe allowance rewarded ad
+	// Enforce Aura policy: exactly 5 bonus likes for swipe cadence and voluntary bonus like rewards.
 	grantAmount := reward.RewardAmount
-	if grantAmount <= 0 {
+	if reward.CustomData == "swipe_cadence_reward" || reward.CustomData == "bonus_likes_reward" || grantAmount <= 0 {
 		grantAmount = 5
 	}
 
@@ -1033,19 +1034,45 @@ func (s *Service) ClaimSwipeAdReward(ctx context.Context, userID, rawQuery, tran
 			return nil, err
 		}
 		if reward.UserID != "" && reward.UserID != userID {
-			return nil, errors.New("reward user_id does not match authenticated user")
+			return nil, errors.New("user/placement mismatch: reward user_id does not match authenticated user")
 		}
 		txID = reward.TransactionID
 	} else if transactionID != "" {
+		if strings.HasPrefix(transactionID, "test-admob-") && !s.verifier.isTestSignatureAllowed() {
+			return nil, errors.New("client-generated test transaction IDs are rejected in production; cryptographically signed AdMob SSV callback is required")
+		}
 		if !s.verifier.isTestSignatureAllowed() {
-			return nil, errors.New("raw_query cryptographic SSV callback is required in production; client transaction ID not accepted")
+			// In production, verify that this transaction ID was genuinely verified and recorded via Google SSV callback
+			processed, err := s.repo.IsAdRewardProcessed(ctx, transactionID)
+			if err != nil {
+				return nil, err
+			}
+			if !processed {
+				return nil, ErrPendingSSVReward
+			}
+			return s.repo.GetSwipeAllowanceDetail(ctx, userID)
 		}
 		txID = transactionID
 	} else {
-		return nil, errors.New("ad verification required: valid cryptographic SSV callback or test transaction is required")
+		// When no raw_query or transaction_id is passed, check if a genuine Google SSV callback
+		// was verified and credited for this user within the last 5 minutes.
+		since := time.Now().UTC().Add(-5 * time.Minute)
+		hasRecent, err := s.repo.HasRecentAdReward(ctx, userID, since)
+		if err != nil {
+			return nil, err
+		}
+		if !hasRecent {
+			return nil, ErrPendingSSVReward
+		}
+		return s.repo.GetSwipeAllowanceDetail(ctx, userID)
 	}
 
 	if err := s.repo.RecordAdReward(ctx, userID, txID, 5); err != nil {
+		if errors.Is(err, ErrDuplicateSSVReward) {
+			// Transaction was already recorded (e.g. by direct SSV callback from Google).
+			// Return authoritative allowance without re-granting (idempotent replay protection).
+			return s.repo.GetSwipeAllowanceDetail(ctx, userID)
+		}
 		return nil, err
 	}
 

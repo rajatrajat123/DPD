@@ -19,6 +19,11 @@ allprojects {
     maven { url 'https://www.jitpack.io' }
     maven { url 'https://artifacts.applovin.com/android' }
   }
+  tasks.matching { it.name.contains("Kotlin") }.configureEach {
+    if (it.hasProperty("kotlinOptions")) {
+      it.kotlinOptions.freeCompilerArgs += ["-Xskip-metadata-version-check"]
+    }
+  }
 }
 
 subprojects { subproject ->

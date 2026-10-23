@@ -333,7 +333,13 @@ func (h *Handler) AdMobSSV(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrDuplicateSSVReward):
-			apperror.WriteError(w, reqID, apperror.New(http.StatusConflict, apperror.CodeConflict, "Reward transaction already processed"))
+			// Google AdMob SSV retry handling: acknowledge already-processed callbacks with HTTP 200 OK
+			// to signal to Google that the callback was received and prevent unnecessary retry storms.
+			apperror.WriteJSON(w, http.StatusOK, map[string]any{
+				"status":  "ALREADY_PROCESSED",
+				"message": "Reward transaction already processed",
+			})
+			return
 		case errors.Is(err, ErrExpiredSSVCallback):
 			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Reward callback expired"))
 		case errors.Is(err, ErrInvalidSSVSignature):
@@ -409,6 +415,14 @@ func (h *Handler) ClaimSwipeAdReward(w http.ResponseWriter, r *http.Request) {
 
 	detail, err := h.svc.ClaimSwipeAdReward(r.Context(), authUser.ID, req.RawQuery, req.TransactionID)
 	if err != nil {
+		if errors.Is(err, ErrPendingSSVReward) {
+			apperror.WriteJSON(w, http.StatusAccepted, map[string]any{
+				"status":  "PENDING",
+				"user_id": authUser.ID,
+				"message": "AdMob SSV callback pending verification from Google",
+			})
+			return
+		}
 		h.handleServiceError(w, reqID, err)
 		return
 	}

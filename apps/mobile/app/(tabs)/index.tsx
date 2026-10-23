@@ -41,7 +41,7 @@ const DISCOVERY_LAYOUT_KEY = 'aura_discovery_layout_mode';
 export default function DiscoveryScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { isAgeVerified, profile, refreshProfile } = useAuth();
+  const { isAgeVerified, user, profile, refreshProfile } = useAuth();
   const { colors } = useTheme();
 
   const [layoutMode, setLayoutMode] = useState<'single' | 'double'>('double');
@@ -407,6 +407,7 @@ export default function DiscoveryScreen() {
   );
 
   useEffect(() => {
+    adBreakManager.ensureHydrated().catch(() => {});
     loadFeed();
     loadFavourites();
   }, [loadFeed, loadFavourites]);
@@ -499,44 +500,112 @@ export default function DiscoveryScreen() {
     }
   };
 
-  const claimBonusReward = async (transactionId?: string, fallbackAmount: number = 5) => {
-    try {
-      const updated = await discoveryService.claimSwipeAdReward(transactionId);
-      setAllowance(updated);
-    } catch {
-      setAllowance((prev) =>
-        prev
-          ? {
-              ...prev,
-              remainingLikes: prev.remainingLikes + fallbackAmount,
-              remainingBonusLikes: (prev.remainingBonusLikes || 0) + fallbackAmount,
+  const isAdInProgressRef = useRef(false);
+
+  const claimBonusReward = async (transactionId?: string, fallbackAmount: number = 5): Promise<boolean> => {
+    const maxRetries = 3;
+    const retryDelayMs = 1500;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        if (__DEV__) {
+          console.log(`[AdMob] Verifying reward with server (attempt ${attempt}/${maxRetries}): txId=${transactionId}`);
+        }
+        const claimResult = await discoveryService.claimSwipeAdReward(transactionId);
+        if (claimResult.isPending) {
+          if (attempt < maxRetries) {
+            if (__DEV__) {
+              console.log(`[AdMob] SSV verification pending on server. Retrying in ${retryDelayMs}ms...`);
             }
-          : {
-              remainingLikes: fallbackAmount,
-              remainingBonusLikes: fallbackAmount,
-              isUnlimited: false,
-              dailyQuota: 15,
-            }
-      );
+            await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+            continue;
+          } else {
+            // Pending after all retries
+            Alert.alert(
+              'Verification Pending',
+              'Your sponsored video completion is awaiting confirmation from Google. Your +5 bonus likes will appear shortly once confirmed.'
+            );
+            return false;
+          }
+        }
+
+        // Authoritative reward confirmed on server
+        setAllowance(claimResult);
+        if (__DEV__) {
+          console.log(`[AdMob] Reward successfully verified on server: bonusLikes=${claimResult.remainingBonusLikes}, totalRemaining=${claimResult.remainingLikes}`);
+        }
+        return true;
+      } catch (err: unknown) {
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+        const errMsg = err instanceof Error ? err.message : 'Server verification failed';
+        console.warn('[AdMob] Failed to verify ad reward on server:', errMsg);
+        Alert.alert(
+          'Reward Verification Failed',
+          'Could not verify the ad reward with the server. Please check your internet connection and try again.'
+        );
+        return false;
+      }
     }
+    return false;
   };
 
   const handleRewardedAdBreak = async () => {
-    const userId = profile?.id || 'aura_user';
+    if (isAdInProgressRef.current) {
+      if (__DEV__) console.log('[AdMob] Ad request skipped: ad already in progress');
+      return;
+    }
+    isAdInProgressRef.current = true;
+    const userId = user?.id || profile?.id || profile?.user_id;
+    if (!userId) {
+      Alert.alert('Sign-In Required', 'Please sign in to earn bonus likes from sponsored videos.');
+      return;
+    }
+
     try {
+      if (__DEV__) {
+        console.log(`[AdMob] Triggering 15-swipe rewarded ad break for user: ${userId}`);
+      }
       const result = await admobService.showRewardedAd(userId, 'swipe_cadence_reward');
       if (result.rewarded) {
-        await claimBonusReward(result.transactionId, result.rewardAmount >= 5 ? result.rewardAmount : 5);
-        await adBreakManager.onAdCompleted();
-        Alert.alert(
-          'Bonus Likes Granted!',
-          'You completed 15 swipes and earned +5 bonus likes for photo-verified profiles!'
-        );
+        if (__DEV__) {
+          console.log('[AdMob] Rewarded ad completed! Claiming bonus likes on server...');
+        }
+        const claimSuccess = await claimBonusReward(result.transactionId, result.rewardAmount >= 5 ? result.rewardAmount : 5);
+        if (claimSuccess) {
+          await adBreakManager.onAdCompleted();
+          Alert.alert(
+            'Bonus Likes Granted!',
+            'You completed 15 swipes and earned +5 bonus likes for photo-verified profiles!'
+          );
+        } else {
+          // Server claim failed; do NOT reset cadence or grant local bonus
+          adBreakManager.onAdFailed();
+        }
       } else {
         adBreakManager.onAdFailed();
+        const errorMsg = result.error || 'Video was closed before completing the reward.';
+        if (__DEV__) {
+          console.log(`[AdMob] Rewarded ad not completed: ${errorMsg}`);
+        }
+        Alert.alert(
+          'Sponsored Video Incomplete',
+          `${errorMsg}\n\nWatch the full video to earn +5 bonus likes for photo-verified profiles.`,
+          [{ text: 'OK' }]
+        );
       }
-    } catch {
+    } catch (err: unknown) {
       adBreakManager.onAdFailed();
+      const msg = err instanceof Error ? err.message : 'An unexpected error occurred while loading the advertisement.';
+      console.warn('[AdMob] Ad display exception:', msg);
+      Alert.alert(
+        'Sponsored Video Unavailable',
+        'Unable to load the video ad at this time. Please check your connection and try again.'
+      );
+    } finally {
+      isAdInProgressRef.current = false;
     }
   };
 
@@ -583,10 +652,15 @@ export default function DiscoveryScreen() {
       );
     }
 
-    // Trigger rewarded ad break after 15 unique browsed profiles for free users
-    const isFreeUser = !allowance || !allowance.isUnlimited;
+    // Trigger rewarded ad break after 15 qualifying swipes for free users
+    const isPaidSubscriber = Boolean(allowance && allowance.isUnlimited && !allowance.isIntroductory);
+    const isFreeUser = !isPaidSubscriber;
     if (isFreeUser && isGoogleMobileAdsAvailable()) {
-      const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
+      const candidateId = candidate.user_id || candidate.id;
+      const shouldTriggerBreak = adBreakManager.recordProfileView(candidateId, Boolean(allowance?.isIntroductory));
+      if (__DEV__) {
+        console.log(`[AdMob] Swipe evaluation: candidateId=${candidateId?.slice(-4)}, count=${adBreakManager.getSwipeCount()}/15, shouldTriggerBreak=${shouldTriggerBreak}`);
+      }
       if (shouldTriggerBreak) {
         handleRewardedAdBreak();
       }
@@ -731,9 +805,14 @@ export default function DiscoveryScreen() {
       );
     }
 
-    const isFreeUser = !allowance || !allowance.isUnlimited;
+    const isPaidSubscriber = Boolean(allowance && allowance.isUnlimited && !allowance.isIntroductory);
+    const isFreeUser = !isPaidSubscriber;
     if (isFreeUser && isGoogleMobileAdsAvailable()) {
-      const shouldTriggerBreak = adBreakManager.recordProfileView(candidate.user_id, true);
+      const candidateId = candidate.user_id || candidate.id;
+      const shouldTriggerBreak = adBreakManager.recordProfileView(candidateId, Boolean(allowance?.isIntroductory));
+      if (__DEV__) {
+        console.log(`[AdMob] Swipe evaluation (grid): candidateId=${candidateId?.slice(-4)}, count=${adBreakManager.getSwipeCount()}/15, shouldTriggerBreak=${shouldTriggerBreak}`);
+      }
       if (shouldTriggerBreak) {
         handleRewardedAdBreak();
       }
@@ -1186,15 +1265,17 @@ export default function DiscoveryScreen() {
       {/* Daily Swipe Quota & Rewarded Ad Modal */}
       <SwipeQuotaModal
         visible={showQuotaModal}
-        userId={profile?.id || 'aura_user'}
+        userId={user?.id || profile?.id || profile?.user_id || ''}
         onClose={() => setShowQuotaModal(false)}
         onRewardGranted={async (bonusAmount, txId) => {
-          await claimBonusReward(txId, bonusAmount || 5);
-          await adBreakManager.onAdCompleted();
-          Alert.alert(
-            'Bonus Likes Granted!',
-            `You earned +${bonusAmount || 5} likes for photo-verified profiles from watching a sponsored video.`
-          );
+          const claimSuccess = await claimBonusReward(txId, bonusAmount || 5);
+          if (claimSuccess) {
+            await adBreakManager.onAdCompleted();
+            Alert.alert(
+              'Bonus Likes Granted!',
+              `You earned +${bonusAmount || 5} likes for photo-verified profiles from watching a sponsored video.`
+            );
+          }
         }}
         onUpgradePress={() => router.push('/(tabs)/membership')}
       />

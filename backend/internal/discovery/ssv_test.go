@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -818,4 +819,268 @@ func TestUnlockLikesYouWithAd_VerificationEnforcement(t *testing.T) {
 	}
 }
 
+// --- Comprehensive Behavioral SSV Tests ---
+
+// 1. Valid SSV callback with genuine ECDSA signature grants exactly 5 bonus likes in production
+func TestAdMobSSV_Behavioral_ValidCallback(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(112233)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_valid_ssv_101"
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=1&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_valid_ssv_101&user_id=%s", keyID, nowMs, userID)
+	sig, err := signQueryString(priv, baseQuery)
+	if err != nil {
+		t.Fatalf("failed to sign query: %v", err)
+	}
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	// Claim with valid cryptographic query
+	detail, err := svc.ClaimSwipeAdReward(ctx, userID, fullQuery, "")
+	if err != nil {
+		t.Fatalf("expected valid SSV claim to succeed, got: %v", err)
+	}
+	if detail.RemainingBonusLikes != 5 {
+		t.Fatalf("expected exactly 5 bonus likes per Aura policy, got: %d", detail.RemainingBonusLikes)
+	}
+}
+
+// 2. Invalid signatures (tampered or forged) are strictly rejected
+func TestAdMobSSV_Behavioral_InvalidSignature(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(445566)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_invalid_sig_102"
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_forged_102&user_id=%s", keyID, nowMs, userID)
+	forgedQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape("bogus_forged_sig"))
+
+	_, err = svc.ClaimSwipeAdReward(ctx, userID, forgedQuery, "")
+	if err == nil || !errors.Is(err, ErrInvalidSSVSignature) {
+		t.Fatalf("expected ErrInvalidSSVSignature, got: %v", err)
+	}
+}
+
+// 3. Expired callbacks (> 15 min old) are rejected
+func TestAdMobSSV_Behavioral_ExpiredCallback(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(778899)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_expired_103"
+	oldMs := time.Now().UTC().Add(-20 * time.Minute).UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_expired_103&user_id=%s", keyID, oldMs, userID)
+	sig, _ := signQueryString(priv, baseQuery)
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	_, err = svc.ClaimSwipeAdReward(ctx, userID, fullQuery, "")
+	if err == nil || !errors.Is(err, ErrExpiredSSVCallback) {
+		t.Fatalf("expected ErrExpiredSSVCallback, got: %v", err)
+	}
+}
+
+// 4. Duplicate transaction IDs are idempotent and preserve replay protection
+func TestAdMobSSV_Behavioral_DuplicateTransactionID(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(123789)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_dup_104"
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_dup_104&user_id=%s", keyID, nowMs, userID)
+	sig, _ := signQueryString(priv, baseQuery)
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	// Direct Google SSV callback arrives first
+	reward, err := svc.VerifyAndGrantAdReward(ctx, fullQuery)
+	if err != nil {
+		t.Fatalf("initial SSV callback failed: %v", err)
+	}
+	if reward.RewardAmount != 5 {
+		t.Fatalf("expected 5 bonus likes, got: %d", reward.RewardAmount)
+	}
+
+	// Replay attempt to VerifyAndGrantAdReward returns ErrDuplicateSSVReward
+	_, err = svc.VerifyAndGrantAdReward(ctx, fullQuery)
+	if err == nil || !errors.Is(err, ErrDuplicateSSVReward) {
+		t.Fatalf("expected ErrDuplicateSSVReward on direct replay, got: %v", err)
+	}
+
+	// Client claim with same transaction ID succeeds idempotently without double-crediting
+	detail, err := svc.ClaimSwipeAdReward(ctx, userID, fullQuery, "")
+	if err != nil {
+		t.Fatalf("expected idempotent claim to succeed, got: %v", err)
+	}
+	if detail.RemainingBonusLikes != 5 {
+		t.Fatalf("replay must not double credit bonus likes, expected 5, got: %d", detail.RemainingBonusLikes)
+	}
+}
+
+// 5. User mismatch between callback and authenticated user is rejected
+func TestAdMobSSV_Behavioral_UserMismatch(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(987654)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	ssvUserID := "usr_victim_105"
+	attackerUserID := "usr_attacker_999"
+
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_mismatch_105&user_id=%s", keyID, nowMs, ssvUserID)
+	sig, _ := signQueryString(priv, baseQuery)
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	// Attacker tries to claim callback issued for ssvUserID
+	_, err = svc.ClaimSwipeAdReward(ctx, attackerUserID, fullQuery, "")
+	if err == nil || !strings.Contains(err.Error(), "user/placement mismatch") {
+		t.Fatalf("expected user mismatch error, got: %v", err)
+	}
+}
+
+// 6. Delayed callbacks return ErrPendingSSVReward until Google callback arrives
+func TestAdMobSSV_Behavioral_DelayedCallback(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(556677)
+
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_delayed_106"
+	txID := "tx_delayed_106"
+
+	// 1. Client calls claim before Google's SSV arrives -> ErrPendingSSVReward
+	_, err = svc.ClaimSwipeAdReward(ctx, userID, "", txID)
+	if err == nil || !errors.Is(err, ErrPendingSSVReward) {
+		t.Fatalf("expected ErrPendingSSVReward when callback has not arrived, got: %v", err)
+	}
+
+	// 2. Google SSV callback arrives in the background
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=%s&user_id=%s", keyID, nowMs, txID, userID)
+	sig, _ := signQueryString(priv, baseQuery)
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	_, err = svc.VerifyAndGrantAdReward(ctx, fullQuery)
+	if err != nil {
+		t.Fatalf("Google SSV callback failed: %v", err)
+	}
+
+	// 3. Client retries claim -> succeeds now that SSV was confirmed
+	detail, err := svc.ClaimSwipeAdReward(ctx, userID, "", txID)
+	if err != nil {
+		t.Fatalf("expected claim to succeed after SSV callback arrived, got: %v", err)
+	}
+	if detail.RemainingBonusLikes != 5 {
+		t.Fatalf("expected 5 bonus likes, got: %d", detail.RemainingBonusLikes)
+	}
+}
+
+// 7. Synthetic test-admob-* IDs are rejected in production
+func TestAdMobSSV_Behavioral_ProductionRejectsSyntheticTestID(t *testing.T) {
+	ctx := context.Background()
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("production"))
+
+	userID := "usr_prod_fake_107"
+	fakeTxID := "test-admob-1729661234-abc1234"
+
+	_, err := svc.ClaimSwipeAdReward(ctx, userID, "", fakeTxID)
+	if err == nil || !strings.Contains(err.Error(), "client-generated test transaction IDs are rejected in production") {
+		t.Fatalf("expected rejection of synthetic test-admob-* ID in production, got: %v", err)
+	}
+}
+
+// 8. Controlled development environment accepts test transactions
+func TestAdMobSSV_Behavioral_ControlledDevMode(t *testing.T) {
+	ctx := context.Background()
+	repo := NewMemoryRepository(nil)
+	svc := NewService(repo, nil, nil, nil, WithEnvironment("development"))
+
+	userID := "usr_dev_108"
+	devTxID := "test-admob-dev-local-108"
+
+	detail, err := svc.ClaimSwipeAdReward(ctx, userID, "", devTxID)
+	if err != nil {
+		t.Fatalf("expected development mode to accept test transaction, got: %v", err)
+	}
+	if detail.RemainingBonusLikes != 5 {
+		t.Fatalf("expected 5 bonus likes in dev mode, got: %d", detail.RemainingBonusLikes)
+	}
+}
+type failingAdRepo struct {
+	*MemoryRepository
+}
+
+func (f *failingAdRepo) RecordAdReward(ctx context.Context, userID string, transactionID string, rewardAmount int) error {
+	return errors.New("database connection pool exhausted")
+}
+
+// 9. Database failure fails closed without granting unverified rewards
+func TestAdMobSSV_Behavioral_DatabaseFailure(t *testing.T) {
+	ctx := context.Background()
+	priv, err := generateTestECDSAKey()
+	if err != nil {
+		t.Fatalf("failed to generate key: %v", err)
+	}
+	keyID := int64(999111)
+
+	baseRepo := NewMemoryRepository(nil)
+	failingRepo := &failingAdRepo{MemoryRepository: baseRepo}
+	svc := NewService(failingRepo, nil, nil, nil, WithEnvironment("production"))
+	svc.SSVVerifier().SetTestPublicKey(keyID, &priv.PublicKey)
+
+	userID := "usr_db_fail_109"
+	nowMs := time.Now().UTC().UnixMilli()
+	baseQuery := fmt.Sprintf("ad_network=54321&ad_unit=ca-app-pub-prod/555&custom_data=swipe_cadence_reward&key_id=%d&reward_amount=5&reward_item=BONUS_LIKE&timestamp=%d&transaction_id=tx_db_fail_109&user_id=%s", keyID, nowMs, userID)
+	sig, _ := signQueryString(priv, baseQuery)
+	fullQuery := fmt.Sprintf("%s&signature=%s", baseQuery, url.QueryEscape(sig))
+
+	// When database fails, reward must NOT be granted and error must be returned
+	_, err = svc.ClaimSwipeAdReward(ctx, userID, fullQuery, "")
+	if err == nil || !strings.Contains(err.Error(), "database connection pool exhausted") {
+		t.Fatalf("expected database error, got: %v", err)
+	}
+}
 

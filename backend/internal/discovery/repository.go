@@ -53,6 +53,8 @@ type Repository interface {
 	GetSwipeAllowance(ctx context.Context, userID string) (remaining int, isUnlimited bool, err error)
 	GetSwipeAllowanceDetail(ctx context.Context, userID string) (*SwipeAllowanceDetail, error)
 	RecordAdReward(ctx context.Context, userID string, transactionID string, rewardAmount int) error
+	HasRecentAdReward(ctx context.Context, userID string, since time.Time) (bool, error)
+	IsAdRewardProcessed(ctx context.Context, transactionID string) (bool, error)
 	RewindLastSwipe(ctx context.Context, actorID string) (*RewindResponse, error)
 	SetUserCreatedAt(userID string, createdAt time.Time)
 	SearchProfiles(ctx context.Context, actorID string, query string, limit int) ([]DiscoveryCandidate, error)
@@ -113,6 +115,7 @@ type MemoryRepository struct {
 	dailyLikeQuota   int                  // default 15
 	rewardedLikes    map[string]int       // key: userID -> extra likes earned
 	usedAdRewards    map[string]time.Time // key: transactionID -> verifiedAt (replay protection)
+	userAdRewards    map[string][]time.Time // key: userID -> list of verifiedAt timestamps
 	userCreatedAt    map[string]time.Time // key: userID -> created_at
 	revealedLikes    map[string]map[string]string
 	likesUnlockState map[string]*UserLikesUnlockState
@@ -156,6 +159,7 @@ func NewMemoryRepository(identRepo identity.Repository) *MemoryRepository {
 		dailyLikeQuota:   PostIntroQuota,
 		rewardedLikes:    make(map[string]int),
 		usedAdRewards:    make(map[string]time.Time),
+		userAdRewards:    make(map[string][]time.Time),
 		userCreatedAt:    make(map[string]time.Time),
 		revealedLikes:    make(map[string]map[string]string),
 		likesUnlockState: make(map[string]*UserLikesUnlockState),
@@ -202,9 +206,31 @@ func (m *MemoryRepository) RecordAdReward(ctx context.Context, userID string, tr
 		return ErrDuplicateSSVReward
 	}
 
-	m.usedAdRewards[transactionID] = time.Now().UTC()
+	now := time.Now().UTC()
+	m.usedAdRewards[transactionID] = now
+	m.userAdRewards[userID] = append(m.userAdRewards[userID], now)
 	m.rewardedLikes[userID] += rewardAmount
 	return nil
+}
+
+func (m *MemoryRepository) HasRecentAdReward(ctx context.Context, userID string, since time.Time) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	for _, t := range m.userAdRewards[userID] {
+		if t.After(since) || t.Equal(since) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (m *MemoryRepository) IsAdRewardProcessed(ctx context.Context, transactionID string) (bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	_, exists := m.usedAdRewards[transactionID]
+	return exists, nil
 }
 
 func (m *MemoryRepository) SetUserBoost(userID string, multiplier float64) {
@@ -2236,6 +2262,26 @@ func (p *PostgresRepository) RecordAdReward(ctx context.Context, userID string, 
 		return err
 	}
 	return nil
+}
+
+func (p *PostgresRepository) HasRecentAdReward(ctx context.Context, userID string, since time.Time) (bool, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM ad_reward_transactions WHERE user_id = $1 AND verified_at >= $2`
+	err := p.pool.QueryRow(ctx, query, userID, since).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func (p *PostgresRepository) IsAdRewardProcessed(ctx context.Context, transactionID string) (bool, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM ad_reward_transactions WHERE transaction_id = $1`
+	err := p.pool.QueryRow(ctx, query, transactionID).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 func (p *PostgresRepository) SetUserCreatedAt(userID string, createdAt time.Time) {

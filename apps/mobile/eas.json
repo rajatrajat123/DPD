@@ -6,7 +6,10 @@
     "development": {
       "node": "22.14.0",
       "developmentClient": true,
-      "distribution": "internal"
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      }
     },
     "ads-test": {
       "node": "22.14.0",

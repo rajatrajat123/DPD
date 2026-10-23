@@ -78,6 +78,11 @@ export function normalizeCandidate(raw: any): DiscoveryCandidate {
   };
 }
 
+export interface ClaimSwipeRewardResult extends SwipeAllowance {
+  isPending?: boolean;
+  status?: string;
+}
+
 export const discoveryService = {
   /**
    * Fetches discovery feed adhering strictly to server-side dealbreakers
@@ -292,15 +297,16 @@ export const discoveryService = {
   /**
    * Claims 5 bonus likes for photo-verified profiles after rewarded ad completion
    */
-  async claimSwipeAdReward(transactionId?: string, rawQuery?: string): Promise<SwipeAllowance> {
+  async claimSwipeAdReward(transactionId?: string, rawQuery?: string): Promise<ClaimSwipeRewardResult> {
     const res = await api.post<{
       status: string;
-      user_id: string;
-      daily_quota: number;
-      remaining_likes: number;
+      user_id?: string;
+      message?: string;
+      daily_quota?: number;
+      remaining_likes?: number;
       remaining_regular_likes?: number;
       remaining_bonus_likes?: number;
-      is_unlimited: boolean;
+      is_unlimited?: boolean;
       is_introductory?: boolean;
       window_start?: string;
       window_reset_at?: string;
@@ -308,14 +314,27 @@ export const discoveryService = {
       transaction_id: transactionId,
       raw_query: rawQuery,
     });
+    if (res.status === 'PENDING') {
+      return {
+        remainingLikes: 0,
+        remainingRegularLikes: 0,
+        remainingBonusLikes: 0,
+        isUnlimited: false,
+        dailyQuota: 15,
+        isPending: true,
+        status: 'PENDING',
+      };
+    }
     return {
-      remainingLikes: res.remaining_likes,
-      remainingRegularLikes: res.remaining_regular_likes,
-      remainingBonusLikes: res.remaining_bonus_likes,
-      isUnlimited: res.is_unlimited,
+      remainingLikes: res.remaining_likes ?? 0,
+      remainingRegularLikes: res.remaining_regular_likes ?? 0,
+      remainingBonusLikes: res.remaining_bonus_likes ?? 0,
+      isUnlimited: Boolean(res.is_unlimited),
       isIntroductory: res.is_introductory,
-      dailyQuota: res.daily_quota,
+      dailyQuota: res.daily_quota || 15,
       windowResetAt: res.window_reset_at,
+      isPending: false,
+      status: res.status || 'REWARD_CLAIMED',
     };
   },
 
