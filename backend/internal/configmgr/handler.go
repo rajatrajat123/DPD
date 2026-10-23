@@ -1,6 +1,7 @@
 package configmgr
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,12 +13,21 @@ import (
 	"github.com/auradating/platform/backend/internal/middleware"
 )
 
+type AuditLogger interface {
+	RecordAudit(ctx context.Context, actorUserID *string, actorRole, action, targetType, targetID, outcome string, metadata map[string]any) error
+}
+
 type Handler struct {
-	svc *Service
+	svc   *Service
+	audit AuditLogger
 }
 
 func NewHandler(svc *Service) *Handler {
 	return &Handler{svc: svc}
+}
+
+func (h *Handler) SetAuditLogger(audit AuditLogger) {
+	h.audit = audit
 }
 
 // HandleAdminConfig handles /api/v1/admin/config and /api/v1/admin/config/{key}
@@ -84,8 +94,19 @@ func (h *Handler) HandleAdminConfig(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := h.svc.UpdateConfig(r.Context(), key, payload.Value, &authUser.ID); err != nil {
+			if h.audit != nil {
+				_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.config_update_failed", "CONFIG", key, "FAILURE", map[string]any{
+					"error": err.Error(),
+				})
+			}
 			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, err.Error()))
 			return
+		}
+
+		if h.audit != nil {
+			_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.config_updated", "CONFIG", key, "SUCCESS", map[string]any{
+				"key": key,
+			})
 		}
 
 		apperror.WriteJSON(w, http.StatusOK, map[string]any{

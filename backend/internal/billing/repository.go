@@ -20,6 +20,7 @@ import (
 type Repository interface {
 	GetProducts(ctx context.Context, activeOnly bool) ([]Product, error)
 	GetProductByPlanCode(ctx context.Context, planCode string) (*Product, error)
+	UpdateProduct(ctx context.Context, prod Product) error
 
 	GetSubscriptionByID(ctx context.Context, id string) (*Subscription, error)
 	GetActiveSubscriptionByUserID(ctx context.Context, userID string) (*Subscription, error)
@@ -56,6 +57,7 @@ type Repository interface {
 	GetLatestConsent(ctx context.Context, userID, planCode string) (*SubscriptionConsentRecord, error)
 
 	PublishOutboxEvent(ctx context.Context, event events.Envelope) error
+	GetOutboxEvents(ctx context.Context) ([]events.Envelope, error)
 }
 
 // MemoryRepository provides thread-safe in-memory billing repository for testing and standalone dev.
@@ -202,6 +204,24 @@ func (m *MemoryRepository) GetProductByPlanCode(ctx context.Context, planCode st
 	}
 	cp := *p
 	return &cp, nil
+}
+
+func (m *MemoryRepository) UpdateProduct(_ context.Context, prod Product) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	existing, ok := m.products[prod.PlanCode]
+	if !ok {
+		return ErrProductNotFound
+	}
+	prod.UpdatedAt = time.Now().UTC()
+	prod.CreatedAt = existing.CreatedAt
+	if prod.ID == "" {
+		prod.ID = existing.ID
+	}
+	cp := prod
+	m.products[prod.PlanCode] = &cp
+	return nil
 }
 
 func (m *MemoryRepository) GetSubscriptionByID(ctx context.Context, id string) (*Subscription, error) {
@@ -587,12 +607,12 @@ func (m *MemoryRepository) PublishOutboxEvent(ctx context.Context, event events.
 	return nil
 }
 
-func (m *MemoryRepository) GetOutboxEvents() []events.Envelope {
+func (m *MemoryRepository) GetOutboxEvents(ctx context.Context) ([]events.Envelope, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	res := make([]events.Envelope, len(m.outboxEvents))
 	copy(res, m.outboxEvents)
-	return res
+	return res, nil
 }
 
 func (m *MemoryRepository) RecordConsent(ctx context.Context, consent *SubscriptionConsentRecord) error {
@@ -686,6 +706,22 @@ func (p *PostgresRepository) GetProductByPlanCode(ctx context.Context, planCode 
 	}
 	_ = json.Unmarshal(entJSON, &pr.Entitlements)
 	return &pr, nil
+}
+
+func (p *PostgresRepository) UpdateProduct(ctx context.Context, prod Product) error {
+	query := `
+		UPDATE billing_products
+		SET price_cents = $1, currency = $2, is_active = $3, updated_at = NOW()
+		WHERE plan_code = $4
+	`
+	tag, err := p.pool.Exec(ctx, query, prod.PriceCents, prod.Currency, prod.IsActive, prod.PlanCode)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrProductNotFound
+	}
+	return nil
 }
 
 func (p *PostgresRepository) GetSubscriptionByID(ctx context.Context, id string) (*Subscription, error) {
@@ -1159,6 +1195,33 @@ func (p *PostgresRepository) PublishOutboxEvent(ctx context.Context, event event
 		event.SchemaVersion, event.OccurredAt, event.CorrelationID, event.Payload,
 	)
 	return err
+}
+
+func (p *PostgresRepository) GetOutboxEvents(ctx context.Context) ([]events.Envelope, error) {
+	query := `
+		SELECT COALESCE(event_id::text, id::text), aggregate_type, aggregate_id::text, event_type,
+		       schema_version, occurred_at, COALESCE(correlation_id, ''), payload
+		FROM outbox_events
+		ORDER BY occurred_at ASC
+	`
+	rows, err := p.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var eventsList []events.Envelope
+	for rows.Next() {
+		var env events.Envelope
+		if err := rows.Scan(
+			&env.ID, &env.AggregateType, &env.AggregateID, &env.EventType,
+			&env.SchemaVersion, &env.OccurredAt, &env.CorrelationID, &env.Payload,
+		); err != nil {
+			return nil, err
+		}
+		eventsList = append(eventsList, env)
+	}
+	return eventsList, rows.Err()
 }
 
 func (p *PostgresRepository) ListAllSubscriptions(ctx context.Context, statusFilter, planFilter string, limit, offset int) ([]Subscription, int, error) {

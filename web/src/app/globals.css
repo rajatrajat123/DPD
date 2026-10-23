@@ -1,3 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Hide consumer marketing header and footer on Admin Console pages */
+body:has(#admin-console-root) .site-header,
+body:has(#admin-console-root) .site-footer {
+  display: none !important;
+}
+
 /* ==============================================================================
    Aura LGBTQ+ Dating Platform — Luxury Design System & Global Styles
    Palette: Warm Ivory, Parchment, Near-Black, Deep Charcoal, Champagne Gold,

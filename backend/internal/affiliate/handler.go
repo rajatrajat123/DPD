@@ -549,7 +549,7 @@ func (h *Handler) AdminCommissionRules(w http.ResponseWriter, r *http.Request) {
 		}
 		apperror.WriteJSON(w, http.StatusOK, map[string]any{"rules": rules, "count": len(rules)})
 
-	case http.MethodPost:
+	case http.MethodPost, http.MethodPut:
 		var req AdminCommissionRuleRequest
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
 			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Malformed request body"))
@@ -574,6 +574,124 @@ func (h *Handler) AdminCommissionRules(w http.ResponseWriter, r *http.Request) {
 	default:
 		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
 	}
+}
+
+func (h *Handler) AdminCampaigns(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if !h.checkAdmin(w, r, reqID) {
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		affiliateID := r.URL.Query().Get("affiliate_id")
+		camps, err := h.svc.repo.ListCampaigns(r.Context(), affiliateID)
+		if err != nil {
+			h.handleError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusOK, map[string]any{"campaigns": camps, "count": len(camps)})
+
+	case http.MethodPost:
+		var req struct {
+			AffiliateID    string `json:"affiliate_id"`
+			CampaignSlug   string `json:"campaign_slug"`
+			Name           string `json:"name"`
+			DestinationURL string `json:"destination_url"`
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Malformed request body"))
+			return
+		}
+		slug := strings.ToLower(strings.TrimSpace(req.CampaignSlug))
+		if slug == "" {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "campaign_slug is required"))
+			return
+		}
+		if req.AffiliateID == "" {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, "affiliate_id is required"))
+			return
+		}
+		dest := req.DestinationURL
+		if dest == "" {
+			dest = "https://auradating.com"
+		}
+		camp := &AffiliateCampaign{
+			AffiliateID:    req.AffiliateID,
+			CampaignSlug:   slug,
+			Name:           req.Name,
+			DestinationURL: dest,
+			IsActive:       true,
+		}
+		if err := h.svc.repo.CreateCampaign(r.Context(), camp); err != nil {
+			h.handleError(w, reqID, err)
+			return
+		}
+		apperror.WriteJSON(w, http.StatusCreated, camp)
+
+	default:
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+	}
+}
+
+func (h *Handler) AdminConversions(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if !h.checkAdmin(w, r, reqID) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+		return
+	}
+
+	affiliateID := r.URL.Query().Get("affiliate_id")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 && val <= 200 {
+			limit = val
+		}
+	}
+
+	conversions, err := h.svc.repo.ListAttributionsByAffiliate(r.Context(), affiliateID, limit)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"conversions": conversions,
+		"count":       len(conversions),
+	})
+}
+
+func (h *Handler) AdminCommissions(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if !h.checkAdmin(w, r, reqID) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+		return
+	}
+
+	affiliateID := r.URL.Query().Get("affiliate_id")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if val, err := strconv.Atoi(l); err == nil && val > 0 && val <= 200 {
+			limit = val
+		}
+	}
+
+	commissions, err := h.svc.repo.ListCommissionsByAffiliate(r.Context(), affiliateID, limit)
+	if err != nil {
+		h.handleError(w, reqID, err)
+		return
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"commissions": commissions,
+		"count":       len(commissions),
+	})
 }
 
 func (h *Handler) AdminPayouts(w http.ResponseWriter, r *http.Request) {
@@ -672,7 +790,7 @@ func (h *Handler) checkAdmin(w http.ResponseWriter, r *http.Request, reqID strin
 		apperror.WriteError(w, reqID, apperror.New(http.StatusUnauthorized, apperror.CodeUnauthenticated, "Authentication required"))
 		return false
 	}
-	if authUser.Role != identity.RoleFinanceAdmin && authUser.Role != identity.RoleSuperAdmin {
+	if authUser.Role != identity.RoleFinanceAdmin && authUser.Role != identity.RoleSuperAdmin && authUser.Role != identity.RoleAffiliateManager {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Admin privileges required"))
 		return false
 	}

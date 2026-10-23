@@ -41,6 +41,10 @@ export function SiteHeader({ initialIsAuthenticated = false }: SiteHeaderProps) 
 
   const isAppRoute = pathname.startsWith('/app') || pathname.startsWith('/onboarding') || pathname.startsWith('/membership');
 
+  if (pathname.startsWith('/admin')) {
+    return null;
+  }
+
   return (
     <header className="site-header">
       <div className="header-container">

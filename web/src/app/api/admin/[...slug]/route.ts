@@ -37,9 +37,21 @@ async function handleProxy(req: NextRequest, context: Context) {
       { status: 403 }
     );
   }
+  if (subpath.startsWith('users/') && subpath.includes('/role') && subpath.includes(session.userId)) {
+    return NextResponse.json(
+      { error: 'Forbidden: Self-action prohibited: administrators cannot modify their own administrative roles' },
+      { status: 403 }
+    );
+  }
   if (subpath.startsWith('config') && userRole !== 'SUPER_ADMIN') {
     return NextResponse.json(
       { error: 'Forbidden: SuperAdmin role required' },
+      { status: 403 }
+    );
+  }
+  if (subpath.startsWith('billing/products') && userRole !== 'SUPER_ADMIN') {
+    return NextResponse.json(
+      { error: 'Forbidden: SuperAdmin role required to modify catalog pricing' },
       { status: 403 }
     );
   }
@@ -79,10 +91,12 @@ async function handleProxy(req: NextRequest, context: Context) {
     );
   }
 
-  // Special case: step-up authentication challenge
+  // Special cases: step-up authentication challenge & product plans catalog
   let backendPath: string;
   if (subpath === 'auth/step-up') {
     backendPath = `/api/v1/auth/step-up${query}`;
+  } else if (subpath === 'billing/plans') {
+    backendPath = `/api/v1/billing/plans${query}`;
   } else {
     backendPath = `/api/v1/admin/${subpath}${query}`;
   }

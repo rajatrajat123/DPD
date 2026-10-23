@@ -1,6 +1,7 @@
 package billing
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -14,9 +15,14 @@ import (
 	"github.com/auradating/platform/backend/internal/middleware"
 )
 
+type AuditLogger interface {
+	RecordAudit(ctx context.Context, actorUserID *string, actorRole, action, targetType, targetID, outcome string, metadata map[string]any) error
+}
+
 type Handler struct {
 	svc    *Service
 	logger *slog.Logger
+	audit  AuditLogger
 }
 
 func NewHandler(svc *Service, logger *slog.Logger) *Handler {
@@ -27,6 +33,10 @@ func NewHandler(svc *Service, logger *slog.Logger) *Handler {
 		svc:    svc,
 		logger: logger,
 	}
+}
+
+func (h *Handler) SetAuditLogger(audit AuditLogger) {
+	h.audit = audit
 }
 
 // Plans handles GET /api/v1/billing/plans.
@@ -525,5 +535,59 @@ func (h *Handler) AdminRefund(w http.ResponseWriter, r *http.Request) {
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{
 		"refund":  tx,
 		"message": "Refund processed successfully and outbox audit event emitted",
+	})
+}
+
+func (h *Handler) AdminUpdateProduct(w http.ResponseWriter, r *http.Request) {
+	reqID := middleware.GetRequestID(r.Context())
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusMethodNotAllowed, apperror.CodeMethodNotAllowed, "Method not allowed"))
+		return
+	}
+
+	authUser, ok := identity.GetAuthUser(r.Context())
+	if !ok || authUser == nil || authUser.Role != identity.RoleSuperAdmin {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Super Admin privilege required to modify catalog pricing"))
+		return
+	}
+
+	planCode := strings.TrimPrefix(r.URL.Path, "/api/v1/admin/billing/products/")
+	planCode = strings.Trim(planCode, "/")
+	if planCode == "" {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Plan code missing from path"))
+		return
+	}
+
+	var req struct {
+		PriceCents int64  `json:"price_cents"`
+		Currency   string `json:"currency"`
+		IsActive   *bool  `json:"is_active,omitempty"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 16*1024)).Decode(&req); err != nil {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "Malformed request body"))
+		return
+	}
+
+	updated, err := h.svc.UpdateProduct(r.Context(), planCode, req.PriceCents, req.Currency, req.IsActive)
+	if err != nil {
+		if errors.Is(err, ErrProductNotFound) {
+			apperror.WriteError(w, reqID, apperror.New(http.StatusNotFound, apperror.CodeNotFound, "Product not found in catalog"))
+			return
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
+		return
+	}
+
+	if h.audit != nil {
+		_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.pricing_updated", "BILLING_PRODUCT", planCode, "SUCCESS", map[string]any{
+			"new_price_cents": req.PriceCents,
+			"currency":        req.Currency,
+			"is_active":       updated.IsActive,
+		})
+	}
+
+	apperror.WriteJSON(w, http.StatusOK, map[string]any{
+		"product": updated,
+		"message": "Product catalog pricing updated successfully. Changes to store products must also be configured in Google Play Console and Apple App Store Connect.",
 	})
 }

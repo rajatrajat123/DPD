@@ -20,7 +20,7 @@ export default async function AdminLayout({
 
   return (
     <StepUpProvider>
-      <div className="min-h-screen bg-[#0B0D12] text-[#E8E9EC] flex">
+      <div id="admin-console-root" className="min-h-screen bg-[#0B0D12] text-[#E8E9EC] flex">
         <AdminNav
           userEmail={session.email}
           userRole={session.role || 'SUPER_ADMIN'}

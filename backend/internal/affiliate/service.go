@@ -323,12 +323,18 @@ func (s *Service) ProcessVerifiedTransaction(
 	}
 
 	attr, err := s.repo.GetAttributionByReferredUser(ctx, referredUserID)
-	if err != nil || attr == nil {
+	if err != nil {
+		return nil, fmt.Errorf("failed to get attribution: %w", err)
+	}
+	if attr == nil {
 		return nil, nil // Organic non-referred customer
 	}
 
 	aff, err := s.repo.GetAffiliateByID(ctx, attr.AffiliateID)
-	if err != nil || aff == nil || aff.Status != StatusActive {
+	if err != nil {
+		return nil, fmt.Errorf("failed to get affiliate: %w", err)
+	}
+	if aff == nil || aff.Status != StatusActive {
 		return nil, nil // Partner not active
 	}
 
@@ -456,7 +462,10 @@ func (s *Service) ProcessVerifiedTransaction(
 // ProcessTransactionRefund claws back commissions when a billing transaction is refunded.
 func (s *Service) ProcessTransactionRefund(ctx context.Context, txID string) error {
 	comm, err := s.repo.GetCommissionByTransactionID(ctx, txID)
-	if err != nil || comm == nil {
+	if err != nil {
+		return fmt.Errorf("failed to get commission for refund: %w", err)
+	}
+	if comm == nil {
 		return nil // No commission associated with this refunded charge
 	}
 	if comm.Status == CommissionClawedBack {
@@ -824,17 +833,25 @@ func (s *Service) HandleBillingEvent(ctx context.Context, env events.Envelope) e
 		if cycle <= 0 {
 			cycle = 1
 		}
-		_, err := s.ProcessVerifiedTransaction(ctx, payload.TransactionID, payload.UserID, netAmount, payload.Currency, cycle)
+		txID := payload.TransactionID
+		if txID == "" {
+			txID = env.AggregateID
+		}
+		_, err := s.ProcessVerifiedTransaction(ctx, txID, payload.UserID, netAmount, payload.Currency, cycle)
 		return err
 
-	case "billing.transaction_refunded.v1":
+	case "billing.transaction_refunded.v1", "billing.refund_issued.v1":
 		var payload struct {
 			TransactionID string `json:"transaction_id"`
 		}
 		if err := json.Unmarshal(env.Payload, &payload); err != nil {
-			return fmt.Errorf("failed to decode billing.transaction_refunded.v1 payload: %w", err)
+			return fmt.Errorf("failed to decode billing refund payload: %w", err)
 		}
-		return s.ProcessTransactionRefund(ctx, payload.TransactionID)
+		txID := payload.TransactionID
+		if txID == "" {
+			txID = env.AggregateID
+		}
+		return s.ProcessTransactionRefund(ctx, txID)
 	}
 
 	return nil

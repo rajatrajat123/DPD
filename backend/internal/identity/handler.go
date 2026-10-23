@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/auradating/platform/backend/internal/apperror"
 	"github.com/auradating/platform/backend/internal/middleware"
@@ -71,10 +72,26 @@ func RequireAuth(jwtSecret string) func(http.Handler) http.Handler {
 	}
 }
 
+type AuditLogger interface {
+	RecordAudit(ctx context.Context, actorUserID *string, actorRole, action, targetType, targetID, outcome string, metadata map[string]any) error
+}
+
+type SubscriptionLookupFunc func(ctx context.Context, userID string) (tier, status string)
+
 type Handler struct {
 	svc           *Service
 	maxBodyBytes  int64
 	expoGoURLBase string
+	audit         AuditLogger
+	subLookup     SubscriptionLookupFunc
+}
+
+func (h *Handler) SetAuditLogger(audit AuditLogger) {
+	h.audit = audit
+}
+
+func (h *Handler) SetSubscriptionLookup(fn SubscriptionLookupFunc) {
+	h.subLookup = fn
 }
 
 func NewHandler(svc *Service, maxBodyBytes int64) *Handler {
@@ -817,6 +834,22 @@ func errorsIs(err, target error) bool {
 	return strings.Contains(err.Error(), target.Error())
 }
 
+type AdminUserResponseItem struct {
+	ID                 string     `json:"id"`
+	Email              string     `json:"email"`
+	PhoneE164          *string    `json:"phone_e164,omitempty"`
+	Status             UserStatus `json:"status"`
+	Role               UserRole   `json:"role"`
+	EmailVerifiedAt    *time.Time `json:"email_verified_at,omitempty"`
+	PhoneVerifiedAt    *time.Time `json:"phone_verified_at,omitempty"`
+	LastActiveAt       *time.Time `json:"last_active_at,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+	LoginMethod        string     `json:"login_method"`
+	SubscriptionTier   string     `json:"subscription_tier"`
+	SubscriptionStatus string     `json:"subscription_status"`
+}
+
 func (h *Handler) AdminUsers(w http.ResponseWriter, r *http.Request) {
 	reqID := middleware.GetRequestID(r.Context())
 	if r.Method != http.MethodGet {
@@ -846,8 +879,52 @@ func (h *Handler) AdminUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	adminUsers := make([]AdminUserResponseItem, 0, len(users))
+	for _, u := range users {
+		item := AdminUserResponseItem{
+			ID:                 u.ID,
+			Email:              u.Email,
+			PhoneE164:          u.PhoneE164,
+			Status:             u.Status,
+			Role:               u.Role,
+			EmailVerifiedAt:    u.EmailVerifiedAt,
+			PhoneVerifiedAt:    u.PhoneVerifiedAt,
+			LastActiveAt:       u.LastActiveAt,
+			CreatedAt:          u.CreatedAt,
+			UpdatedAt:          u.UpdatedAt,
+			LoginMethod:        "EMAIL_PASSWORD",
+			SubscriptionTier:   "FREE",
+			SubscriptionStatus: "INACTIVE",
+		}
+
+		// Determine login method safely without exposing secrets
+		oauths, _ := h.svc.repo.ListOAuthIdentitiesForUser(r.Context(), u.ID)
+		var methods []string
+		if u.PasswordHash != "" {
+			methods = append(methods, "EMAIL_PASSWORD")
+		}
+		for _, oa := range oauths {
+			methods = append(methods, strings.ToUpper(oa.Provider))
+		}
+		if len(methods) > 0 {
+			item.LoginMethod = strings.Join(methods, ", ")
+		}
+
+		if h.subLookup != nil {
+			tier, subStatus := h.subLookup(r.Context(), u.ID)
+			if tier != "" {
+				item.SubscriptionTier = tier
+			}
+			if subStatus != "" {
+				item.SubscriptionStatus = subStatus
+			}
+		}
+
+		adminUsers = append(adminUsers, item)
+	}
+
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{
-		"users":  users,
+		"users":  adminUsers,
 		"total":  total,
 		"limit":  limit,
 		"offset": offset,
@@ -868,11 +945,22 @@ func (h *Handler) AdminUpdateRole(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) < 4 {
+	var targetUserID string
+	for i, part := range pathParts {
+		if part == "users" && i+1 < len(pathParts) {
+			targetUserID = pathParts[i+1]
+			break
+		}
+	}
+	if targetUserID == "" || targetUserID == "role" {
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeInvalidRequest, "User ID missing from URL path"))
 		return
 	}
-	targetUserID := pathParts[3]
+
+	if authUser.Role != RoleSuperAdmin {
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, apperror.CodeForbidden, "Super Admin privilege required to modify user roles"))
+		return
+	}
 
 	var req struct {
 		Role string `json:"role"`
@@ -882,9 +970,26 @@ func (h *Handler) AdminUpdateRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if authUser.ID == targetUserID {
+		if h.audit != nil {
+			_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.role_update_rejected", "USER", targetUserID, "FAILURE", map[string]any{
+				"reason":         "self_action_prohibited",
+				"attempted_role": req.Role,
+			})
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", "self-action prohibited: administrators cannot modify their own administrative roles"))
+		return
+	}
+
 	err := h.svc.UpdateUserRole(r.Context(), authUser.ID, targetUserID, UserRole(req.Role))
 	if err != nil {
 		if strings.Contains(err.Error(), "self-action prohibited") {
+			if h.audit != nil {
+				_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.role_update_rejected", "USER", targetUserID, "FAILURE", map[string]any{
+					"reason":         "self_action_prohibited",
+					"attempted_role": req.Role,
+				})
+			}
 			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", err.Error()))
 			return
 		}
@@ -894,6 +999,12 @@ func (h *Handler) AdminUpdateRole(w http.ResponseWriter, r *http.Request) {
 		}
 		apperror.WriteError(w, reqID, apperror.New(http.StatusBadRequest, apperror.CodeValidationFailed, err.Error()))
 		return
+	}
+
+	if h.audit != nil {
+		_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.role_updated", "USER", targetUserID, "SUCCESS", map[string]any{
+			"new_role": req.Role,
+		})
 	}
 
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{
@@ -924,13 +1035,32 @@ func (h *Handler) AdminSupportUnlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if authUser.ID == req.UserID {
+		if h.audit != nil {
+			_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.unlock_rejected", "USER", req.UserID, "FAILURE", map[string]any{
+				"reason": "self_action_prohibited",
+			})
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", "self-action prohibited: administrators cannot unlock their own accounts"))
+		return
+	}
+
 	if err := h.svc.UnlockAccount(r.Context(), authUser.ID, req.UserID); err != nil {
 		if strings.Contains(err.Error(), "self-action prohibited") {
+			if h.audit != nil {
+				_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.unlock_rejected", "USER", req.UserID, "FAILURE", map[string]any{
+					"reason": "self_action_prohibited",
+				})
+			}
 			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", err.Error()))
 			return
 		}
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
 		return
+	}
+
+	if h.audit != nil {
+		_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.account_unlocked", "USER", req.UserID, "SUCCESS", nil)
 	}
 
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{
@@ -960,14 +1090,33 @@ func (h *Handler) AdminSupportResetPassword(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	if authUser.ID == req.UserID {
+		if h.audit != nil {
+			_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.reset_password_rejected", "USER", req.UserID, "FAILURE", map[string]any{
+				"reason": "self_action_prohibited",
+			})
+		}
+		apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", "self-action prohibited: administrators cannot trigger administrative password resets on their own accounts"))
+		return
+	}
+
 	reset, err := h.svc.AdminResetPassword(r.Context(), authUser.ID, req.UserID)
 	if err != nil {
 		if strings.Contains(err.Error(), "self-action prohibited") {
+			if h.audit != nil {
+				_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.reset_password_rejected", "USER", req.UserID, "FAILURE", map[string]any{
+					"reason": "self_action_prohibited",
+				})
+			}
 			apperror.WriteError(w, reqID, apperror.New(http.StatusForbidden, "SELF_ACTION_PROHIBITED", err.Error()))
 			return
 		}
 		apperror.WriteError(w, reqID, apperror.New(http.StatusInternalServerError, apperror.CodeInternalError, err.Error()))
 		return
+	}
+
+	if h.audit != nil {
+		_ = h.audit.RecordAudit(r.Context(), &authUser.ID, string(authUser.Role), "admin.password_reset_triggered", "USER", req.UserID, "SUCCESS", nil)
 	}
 
 	apperror.WriteJSON(w, http.StatusOK, map[string]any{

@@ -285,7 +285,7 @@ func (m *MemoryRepository) ListCampaigns(ctx context.Context, affiliateID string
 
 	var list []AffiliateCampaign
 	for _, c := range m.campaigns {
-		if c.AffiliateID == affiliateID {
+		if affiliateID == "" || c.AffiliateID == affiliateID {
 			list = append(list, *c)
 		}
 	}
@@ -376,7 +376,7 @@ func (m *MemoryRepository) ListAttributionsByAffiliate(ctx context.Context, affi
 
 	var list []ReferralAttribution
 	for _, a := range m.attributions {
-		if a.AffiliateID == affiliateID {
+		if affiliateID == "" || a.AffiliateID == affiliateID {
 			list = append(list, *a)
 		}
 	}
@@ -467,7 +467,7 @@ func (m *MemoryRepository) ListCommissionsByAffiliate(ctx context.Context, affil
 
 	var list []AffiliateCommission
 	for _, c := range m.commissions {
-		if c.AffiliateID == affiliateID {
+		if affiliateID == "" || c.AffiliateID == affiliateID {
 			list = append(list, *c)
 		}
 	}
@@ -947,7 +947,7 @@ func (p *PostgresRepository) ListCampaigns(ctx context.Context, affiliateID stri
 	query := `
 		SELECT id, affiliate_id, campaign_slug, name, destination_url, clicks_count, conversions_count, is_active, created_at, updated_at
 		FROM affiliate_campaigns
-		WHERE affiliate_id = $1
+		WHERE ($1 = '' OR affiliate_id = $1)
 		ORDER BY created_at DESC
 	`
 	rows, err := p.pool.Query(ctx, query, affiliateID)
@@ -1050,7 +1050,7 @@ func (p *PostgresRepository) ListAttributionsByAffiliate(ctx context.Context, af
 	query := `
 		SELECT id, referred_user_id, affiliate_id, partner_code, sub_campaign, attributed_at
 		FROM referral_attributions
-		WHERE affiliate_id = $1
+		WHERE ($1 = '' OR affiliate_id = $1)
 		ORDER BY attributed_at DESC
 		LIMIT $2
 	`
@@ -1198,7 +1198,7 @@ func (p *PostgresRepository) ListCommissionsByAffiliate(ctx context.Context, aff
 		SELECT id, affiliate_id, transaction_id, referred_user_id, rule_snapshot, gross_amount_cents,
 		       commission_amount_cents, currency, billing_cycle_index, status, matures_at, journal_id, created_at, updated_at
 		FROM affiliate_commissions
-		WHERE affiliate_id = $1
+		WHERE ($1 = '' OR affiliate_id = $1)
 		ORDER BY created_at DESC
 		LIMIT $2
 	`

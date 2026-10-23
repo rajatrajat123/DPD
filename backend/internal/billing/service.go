@@ -49,6 +49,27 @@ func (s *Service) GetProductByPlanCode(ctx context.Context, planCode string) (*P
 	return s.repo.GetProductByPlanCode(ctx, planCode)
 }
 
+func (s *Service) UpdateProduct(ctx context.Context, planCode string, priceCents int64, currency string, isActive *bool) (*Product, error) {
+	if priceCents < 0 {
+		return nil, errors.New("price_cents must be non-negative")
+	}
+	prod, err := s.repo.GetProductByPlanCode(ctx, planCode)
+	if err != nil {
+		return nil, err
+	}
+	prod.PriceCents = priceCents
+	if strings.TrimSpace(currency) != "" {
+		prod.Currency = strings.ToUpper(strings.TrimSpace(currency))
+	}
+	if isActive != nil {
+		prod.IsActive = *isActive
+	}
+	if err := s.repo.UpdateProduct(ctx, *prod); err != nil {
+		return nil, err
+	}
+	return prod, nil
+}
+
 func (s *Service) CreateCheckout(ctx context.Context, userID, userEmail string, req CheckoutRequest) (*CheckoutSession, error) {
 	product, err := s.repo.GetProductByPlanCode(ctx, req.PlanCode)
 	if err != nil {
@@ -620,6 +641,14 @@ func (s *Service) AdminRefund(ctx context.Context, actorID string, txID string, 
 	})
 	if err == nil {
 		_ = s.repo.PublishOutboxEvent(ctx, env)
+	}
+
+	refundTxEnv, err := events.NewEnvelope("billing_transaction", txID, "billing.transaction_refunded.v1", "", 1, map[string]any{
+		"transaction_id": txID,
+		"refunded_cents": tx.GrossAmountCents,
+	})
+	if err == nil {
+		_ = s.repo.PublishOutboxEvent(ctx, refundTxEnv)
 	}
 
 	return tx, nil

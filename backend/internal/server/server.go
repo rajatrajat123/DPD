@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/auradating/platform/backend/internal/affiliate"
@@ -20,6 +21,7 @@ import (
 	"github.com/auradating/platform/backend/internal/configmgr"
 	"github.com/auradating/platform/backend/internal/database"
 	"github.com/auradating/platform/backend/internal/discovery"
+	"github.com/auradating/platform/backend/internal/events"
 	"github.com/auradating/platform/backend/internal/health"
 	"github.com/auradating/platform/backend/internal/identity"
 	"github.com/auradating/platform/backend/internal/media"
@@ -40,6 +42,7 @@ type Server struct {
 	identSvc     *identity.Service
 	safetyRepo   safety.Repository
 	billingRepo  billing.Repository
+	affRepo      affiliate.Repository
 	mediaSvc     *media.Service
 	discoSvc     *discovery.Service
 	chatSvc      *chat.Service
@@ -56,6 +59,18 @@ type Server struct {
 // New constructs a configured HTTP Server with observability middleware, health probes,
 // migration diagnostics, Identity/Profile, Media, and Discovery/Matching endpoints.
 func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.DependencyProbe, customRepo ...identity.Repository) *Server {
+	return NewWithCustomRepos(cfg, logger, pgProbe, redisProbe, customRepo, nil, nil)
+}
+
+// NewWithCustomRepos constructs a Server with optional custom repositories, allowing cross-restart durability testing.
+func NewWithCustomRepos(
+	cfg *config.Config,
+	logger *slog.Logger,
+	pgProbe, redisProbe health.DependencyProbe,
+	customRepo []identity.Repository,
+	customBillingRepo billing.Repository,
+	customAffRepo affiliate.Repository,
+) *Server {
 	mux := http.NewServeMux()
 
 	healthHandler := health.NewHandler(
@@ -182,6 +197,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	}
 	identHandler := identity.NewHandler(identSvc, cfg.MaxRequestBodyBytes)
 	identHandler.SetExpoGoURLBase(cfg.ExpoGoURLBase)
+	auditAdapter := &serverAuditLoggerAdapter{repo: safetyRepo}
+	identHandler.SetAuditLogger(auditAdapter)
 
 	authMw := identity.RequireAuth(cfg.JWTSigningSecret)
 	activeMw := safety.RequireActiveAccount(identityRepo)
@@ -448,12 +465,23 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	mux.Handle("/api/v1/message-requests/", communityMw(http.HandlerFunc(chatHandler.HandleMessageRequest)))
 
 	// Billing, Subscriptions, Consumables & Boost Entitlements
-	var billingRepo billing.Repository
-	if usePostgres {
-		billingRepo = billing.NewPostgresRepository(pg.Pool)
+	var baseBillingRepo billing.Repository
+	if customBillingRepo != nil {
+		if dec, ok := customBillingRepo.(*affiliateBillingOutboxDecorator); ok {
+			baseBillingRepo = dec.Repository
+		} else {
+			baseBillingRepo = customBillingRepo
+		}
+	} else if usePostgres {
+		baseBillingRepo = billing.NewPostgresRepository(pg.Pool)
 	} else {
-		billingRepo = billing.NewMemoryRepository()
+		baseBillingRepo = billing.NewMemoryRepository()
 	}
+	billingOutboxDec := &affiliateBillingOutboxDecorator{
+		Repository: baseBillingRepo,
+		logger:     logger,
+	}
+	billingRepo := billingOutboxDec
 
 	stripeAdapter := billing.NewStripeAdapter(cfg.StripeSecretKey, cfg.StripeWebhookSecret)
 	appleAdapter := billing.NewAppleAppStoreAdapterWithConfig(billing.AppleConfig{
@@ -470,6 +498,23 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 
 	billingSvc := billing.NewService(billingRepo, providerRegistry, logger)
 	billingHandler := billing.NewHandler(billingSvc, logger)
+	billingHandler.SetAuditLogger(auditAdapter)
+
+	identHandler.SetSubscriptionLookup(func(ctx context.Context, userID string) (string, string) {
+		status, err := billingSvc.GetSubscriptionStatus(ctx, userID)
+		if err != nil || status == nil {
+			return "FREE", "INACTIVE"
+		}
+		tier := string(status.Tier)
+		if tier == "" {
+			tier = "FREE"
+		}
+		subStatus := "FREE"
+		if status.HasActiveSubscription {
+			subStatus = "ACTIVE"
+		}
+		return tier, subStatus
+	})
 
 	safetySvc.SetPassportEntitlementChecker(billingSvc)
 	discoSvc.SetSuperLikeCreditManager(billingSvc)
@@ -501,7 +546,9 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 
 	// Affiliate Marketing, Commission Engine & Double-Entry Ledger
 	var affRepo affiliate.Repository
-	if usePostgres {
+	if customAffRepo != nil {
+		affRepo = customAffRepo
+	} else if usePostgres {
 		affRepo = affiliate.NewPostgresRepository(pg.Pool)
 	} else {
 		affRepo = affiliate.NewMemoryRepository()
@@ -512,6 +559,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	payoutRegistry := affiliate.NewPayoutRegistry(stripePayoutAdapter, cryptoPayoutAdapter)
 
 	affSvc := affiliate.NewService(affRepo, payoutRegistry, logger)
+	billingOutboxDec.SetAffiliateService(affSvc)
 	affHandler := affiliate.NewHandler(affSvc, logger)
 	affHandler.SetStepUpVerifier(stepUpVerifier)
 
@@ -549,6 +597,9 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 
 	// Admin Affiliate & Ledger Endpoints (RBAC protected)
 	mux.Handle("/api/v1/admin/affiliates", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminListAffiliates))))
+	mux.Handle("/api/v1/admin/affiliates/campaigns", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminCampaigns))))
+	mux.Handle("/api/v1/admin/affiliates/conversions", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminConversions))))
+	mux.Handle("/api/v1/admin/affiliates/commissions", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminCommissions))))
 	mux.Handle("/api/v1/admin/affiliates/", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminUpdateAffiliateStatus))))
 	mux.Handle("/api/v1/admin/commission-rules", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(affHandler.AdminCommissionRules))))
 	mux.Handle("/api/v1/admin/payouts", authMw(safety.RequirePermission(safety.PermFinanceApprove, false)(http.HandlerFunc(affHandler.AdminPayouts))))
@@ -604,6 +655,8 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	// Admin Billing & Financial Ledger (RBAC protected)
 	mux.Handle("/api/v1/admin/billing/subscriptions", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(billingHandler.AdminSubscriptions))))
 	mux.Handle("/api/v1/admin/billing/transactions", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(billingHandler.AdminTransactions))))
+	mux.Handle("/api/v1/admin/billing/plans", authMw(safety.RequirePermission(safety.PermFinanceRead, false)(http.HandlerFunc(billingHandler.Plans))))
+	mux.Handle("/api/v1/admin/billing/products/", authMw(safety.RequirePermission(safety.PermSuperAdmin, true, stepUpVerifier)(http.HandlerFunc(billingHandler.AdminUpdateProduct))))
 	mux.Handle("/api/v1/admin/billing/refund", authMw(safety.RequirePermission(safety.PermFinanceApprove, true, stepUpVerifier)(http.HandlerFunc(billingHandler.AdminRefund))))
 
 	// Admin User Management & Customer Support (RBAC protected)
@@ -621,6 +674,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 	}
 	configSvc := configmgr.NewService(configRepo)
 	configHandler := configmgr.NewHandler(configSvc)
+	configHandler.SetAuditLogger(auditAdapter)
 
 	mux.Handle("/api/v1/admin/config", authMw(safety.RequirePermission(safety.PermSuperAdmin, false)(http.HandlerFunc(configHandler.HandleAdminConfig))))
 	mux.Handle("/api/v1/admin/config/", authMw(safety.RequirePermission(safety.PermSuperAdmin, false)(http.HandlerFunc(configHandler.HandleAdminConfig))))
@@ -684,6 +738,7 @@ func New(cfg *config.Config, logger *slog.Logger, pgProbe, redisProbe health.Dep
 		identSvc:     identSvc,
 		safetyRepo:   safetyRepo,
 		billingRepo:  billingRepo,
+		affRepo:      affRepo,
 		mediaSvc:     mediaSvc,
 		discoSvc:     discoSvc,
 		chatSvc:      chatSvc,
@@ -761,6 +816,35 @@ func (s *Server) BillingService() *billing.Service {
 // AffiliateService returns the affiliate service instance for lifecycle management.
 func (s *Server) AffiliateService() *affiliate.Service {
 	return s.affSvc
+}
+
+// AffiliateRepository returns the configured affiliate repository.
+func (s *Server) AffiliateRepository() affiliate.Repository {
+	return s.affRepo
+}
+
+// RetryPendingAffiliateBillingEvents re-attempts processing of any affiliate billing events that failed initial dispatch.
+func (s *Server) RetryPendingAffiliateBillingEvents(ctx context.Context) (int, error) {
+	if dec, ok := s.billingRepo.(*affiliateBillingOutboxDecorator); ok {
+		return dec.RetryPendingEvents(ctx)
+	}
+	return 0, nil
+}
+
+// PendingAffiliateBillingEventsCount returns the number of currently queued/failed affiliate billing events awaiting retry.
+func (s *Server) PendingAffiliateBillingEventsCount() int {
+	if dec, ok := s.billingRepo.(*affiliateBillingOutboxDecorator); ok {
+		return dec.PendingCount()
+	}
+	return 0
+}
+
+// RecoverPersistedOutboxEvents scans the durable billing outbox and processes any unhandled affiliate billing events.
+func (s *Server) RecoverPersistedOutboxEvents(ctx context.Context) (int, error) {
+	if dec, ok := s.billingRepo.(*affiliateBillingOutboxDecorator); ok {
+		return dec.RecoverPersistedOutbox(ctx)
+	}
+	return 0, nil
 }
 
 // SafetyService returns the safety service instance for lifecycle management.
@@ -863,4 +947,180 @@ func (a *subscriptionCheckerAdapter) GetPaidSubscription(ctx context.Context, us
 		tier = billing.TierBlack
 	}
 	return true, tier, nil
+}
+
+type affiliateBillingOutboxDecorator struct {
+	billing.Repository
+	mu           sync.RWMutex
+	affSvc       *affiliate.Service
+	logger       *slog.Logger
+	failedEvents []events.Envelope
+}
+
+func (d *affiliateBillingOutboxDecorator) SetAffiliateService(affSvc *affiliate.Service) {
+	d.mu.Lock()
+	d.affSvc = affSvc
+	d.mu.Unlock()
+
+	_, _ = d.RetryPendingEvents(context.Background())
+	_, _ = d.RecoverPersistedOutbox(context.Background())
+}
+
+func (d *affiliateBillingOutboxDecorator) PendingCount() int {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return len(d.failedEvents)
+}
+
+func (d *affiliateBillingOutboxDecorator) PublishOutboxEvent(ctx context.Context, event events.Envelope) error {
+	if err := d.Repository.PublishOutboxEvent(ctx, event); err != nil {
+		return err
+	}
+
+	switch event.EventType {
+	case "billing.transaction_verified.v1", "billing.transaction_refunded.v1", "billing.refund_issued.v1":
+		d.mu.RLock()
+		affSvc := d.affSvc
+		d.mu.RUnlock()
+
+		var dispatchErr error
+		if affSvc == nil {
+			dispatchErr = errors.New("affiliate service unavailable")
+		} else {
+			dispatchErr = d.dispatchWithRetry(ctx, affSvc, event)
+		}
+
+		if dispatchErr != nil {
+			d.mu.Lock()
+			d.failedEvents = append(d.failedEvents, event)
+			d.mu.Unlock()
+			if d.logger != nil {
+				d.logger.Error("affiliate_billing_event_dispatch_failed_queued_for_retry",
+					slog.String("event_type", event.EventType),
+					slog.String("event_id", event.ID),
+					slog.String("error", dispatchErr.Error()),
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func (d *affiliateBillingOutboxDecorator) dispatchWithRetry(ctx context.Context, affSvc *affiliate.Service, event events.Envelope) error {
+	var lastErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		lastErr = affSvc.HandleBillingEvent(ctx, event)
+		if lastErr == nil {
+			return nil
+		}
+		if attempt < 3 {
+			delay := events.NextRetryDelay(attempt, 5*time.Millisecond, 25*time.Millisecond)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+	}
+	return lastErr
+}
+
+func (d *affiliateBillingOutboxDecorator) RetryPendingEvents(ctx context.Context) (int, error) {
+	d.mu.Lock()
+	affSvc := d.affSvc
+	if affSvc == nil {
+		d.mu.Unlock()
+		return 0, errors.New("affiliate service unavailable")
+	}
+	if len(d.failedEvents) == 0 {
+		d.mu.Unlock()
+		return 0, nil
+	}
+	pending := make([]events.Envelope, len(d.failedEvents))
+	copy(pending, d.failedEvents)
+	d.failedEvents = nil
+	d.mu.Unlock()
+
+	var unrecovered []events.Envelope
+	recovered := 0
+	for _, ev := range pending {
+		if err := affSvc.HandleBillingEvent(ctx, ev); err != nil {
+			unrecovered = append(unrecovered, ev)
+			if d.logger != nil {
+				d.logger.Error("affiliate_billing_event_retry_failed",
+					slog.String("event_type", ev.EventType),
+					slog.String("event_id", ev.ID),
+					slog.String("error", err.Error()),
+				)
+			}
+		} else {
+			recovered++
+		}
+	}
+
+	if len(unrecovered) > 0 {
+		d.mu.Lock()
+		d.failedEvents = append(d.failedEvents, unrecovered...)
+		d.mu.Unlock()
+	}
+
+	return recovered, nil
+}
+
+func (d *affiliateBillingOutboxDecorator) RecoverPersistedOutbox(ctx context.Context) (int, error) {
+	d.mu.RLock()
+	affSvc := d.affSvc
+	d.mu.RUnlock()
+	if affSvc == nil {
+		return 0, errors.New("affiliate service unavailable")
+	}
+
+	outbox, err := d.Repository.GetOutboxEvents(ctx)
+	if err != nil {
+		if d.logger != nil {
+			d.logger.Error("failed_to_read_persisted_outbox_for_recovery", slog.String("error", err.Error()))
+		}
+		return 0, err
+	}
+
+	recovered := 0
+	for _, env := range outbox {
+		switch env.EventType {
+		case "billing.transaction_verified.v1", "billing.transaction_refunded.v1", "billing.refund_issued.v1":
+			if err := affSvc.HandleBillingEvent(ctx, env); err != nil {
+				if d.logger != nil {
+					d.logger.Error("persisted_outbox_recovery_dispatch_failed",
+						slog.String("event_type", env.EventType),
+						slog.String("event_id", env.ID),
+						slog.String("error", err.Error()),
+					)
+				}
+			} else {
+				recovered++
+			}
+		}
+	}
+	return recovered, nil
+}
+
+type serverAuditLoggerAdapter struct {
+	repo safety.Repository
+}
+
+func (a *serverAuditLoggerAdapter) RecordAudit(ctx context.Context, actorUserID *string, actorRole, action, targetType, targetID, outcome string, metadata map[string]any) error {
+	if a.repo == nil {
+		return nil
+	}
+	return a.repo.InsertAuditLog(ctx, &safety.SecurityAuditLog{
+		ActorUserID: actorUserID,
+		ActorRole:   actorRole,
+		Action:      action,
+		TargetType:  targetType,
+		TargetID:    targetID,
+		Outcome:     safety.AuditOutcome(outcome),
+		Metadata:    safety.SanitizeAuditMetadata(metadata),
+	})
 }
